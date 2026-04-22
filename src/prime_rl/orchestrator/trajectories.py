@@ -265,6 +265,23 @@ def _tokenize_step_from_messages(
     }
 
 
+def _sort_dict_keys_recursively(obj: Any) -> Any:
+    """Recursively sort all dict keys alphabetically.
+
+    The OpenAI-compatible inference server serializes tools with alphabetically
+    sorted keys (via Pydantic normalization), so vLLM's `apply_chat_template`
+    renders e.g. `"parameters": {"additionalProperties": ..., "properties": ...}`.
+    Re-rendering with Python dict insertion order gives `"properties": ...,
+    "additionalProperties": ...` instead, which breaks the role-mask length check.
+    Sorting here matches vLLM's serialization token-for-token.
+    """
+    if isinstance(obj, dict):
+        return {k: _sort_dict_keys_recursively(obj[k]) for k in sorted(obj.keys())}
+    if isinstance(obj, list):
+        return [_sort_dict_keys_recursively(v) for v in obj]
+    return obj
+
+
 def _convert_tools_to_oai_format(tool_defs: list) -> list[dict[str, Any]] | None:
     """Convert verifiers Tool objects or dicts to OAI function-calling format."""
     if not tool_defs:
@@ -276,15 +293,17 @@ def _convert_tools_to_oai_format(tool_defs: list) -> list[dict[str, Any]] | None
         return getattr(tool, key, None)
 
     return [
-        {
-            "type": "function",
-            "function": {
-                "name": _get(tool, "name"),
-                "description": _get(tool, "description"),
-                "parameters": _get(tool, "parameters"),
-                **({} if _get(tool, "strict") is None else {"strict": _get(tool, "strict")}),
-            },
-        }
+        _sort_dict_keys_recursively(
+            {
+                "type": "function",
+                "function": {
+                    "name": _get(tool, "name"),
+                    "description": _get(tool, "description"),
+                    "parameters": _get(tool, "parameters"),
+                    **({} if _get(tool, "strict") is None else {"strict": _get(tool, "strict")}),
+                },
+            }
+        )
         for tool in tool_defs
     ]
 
