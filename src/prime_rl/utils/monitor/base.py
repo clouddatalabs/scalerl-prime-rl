@@ -51,7 +51,7 @@ class Monitor(ABC):
         pass
 
     @abstractmethod
-    def save_final_summary(self, filename: str = "final_summary.json") -> None:
+    def save_final_summary(self, filename: str = "final_summary.json", early_stopped: bool = False) -> None:
         pass
 
     @abstractmethod
@@ -81,7 +81,7 @@ class NoOpMonitor(Monitor):
     def log_final_samples(self) -> None:
         pass
 
-    def save_final_summary(self, filename: str = "final_summary.json") -> None:
+    def save_final_summary(self, filename: str = "final_summary.json", early_stopped: bool = False) -> None:
         pass
 
     def log_distributions(self, distributions: dict[str, list[float]], step: int) -> None:
