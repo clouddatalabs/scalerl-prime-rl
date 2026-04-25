@@ -242,8 +242,18 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
         "is_masked_low": _safe_mean(is_masked_low, loss_mask),
         "is_masked_high": _safe_mean(is_masked_high, loss_mask),
     }
+    # `mismatch_kl = importance_ratio - log_importance_ratio - 1` is computed
+    # before the finiteness gates fire, so NaN/Inf positions can leak into the
+    # `mismatch_kl` metrics even though the loss itself stays finite via
+    # `safe_*` masking. Gate the metrics by `finite_log_ratio` so wandb /
+    # Prometheus dashboards keep showing the actual divergence signal rather
+    # than going dark with NaN. Doesn't affect training — the loss-side
+    # `safe_log_importance_ratio_sq` mask already covers the gradient path.
+    metrics["mismatch_kl"] = _safe_mean(mismatch_kl, loss_mask & finite_log_ratio)
+    metrics["masked_mismatch_kl"] = _safe_mean(mismatch_kl, loss_mask & is_masked & finite_log_ratio)
+    metrics["unmasked_mismatch_kl"] = _safe_mean(mismatch_kl, keep_mask & finite_log_ratio)
     if teacher_kl is not None:
-        metrics["teacher_kl"] = _safe_mean(teacher_kl, loss_mask)
+        metrics["teacher_kl"] = _safe_mean(teacher_kl, loss_mask & torch.isfinite(teacher_kl))
 
     return LossOutputs(loss=loss, metrics=metrics)
 
@@ -301,10 +311,19 @@ def cispo_loss_fn(inputs: LossInputs, loss_config: CISPOLossConfig) -> LossOutpu
     # NaN through (env contract violation, divide-by-zero in custom advantage
     # function), and without this gate a single NaN advantage NaNs the entire
     # batch's loss → NaN gradients propagate via FSDP all-reduce.
+    # Note: `finite_ratio = isfinite(truncated_ratio)` — but the clamp
+    # `clamp(importance_ratio, max=eps_max)` converts `+inf` to `eps_max`
+    # silently, so `+inf` on the raw ratio (e.g. trainer_lp=finite +
+    # inference_lp=-inf at a trainable position) flows through as
+    # `truncated_ratio = eps_max` and the position trains at the cap.
+    # Add `finite_inference_lp` to the safe_mask to cover the
+    # single-side `-inf` case the truncated_ratio finiteness check
+    # cannot see.
     finite_ratio = torch.isfinite(truncated_ratio)
     finite_lp = torch.isfinite(inputs.trainer_logprobs)
+    finite_inference_lp = torch.isfinite(inputs.inference_logprobs)
     finite_adv = torch.isfinite(advantages)
-    safe_mask = inputs.loss_mask & finite_ratio & finite_lp & finite_adv
+    safe_mask = inputs.loss_mask & finite_ratio & finite_lp & finite_inference_lp & finite_adv
     safe_trainer_logprobs = torch.where(
         safe_mask, inputs.trainer_logprobs, torch.zeros_like(inputs.trainer_logprobs)
     )
@@ -345,13 +364,24 @@ def cispo_loss_fn(inputs: LossInputs, loss_config: CISPOLossConfig) -> LossOutpu
 
 
 def sft_loss_fn(inputs: LossInputs) -> LossOutputs:
-    """SFT-style masked negative log-likelihood over trainable tokens."""
+    """SFT-style masked negative log-likelihood over trainable tokens.
+
+    Mirror the `torch.isfinite` defense applied in `default_loss_fn` and
+    `cispo_loss_fn`. Without this gate, a single `-inf` trainer logprob
+    at a `loss_mask=True` position (an upstream output-linear that emits
+    `-inf` for an "impossible" token, or any custom-loss schema change
+    that lets non-finite values reach the loss) produces
+    `-(-inf).sum() = +inf` then NaN gradients across the batch. Shipped
+    `selective_log_softmax` returns finite values for finite logits, so
+    this is a defense-in-depth gate symmetric with the other losses.
+    """
     trainer_logprobs = inputs.trainer_logprobs
     loss_mask = inputs.loss_mask
+    safe_mask = loss_mask & torch.isfinite(trainer_logprobs)
 
-    loss = -(trainer_logprobs[loss_mask]).sum()
+    loss = -(trainer_logprobs[safe_mask]).sum()
     metrics = {
-        "nll": _safe_mean(-trainer_logprobs, loss_mask),
+        "nll": _safe_mean(-trainer_logprobs, safe_mask),
     }
     return LossOutputs(loss=loss, metrics=metrics)
 
