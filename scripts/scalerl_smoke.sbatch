@@ -29,9 +29,13 @@ mkdir -p /mnt/shared/scalerl-prime-rl-outputs/smoke
 cd "$REPO_ROOT"
 [ -f .env ] && source .env
 
-# Use the venv we set up in this repo. uv sync --all-extras pulls the GPU stack.
+# Slurm sets a minimal PATH; uv lives in /usr/local/bin on this cluster.
+export PATH="/usr/local/bin:$PATH"
+
+# Use the venv we set up in this repo. The .venv was populated with `uv sync
+# --all-extras` outside slurm; we don't re-sync here to avoid network races
+# between concurrent jobs.
 source .venv/bin/activate
-uv sync --all-extras
 
 # Print effective config (helpful for postmortem) before launching.
 echo "=== effective ScaleRL config ==="
@@ -51,6 +55,8 @@ print(' max_async_level:         ', cfg.orchestrator.max_async_level)
 print(' strict_async_level:      ', cfg.orchestrator.strict_async_level)
 print(' max_off_policy_steps:    ', cfg.orchestrator.max_off_policy_steps)
 print(' allow_nccl_async_override:', cfg.orchestrator.experimental.allow_nccl_async_level_override)
+print(' attn:                    ', cfg.trainer.model.attn)
+print(' optim_dtype:             ', cfg.trainer.model.optimization_dtype)
 "
 echo "================================="
 
