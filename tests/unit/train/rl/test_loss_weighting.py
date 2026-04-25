@@ -40,7 +40,7 @@ def test_apply_prompt_average_sequence_weights_balances_prompts():
         _make_sample(example_id="B", completion_len=20),
         _make_sample(example_id="B", completion_len=20),
     ]
-    weights = apply_prompt_average_sequence_weights(rollouts)
+    weights = apply_prompt_average_sequence_weights(rollouts, seq_len=4096)
     assert weights is not None
     # Prompt A: total 40 tokens; weights = 10/40/2 = 0.125 and 30/40/2 = 0.375.
     # Prompt B: total 40 tokens; weights = 20/40/2 = 0.25 and 20/40/2 = 0.25.
@@ -53,7 +53,7 @@ def test_apply_prompt_average_sequence_weights_balances_prompts():
 
 def test_apply_prompt_average_sequence_weights_no_op_when_disabled():
     rollouts = [_make_sample(example_id="A", completion_len=5, prompt_average_loss=False)]
-    assert apply_prompt_average_sequence_weights(rollouts) is None
+    assert apply_prompt_average_sequence_weights(rollouts, seq_len=4096) is None
 
 
 def test_apply_prompt_average_sequence_weights_rejects_mixed_flags():
@@ -62,14 +62,54 @@ def test_apply_prompt_average_sequence_weights_rejects_mixed_flags():
         _make_sample(example_id="A", completion_len=5, prompt_average_loss=False),
     ]
     with pytest.raises(ValueError, match="set consistently"):
-        apply_prompt_average_sequence_weights(rollouts)
+        apply_prompt_average_sequence_weights(rollouts, seq_len=4096)
 
 
 def test_apply_prompt_average_sequence_weights_requires_example_id():
     sample = _make_sample(example_id="A", completion_len=5, prompt_average_loss=True)
     sample.example_id = None
     with pytest.raises(ValueError, match="example_id is required"):
-        apply_prompt_average_sequence_weights([sample])
+        apply_prompt_average_sequence_weights([sample], seq_len=4096)
+
+
+def test_apply_prompt_average_sequence_weights_excludes_non_trainable_completion_tokens():
+    """completion_mask=False tokens (e.g. orchestrator-injected prompt extensions) should
+    not contribute to the prompt-level weight — only trainable tokens enter the loss."""
+    sample = TrainingSample(
+        prompt_ids=[1, 2, 3],
+        prompt_mask=[True, True, True],
+        completion_ids=[10, 11, 12, 13, 14, 15],
+        # 4 of 6 completion tokens are trainable; 2 are interleaved tool-call prompt
+        # tokens with completion_mask=False.
+        completion_mask=[True, True, False, False, True, True],
+        completion_logprobs=[0.0] * 6,
+        completion_temperatures=[1.0] * 6,
+        advantage=1.0,
+        reward=0.0,
+        example_id="A",
+        prompt_average_loss=True,
+    )
+    sample2 = _make_sample(example_id="A", completion_len=4)  # 4 trainable tokens too
+    weights = apply_prompt_average_sequence_weights([sample, sample2], seq_len=4096)
+    # Both samples have 4 trainable tokens; prompt A total = 8; num_prompts = 1.
+    # Each weight = 4 / (8 * 1) = 0.5. Mass-on-loss-mask=False would give 6/(6+4)/1 ≠ 0.5.
+    assert weights == pytest.approx([0.5, 0.5])
+
+
+def test_apply_prompt_average_sequence_weights_excludes_truncated_tokens():
+    """seq_len truncation drops tail tokens — they must not count toward the weight."""
+    # prompt_len=3, completion_len=20. At seq_len=10 only 10 - 3 = 7 completion tokens
+    # survive prepare_sample's truncation.
+    sample = _make_sample(example_id="A", completion_len=20)
+    weights = apply_prompt_average_sequence_weights([sample], seq_len=10)
+    # 7 trainable tokens / (7 * 1 prompt) = 1.0
+    assert weights == pytest.approx([1.0])
+
+    # If prompt itself is at-or-over seq_len, no completion tokens are trainable; guard.
+    sample_no_completion = _make_sample(example_id="A", completion_len=5)
+    weights = apply_prompt_average_sequence_weights([sample_no_completion], seq_len=2)
+    # 0 trainable tokens for the only sample; total guarded to 1 → weight is 0.
+    assert weights == pytest.approx([0.0])
 
 
 def test_compute_loss_token_mode_default_unchanged():

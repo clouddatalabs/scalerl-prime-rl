@@ -209,14 +209,38 @@ def _pad_group_for_distribution(group: list[MicroBatch], num_train_workers: int)
     return group
 
 
-def apply_prompt_average_sequence_weights(rollouts: list[TrainingSample]) -> list[float] | None:
+def _trainable_completion_tokens(rollout: TrainingSample, seq_len: int) -> int:
+    """Count completion tokens that actually enter the loss after prepare_sample().
+
+    prepare_sample concatenates `prompt_ids + completion_ids` then truncates to
+    seq_len. The trainable mask within the completion is `completion_mask`, which
+    can be False for orchestrator-injected prompt-extension tokens (see
+    orchestrator/trajectories.py — tool-call prompts get completion_mask=False).
+
+    This function counts only the completion_mask=True tokens that survive the
+    seq_len truncation, matching what compute_loss will actually weight.
+    """
+    prompt_len = len(rollout.prompt_ids)
+    if prompt_len >= seq_len:
+        return 0
+    surviving = seq_len - prompt_len
+    return int(sum(rollout.completion_mask[:surviving]))
+
+
+def apply_prompt_average_sequence_weights(
+    rollouts: list[TrainingSample], seq_len: int
+) -> list[float] | None:
     """Compute ScaleRL §3.3 prompt-level loss averaging weights.
 
     Returns a list of per-rollout weights (parallel to `rollouts`) where
-        w_i = sample_tokens_i / (total_prompt_tokens * num_prompts)
+        w_i = trainable_tokens_i / (total_trainable_tokens_in_prompt * num_prompts)
     so that summing `w_i * loss_i` over the batch yields the average over prompts
     of the within-prompt-token mean loss — every prompt contributes equally,
     every token within a prompt contributes equally.
+
+    Token counts come from `_trainable_completion_tokens`, which excludes
+    non-trainable completion tokens and tokens dropped by `prepare_sample`'s
+    seq_len truncation (snowflake_poc_critique.md §6).
 
     Returns None when no rollouts have prompt_average_loss set (caller leaves the
     default neutral 1.0 weight in place). Raises if the flag is set inconsistently
@@ -242,7 +266,7 @@ def apply_prompt_average_sequence_weights(rollouts: list[TrainingSample]) -> lis
 
     weights = [0.0] * len(rollouts)
     for indices in by_example.values():
-        sample_tokens = [len(rollouts[i].completion_ids) for i in indices]
+        sample_tokens = [_trainable_completion_tokens(rollouts[i], seq_len) for i in indices]
         total = sum(sample_tokens) or 1  # guard fully-empty prompts
         for i, n in zip(indices, sample_tokens):
             weights[i] = n / (total * num_prompts)
@@ -266,7 +290,7 @@ def prepare_batch(
     a text-only batch, the all-gather will hang. We separate micro batches by modality
     and distribute them so that at each step index, all ranks see the same modality.
     """
-    prompt_weights = apply_prompt_average_sequence_weights(rollouts)
+    prompt_weights = apply_prompt_average_sequence_weights(rollouts, seq_len)
     all_samples = [(idx, prepare_sample(rollout, seq_len)) for idx, rollout in zip(idxs, rollouts)]
     # Overwrite the default neutral 1.0 weight with the prompt-avg weight when set.
     if prompt_weights is not None:
