@@ -55,6 +55,15 @@ pre_run_command = "export PYTHONPATH=$PROJECT_DIR:$PYTHONPATH"
 [model]
 name = "Qwen/Qwen3-8B"
 
+[ckpt]
+# Mirror the single-node config — without an `[ckpt] interval`, the
+# trainer only checkpoints at end-of-training and `SCALERL_RESUME=1`
+# has nothing to resume from after a mid-run crash. The single-node
+# `rl.toml` ships these knobs; the multi-node copy must too.
+interval = 100
+keep_last = 3
+keep_interval = 500
+
 [trainer]
 matmul_precision = "highest"
 

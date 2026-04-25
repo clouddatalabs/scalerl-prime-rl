@@ -64,6 +64,22 @@ main() {
     log_info "Configuring SSH known_hosts for GitHub..."
     ensure_known_hosts
 
+    # Auto-detect "already inside the right clone" — operators frequently
+    # run `git clone … && cd scalerl-prime-rl && bash scripts/install.sh`
+    # to install apt build deps, hitting this script from inside the repo.
+    # Without auto-detect, the default `SKIP_CLONE=0` either fails loudly
+    # ("destination path 'scalerl-prime-rl' already exists") or silently
+    # creates a nested `./scalerl-prime-rl/scalerl-prime-rl/` whose venv
+    # the outer tree's sbatch can't find. Treat being inside a git repo
+    # whose origin matches our REPO_OWNER/REPO_ID as implicit SKIP_CLONE.
+    if [ "$SKIP_CLONE" -eq 0 ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        ORIGIN_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
+        if echo "$ORIGIN_URL" | grep -q "${REPO_OWNER}/${REPO_ID}"; then
+            log_info "Detected existing clone of ${REPO_OWNER}/${REPO_ID} (origin: $ORIGIN_URL); skipping clone."
+            SKIP_CLONE=1
+        fi
+    fi
+
     if [ "$SKIP_CLONE" -eq 1 ]; then
         log_info "Skipping clone; assuming we are already inside the repo."
     else
@@ -81,7 +97,15 @@ main() {
     fi
 
     log_info "Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # Pin uv to the validated minor. `pyproject.toml` has `[tool.uv] preview = true`
+    # which opts into preview-stage resolver behavior; resolver semantics
+    # (extra-build-variables, override-dependencies, no-build-isolation-package)
+    # have changed across uv minors. The lock file was generated against the
+    # version pinned below — letting `uv` self-update can break `--locked`
+    # (refusal) or, worse, silently re-resolve transitive deps. Override via
+    # `UV_VERSION=latest` if you've validated a newer release.
+    UV_VERSION="${UV_VERSION:-0.11.6}"
+    curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
 
     log_info "Sourcing uv environment..."
     if ! command -v uv &> /dev/null; then
