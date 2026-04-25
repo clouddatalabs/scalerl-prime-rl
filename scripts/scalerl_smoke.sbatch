@@ -36,10 +36,13 @@ export PATH="/usr/local/bin:$PATH"
 # --all-extras` outside slurm; we don't re-sync here to avoid network races
 # between concurrent jobs.
 source .venv/bin/activate
+# `source activate` doesn't always rewrite PATH cleanly under slurm; use the
+# venv python explicitly to be safe.
+PYBIN="$REPO_ROOT/.venv/bin/python"
 
 # Print effective config (helpful for postmortem) before launching.
 echo "=== effective ScaleRL config ==="
-python -c "
+"$PYBIN" -c "
 import tomli
 from prime_rl.configs.rl import RLConfig
 cfg = RLConfig.model_validate(tomli.loads(open('configs/scalerl_math/rl.toml','rb').read().decode()))
