@@ -245,13 +245,20 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     # `mismatch_kl = importance_ratio - log_importance_ratio - 1` is computed
     # before the finiteness gates fire, so NaN/Inf positions can leak into the
     # `mismatch_kl` metrics even though the loss itself stays finite via
-    # `safe_*` masking. Gate the metrics by `finite_log_ratio` so wandb /
-    # Prometheus dashboards keep showing the actual divergence signal rather
-    # than going dark with NaN. Doesn't affect training — the loss-side
+    # `safe_*` masking. Gate by BOTH `finite_log_ratio` AND `finite_ratio`:
+    # `log_importance_ratio` finite (e.g. 100) but `exp(log_ratio)` saturating
+    # to `+inf` in fp32 (overflows around log_ratio ≈ 88.7) would otherwise
+    # leak `+inf` into the metric while the loss path uses `log_ratio**2`
+    # which stays finite. Wandb / Prometheus dashboards stay readable rather
+    # than going dark with NaN/Inf at the exact moment operators most need to
+    # see the divergence signal. Doesn't affect training — the loss-side
     # `safe_log_importance_ratio_sq` mask already covers the gradient path.
-    metrics["mismatch_kl"] = _safe_mean(mismatch_kl, loss_mask & finite_log_ratio)
-    metrics["masked_mismatch_kl"] = _safe_mean(mismatch_kl, loss_mask & is_masked & finite_log_ratio)
-    metrics["unmasked_mismatch_kl"] = _safe_mean(mismatch_kl, keep_mask & finite_log_ratio)
+    finite_metric_mask = finite_log_ratio & finite_ratio
+    metrics["mismatch_kl"] = _safe_mean(mismatch_kl, loss_mask & finite_metric_mask)
+    metrics["masked_mismatch_kl"] = _safe_mean(
+        mismatch_kl, loss_mask & is_masked & finite_metric_mask
+    )
+    metrics["unmasked_mismatch_kl"] = _safe_mean(mismatch_kl, keep_mask & finite_metric_mask)
     if teacher_kl is not None:
         metrics["teacher_kl"] = _safe_mean(teacher_kl, loss_mask & torch.isfinite(teacher_kl))
 
