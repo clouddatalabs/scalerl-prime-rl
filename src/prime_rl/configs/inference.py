@@ -445,7 +445,15 @@ class InferenceConfig(BaseConfig):
 
     @model_validator(mode="after")
     def auto_setup_disaggregated(self):
-        """Auto-configure inference for disaggregated P/D: enable EP and compute DP."""
+        """Auto-configure inference for disaggregated P/D: enable EP and compute DP.
+
+        Auto-derive only when the operator did NOT explicitly set the field
+        (Pydantic's `model_fields_set`). Mirrors the pattern in
+        `RLConfig.auto_setup_deployment` — silent overwrite of an explicit
+        `dp = 1` / `api_server_count = 1` is a foot-gun (an operator who
+        deliberately wants single-replica P/D debug has no way to express
+        it through this validator).
+        """
         if self.deployment.type == "disaggregated":
             if "enable_expert_parallel" not in self.model_fields_set:
                 self.enable_expert_parallel = True
@@ -456,9 +464,9 @@ class InferenceConfig(BaseConfig):
             dp_per_node = gpus_per_node // tp
             if self.data_parallel_size_local is None:
                 self.data_parallel_size_local = dp_per_node
-            if self.parallel.dp == 1:
+            if "dp" not in self.parallel.model_fields_set:
                 self.parallel.dp = dp_per_node
-            if self.api_server_count == 1:
+            if "api_server_count" not in self.model_fields_set:
                 self.api_server_count = dp_per_node
         return self
 

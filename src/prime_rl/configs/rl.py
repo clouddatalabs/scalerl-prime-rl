@@ -1091,7 +1091,28 @@ class RLConfig(BaseConfig):
 
             if self.inference is not None:
                 self.inference.enable_lora = True
-                self.inference.max_lora_rank = self.trainer.model.lora.rank
+                # Round up to the smallest valid vLLM rank — `auto_setup_max_lora_rank`
+                # in InferenceConfig already does this rounding, but it ran during
+                # InferenceConfig construction (BEFORE this RL-level shorthand
+                # writes the trainer-derived rank). Without re-rounding here,
+                # `[trainer.model.lora] rank = 24` validates cleanly at config
+                # load and crashes vLLM at server startup ("max_lora_rank=24
+                # not in supported set"). Mirror the rounding loop so the
+                # contract holds for trainer-derived ranks too.
+                from prime_rl.configs.inference import VALID_VLLM_LORA_RANKS
+
+                trainer_rank = self.trainer.model.lora.rank
+                for valid_rank in VALID_VLLM_LORA_RANKS:
+                    if valid_rank >= trainer_rank:
+                        self.inference.max_lora_rank = valid_rank
+                        break
+                else:
+                    raise ValueError(
+                        f"trainer.model.lora.rank={trainer_rank} exceeds vLLM "
+                        f"maximum of {VALID_VLLM_LORA_RANKS[-1]} — vLLM cannot "
+                        "serve adapters of this rank. Lower trainer LoRA rank "
+                        "or upgrade vLLM."
+                    )
             else:
                 get_logger().warning(
                     "LoRA is enabled, but inference is not configured. When manually starting the inference server, "
