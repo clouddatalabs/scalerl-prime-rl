@@ -646,6 +646,17 @@ async def orchestrate(config: OrchestratorConfig):
             {
                 "example_id": [rollout["example_id"] for rollout in train_rollouts],
                 "env_name": [rollout["env_name"] for rollout in train_rollouts],
+                # Scheduler-assigned per-group key. Used by `compute_solve_rates`
+                # to group by `(example_id, group_id)` instead of `example_id`
+                # alone — sample-with-replacement (when batch_size /
+                # rollouts_per_example > num_unique_examples, e.g. shipped
+                # TB config: 48 groups × 16 rollouts vs 18 train tasks)
+                # places the same prompt in multiple distinct rollout groups
+                # in one step. Grouping by `example_id` alone collapsed K
+                # groups into one bucket of K * `rollouts_per_example` rewards,
+                # making `solve_all == rollouts_per_example` almost always
+                # False and skewing `effective_batch_size` correspondingly.
+                "group_id": [rollout.get("group_id") for rollout in train_rollouts],
                 "reward": [rollout["reward"] for rollout in train_rollouts],
                 "is_truncated": [rollout["is_truncated"] for rollout in train_rollouts],
                 "is_filtered": [rollout["is_filtered"] for rollout in train_rollouts],
@@ -671,8 +682,18 @@ async def orchestrate(config: OrchestratorConfig):
         progress.total_problems += num_unique_examples
 
         def compute_solve_rates(df):
-            """Compute solve_none, solve_all, effective_batch_size for a set of rollouts."""
-            reward_per_problem = df.groupby("example_id").reward.sum()
+            """Compute solve_none, solve_all, effective_batch_size for a set of rollouts.
+
+            Group by `(example_id, group_id)` instead of `example_id` alone:
+            sample-with-replacement (when batch_size / rollouts_per_example >
+            num_unique_examples, e.g. shipped TB config: 48 groups × 16 rollouts
+            vs 18 train tasks) places the same prompt in multiple distinct
+            rollout groups in one step. Grouping by `example_id` alone collapsed
+            K groups into one bucket of K * `rollouts_per_example` rewards,
+            making `reward_per_problem == rollouts_per_example` almost always
+            False and skewing `effective_batch_size` correspondingly.
+            """
+            reward_per_problem = df.groupby(["example_id", "group_id"]).reward.sum()
             solve_none = (reward_per_problem == 0).mean()
             solve_all = (reward_per_problem == config.rollouts_per_example).mean()
             return solve_none, solve_all, 1 - solve_none - solve_all

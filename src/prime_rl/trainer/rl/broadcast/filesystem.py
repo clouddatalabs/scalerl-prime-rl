@@ -51,6 +51,20 @@ class FileSystemWeightBroadcast(WeightBroadcast):
 
                 state_dict = revert_weight_conversion(model, state_dict)
 
+        # Master-mid-loop deadlock guard. `value.full_tensor()` (line below)
+        # is a collective that EVERY rank must enter EVERY outer iteration —
+        # otherwise peer ranks block on it forever. The master-only
+        # `value.to("cpu", non_blocking=False)` can raise (host-OOM, ENOSPC
+        # on pinned pool, IOError); without this capture, master would
+        # unwind out of BOTH loops, peers would proceed to the next idx's
+        # `full_tensor()` collective with no master, and NCCL watchdog
+        # would kill the job ~10 min later. Mirror the master_error
+        # capture-and-rethrow pattern from `gather_weights_on_master`,
+        # `WeightCheckpointManager.get_run_adapter_state_dict`, and
+        # `NCCLWeightBroadcastSender.broadcast_weights`. Master keeps
+        # entering full_tensor() on subsequent idxs but skips the
+        # master-only side effects once an error is captured.
+        master_error: Exception | None = None
         for idx in self.multi_run_manager.ready_to_update_idxs:
             self.logger.debug(
                 f"Broadcasting weights for run {idx} (ready_to_update={self.multi_run_manager.ready_to_update[idx]})"
@@ -63,11 +77,14 @@ class FileSystemWeightBroadcast(WeightBroadcast):
                 for key, value in state_dict.items():
                     if isinstance(value, DTensor):
                         value = value.full_tensor()
-                    if self.world.is_master:
-                        state_dict[key] = value.to("cpu", non_blocking=False)
+                    if self.world.is_master and master_error is None:
+                        try:
+                            state_dict[key] = value.to("cpu", non_blocking=False)
+                        except Exception as e:
+                            master_error = e
 
             # TODO: Broadcast ready to update in sync, then we dont need to gather on not ready
-            if self.world.is_master:
+            if self.world.is_master and master_error is None:
                 try:
                     save_dir = get_step_path(
                         get_broadcast_dir(self.multi_run_manager.get_run_dir(idx)),
@@ -100,6 +117,14 @@ class FileSystemWeightBroadcast(WeightBroadcast):
                     self.logger.error(f"Error broadcasting weights for run {idx}: {e}")
                 finally:
                     self.multi_run_manager.ready_to_update[idx] = False
+            elif self.world.is_master:
+                # Master captured an error earlier in this broadcast — still
+                # clear ready_to_update so we don't replay the same idx on
+                # the next call, but skip side effects.
+                self.multi_run_manager.ready_to_update[idx] = False
+
+        if master_error is not None:
+            raise master_error
 
         if self.world.is_master:
             self.logger.debug(f"Weights broadcasted in {time.perf_counter() - start_time:.2f}s")
