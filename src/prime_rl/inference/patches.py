@@ -125,9 +125,18 @@ def transformers_v5_compat():
     Despite the historical name (the original purpose was a transformers-v5
     config compat shim), this function is the SINGLE place pyproject.toml's
     ``[project.entry-points."vllm.general_plugins"]`` plugs into vLLM. Removing
-    it disables every patch listed below, not just the v5 compat one. The patches
-    are independent of one another; each early-returns when its trigger condition
-    is unmet so the umbrella stays cheap on cold start.
+    it disables every patch listed below, not just the v5 compat one.
+
+    Each patch is wrapped in its own try/except so a failure in one (e.g. an
+    `ImportError` because a downstream consumer pinned a vLLM version that
+    renamed an internal symbol the patch reaches into) does NOT silently abort
+    every later patch. Without this isolation, an unrelated upstream rename
+    used to silently disable ``monkey_patch_vllm_fp32_lm_head`` — the
+    load-bearing patch for ScaleRL §3.2 train/inference logprob parity —
+    causing logprob correlation to drop to ~0.9 with no error and CISPO's
+    importance ratio to bias on every step. We log loudly on any failure so
+    a Snowflake-side vLLM version bump shows up as a visible warning rather
+    than a silent training-quality regression.
 
     Patches dispatched:
       - transformers v5 / vLLM 0.16 config-attribute compat (in this function body)
@@ -147,17 +156,46 @@ def transformers_v5_compat():
     are NOT wired through this umbrella; callers that need them must import and
     invoke explicitly.
     """
-    from transformers import Qwen3VLMoeTextConfig
+    log = logging.getLogger(__name__)
 
-    if not hasattr(Qwen3VLMoeTextConfig, "tie_word_embeddings"):
-        Qwen3VLMoeTextConfig.tie_word_embeddings = False
+    try:
+        from transformers import Qwen3VLMoeTextConfig
 
-    monkey_patch_vllm_fp32_lm_head()
-    _patch_qwen35_lora()
-    _patch_lora_key_prefix()
-    monkey_patch_deep_gemm_ep_scatter()
-    monkey_patch_dp_engine_core_pause_resume_deadlock()
-    monkey_patch_offloading_connector_cpu_block_count()
+        if not hasattr(Qwen3VLMoeTextConfig, "tie_word_embeddings"):
+            Qwen3VLMoeTextConfig.tie_word_embeddings = False
+    except Exception as e:
+        log.warning("prime-rl: transformers v5 compat shim failed (%s); skipping", e)
+
+    # Each patch is isolated: a failure in one (typically ImportError from a
+    # vLLM symbol rename) MUST NOT cascade and disable later patches. The
+    # fp32-LM-head patch in particular is load-bearing for ScaleRL §3.2 and
+    # was previously silenced by an unrelated upstream rename in
+    # `_patch_qwen35_lora`'s import chain.
+    for patch_name, patch_fn in [
+        ("monkey_patch_vllm_fp32_lm_head", monkey_patch_vllm_fp32_lm_head),
+        ("_patch_qwen35_lora", _patch_qwen35_lora),
+        ("_patch_lora_key_prefix", _patch_lora_key_prefix),
+        ("monkey_patch_deep_gemm_ep_scatter", monkey_patch_deep_gemm_ep_scatter),
+        (
+            "monkey_patch_dp_engine_core_pause_resume_deadlock",
+            monkey_patch_dp_engine_core_pause_resume_deadlock,
+        ),
+        (
+            "monkey_patch_offloading_connector_cpu_block_count",
+            monkey_patch_offloading_connector_cpu_block_count,
+        ),
+    ]:
+        try:
+            patch_fn()
+        except Exception as e:
+            log.warning(
+                "prime-rl: %s failed (%s: %s); other patches still applied. "
+                "If %s is load-bearing for your config, fix the underlying error.",
+                patch_name,
+                type(e).__name__,
+                e,
+                patch_name,
+            )
 
 
 def monkey_patch_vllm_fp32_lm_head():
