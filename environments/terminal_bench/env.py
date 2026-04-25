@@ -60,9 +60,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from datasets import Dataset
-
 import verifiers as vf
+from datasets import Dataset
 from verifiers.types import State
 
 _logger = logging.getLogger(__name__)

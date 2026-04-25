@@ -16,6 +16,7 @@
 #
 #   SCALERL_CONFIG  — TOML config to launch (default: configs/scalerl_math/rl.toml).
 #                     Set to configs/scalerl_terminal_bench/rl.toml for the Snowflake handoff.
+#   SCALERL_RESUME  — set "1" to add `--ckpt.resume_step=-1` to the rl invocation.
 #   SCALERL_FORCE_CLEAR_LD — set "1" to unset LD_LIBRARY_PATH/LD_PRELOAD even on non-AWS-DLAMI hosts
 #   SCALERL_NO_EFA  — set "1" to skip the EFA libfabric env vars when your cluster has no EFA
 #
@@ -121,10 +122,10 @@ export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 export HF_HOME="${HF_HOME:-$REPO_ROOT/hf-cache}"
 
 # Use the venv we set up in this repo. The .venv was populated with `uv sync
-# --all-extras` outside slurm; we don't re-sync here to avoid network races
+# --extra all` outside slurm; we don't re-sync here to avoid network races
 # between concurrent jobs.
 if [ ! -d "$REPO_ROOT/.venv" ]; then
-    echo "ERROR: $REPO_ROOT/.venv missing; run 'uv sync --all-extras' on the login node first." >&2
+    echo "ERROR: $REPO_ROOT/.venv missing; run 'uv sync --extra all' on the login node first." >&2
     exit 1
 fi
 source .venv/bin/activate
@@ -143,13 +144,13 @@ if [ "$GPU_COUNT" -lt 8 ]; then
     exit 1
 fi
 
-# Repair flash-attn-cute (FA4) namespace collision if `uv sync --all-extras`
+# Repair flash-attn-cute (FA4) namespace collision if `uv sync --extra all`
 # happened to install `flash-attn` after `flash-attn-cute`. Both ship a
 # `flash_attn/cute/` sub-package; the one from `flash-attn` is a tiny stub
 # that shadows the real FA4 module. The repair script reinstalls FA4 from
 # git — it needs network. On clusters whose compute nodes can't reach
 # github.com, run `bash scripts/fix-flash-attn-cute.sh` on the login node
-# once after `uv sync --all-extras` and the check below will short-circuit.
+# once after `uv sync --extra all` and the check below will short-circuit.
 if ! "$PYBIN" -c "
 import sys
 import flash_attn.cute.interface as fa4
@@ -206,4 +207,8 @@ echo "================================="
 
 # Use the venv's `rl` entry-point directly. `uv run` is unreliable here because
 # `source .venv/bin/activate` does not always rewrite PATH cleanly under slurm.
-"$REPO_ROOT/.venv/bin/rl" @ "$SCALERL_CONFIG"
+RL_ARGS=()
+if [ "${SCALERL_RESUME:-0}" = "1" ]; then
+    RL_ARGS+=(--ckpt.resume_step=-1)
+fi
+"$REPO_ROOT/.venv/bin/rl" @ "$SCALERL_CONFIG" "${RL_ARGS[@]}"

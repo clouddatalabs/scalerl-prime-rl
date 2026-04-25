@@ -304,6 +304,113 @@ def test_adamw_config_carries_eps_and_rejects_typos():
     # extra=forbid on BaseOptimizerConfig — typos must raise.
     with pytest.raises(ValidationError):
         AdamWConfig(epislon=1e-15)  # typo
+    # `eps = 0.0` divides by zero in Adam's denominator — reject.
+    with pytest.raises(ValidationError):
+        AdamWConfig(eps=0.0)
+
+
+def test_sgd_config_rejects_eps_typo():
+    """`extra=forbid` should fire on every BaseOptimizerConfig subclass, not just
+    AdamW — guards against a future config class forgetting to inherit the strict
+    behavior."""
+    from prime_rl.configs.trainer import SGDConfig
+
+    with pytest.raises(ValidationError):
+        SGDConfig(eps=1e-15)  # SGD has no eps field
+    with pytest.raises(ValidationError):
+        SGDConfig(nestrov=True)  # typo of `nesterov`
+
+
+def test_adamw_eps_round_trips_into_torch_optim():
+    """The whole point of fixing the eps drop is that the value reaches
+    `torch.optim.AdamW(eps=...)`. A regression that re-removes `eps=config.eps`
+    from the AdamW constructor in `_create_optimizer` would silently put us
+    back on torch's default 1e-8 — the original bug. Pin against that."""
+    import torch
+    from torch import nn
+
+    from prime_rl.configs.trainer import AdamWConfig
+    from prime_rl.trainer.optim import _create_optimizer
+
+    config = AdamWConfig(eps=1e-15, lr=5e-7, weight_decay=0.01)
+    params = [("dummy", nn.Parameter(torch.zeros(2)))]
+    opt = _create_optimizer(config, params, parallel_dims=None)
+    assert opt.param_groups[0]["eps"] == 1e-15
+
+
+def test_linear_scheduler_config_rejects_zero_phases():
+    """Both `warmup_steps=0` and `decay_steps=0` would crash inside
+    `setup_linear_scheduler` after the SLURM container booted. Reject at config
+    load."""
+    from prime_rl.configs.trainer import LinearSchedulerConfig
+
+    with pytest.raises(ValidationError, match="warmup_steps > 0 or"):
+        LinearSchedulerConfig(warmup_steps=0, decay_steps=0)
+    # Either alone is fine.
+    LinearSchedulerConfig(warmup_steps=10, decay_steps=0)
+    LinearSchedulerConfig(warmup_steps=0, decay_steps=10)
+
+
+def test_rl_config_rejects_sequence_mode_without_prompt_average_loss():
+    """`loss_scale_mode in {sequence, none}` without `prompt_average_loss=True`
+    leaves per-sequence weights at the neutral 1.0 default. compute_loss
+    multiplies by `fsdp_world_size`, producing a raw global sum scaled by DP
+    — effective LR scales linearly with batch size and DP size. CISPO defaults
+    to sequence so an out-of-the-box CISPO config without prompt-avg silently
+    lacks normalization."""
+    with pytest.raises(ValidationError, match="relies on the packer"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "trainer": {"loss": {"type": "cispo", "loss_scale_mode": "sequence"}},
+                # prompt_average_loss not set — defaults to False
+            }
+        )
+    # Even CustomLossConfig needs explicit prompt_avg or token mode (the
+    # CustomLossConfig exemption was dropped — too footgun-y).
+    with pytest.raises(ValidationError, match="relies on the packer"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "trainer": {
+                    "loss": {
+                        "type": "custom",
+                        "import_path": "prime_rl.trainer.rl.loss.sft_loss_fn",
+                        "loss_scale_mode": "sequence",
+                    }
+                },
+            }
+        )
+
+
+def test_rl_config_rejects_conflicting_explicit_nccl_async_override():
+    """Setting `allow_nccl_async_level_override` explicitly on BOTH sides with
+    different values is an explicit user disagreement — propagation can't
+    silently pick one. Reject."""
+    with pytest.raises(ValidationError, match="conflict"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "max_async_level": 8,
+                "weight_broadcast": {"type": "nccl"},
+                "orchestrator": {"experimental": {"allow_nccl_async_level_override": True}},
+                "trainer": {"experimental": {"allow_nccl_async_level_override": False}},
+            }
+        )
+
+
+def test_rl_config_propagates_nccl_async_override_from_trainer_to_orchestrator():
+    """Symmetric to the existing orchestrator→trainer test — pin both directions."""
+    config = RLConfig.model_validate(
+        {
+            **_RL_BASE,
+            "max_async_level": 8,
+            "weight_broadcast": {"type": "nccl"},
+            "trainer": {"experimental": {"allow_nccl_async_level_override": True}},
+        }
+    )
+    assert config.orchestrator.experimental.allow_nccl_async_level_override is True
+    assert config.trainer.experimental.allow_nccl_async_level_override is True
 
 
 def test_rl_config_root_rejects_nccl_async_without_override():
@@ -311,7 +418,6 @@ def test_rl_config_root_rejects_nccl_async_without_override():
     sub-config must still be rejected. The auto_setup_weight_broadcast validator
     reassigns trainer/orchestrator weight_broadcast after their validators have run,
     so without an explicit root-level guardrail this combo would slip through.
-    See snowflake_poc_critique.md §5.
     """
     with pytest.raises(ValidationError, match="NCCL weight broadcast with max_async_level"):
         RLConfig.model_validate(

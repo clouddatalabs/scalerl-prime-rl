@@ -13,12 +13,18 @@ set -e
 # Activate the repo's venv so `python` and `uv pip` operate on it. Without this,
 # running the script before activation resolves to system Python (which doesn't
 # have flash_attn at all) and fails with a misleading "0 lines" error.
+# Also re-activate if a DIFFERENT venv is currently active — the install would
+# otherwise land in someone else's venv silently.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-if [ -z "${VIRTUAL_ENV:-}" ]; then
-    if [ ! -f "$REPO_ROOT/.venv/bin/activate" ]; then
-        echo "Error: $REPO_ROOT/.venv missing; run 'uv sync --all-extras' on the login node first." >&2
-        exit 1
+if [ ! -f "$REPO_ROOT/.venv/bin/activate" ]; then
+    echo "Error: $REPO_ROOT/.venv missing; run 'uv sync --extra all' on the login node first." >&2
+    exit 1
+fi
+if [ "${VIRTUAL_ENV:-}" != "$REPO_ROOT/.venv" ]; then
+    if [ -n "${VIRTUAL_ENV:-}" ]; then
+        echo "Note: deactivating $VIRTUAL_ENV to operate on $REPO_ROOT/.venv" >&2
+        deactivate 2>/dev/null || true
     fi
     # shellcheck source=/dev/null
     source "$REPO_ROOT/.venv/bin/activate"

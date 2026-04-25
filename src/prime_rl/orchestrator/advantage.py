@@ -134,17 +134,24 @@ def apply_batch_advantage_normalization(
         list, which would silently break the downstream pandas DataFrame
         construction in orchestrator.py that turns per-filter rows into
         wandb columns.
+
+        Also seed `reason: False` on every rollout in the batch (not just
+        the ones we're filtering), so the downstream DataFrame has a
+        uniform key set across rows. Without this, pandas inserts NaN for
+        non-degenerate rollouts and `mean()` reports the rate over
+        affected rollouts only — silently double-counting in the wandb
+        column.
         """
+        for r in rollouts:
+            existing = r.get("filters")
+            if not isinstance(existing, dict):
+                existing = {}
+                r["filters"] = existing
+            existing.setdefault(reason, False)
         for r in rollouts_to_skip:
             r["is_filtered"] = True
             r["advantage"] = 0.0
-            existing = r.get("filters")
-            if not isinstance(existing, dict):
-                # Backward-compat for direct unit-test callers that don't
-                # pre-run apply_filters; production always sets a dict.
-                existing = {}
-            existing[reason] = True
-            r["filters"] = existing
+            r["filters"][reason] = True
 
     if len(surviving) < 2:
         _filter_out(surviving, "batch_norm_too_few_survivors")

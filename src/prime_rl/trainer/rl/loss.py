@@ -347,6 +347,13 @@ def compute_loss(
         # Token-mode is unaffected: it divides by local trainable tokens, which
         # roughly equals `global_tokens / dp_world_size` under balanced packing,
         # so the dp factor cancels naturally there.
+        if fsdp_world_size < 1:
+            raise ValueError(
+                "compute_loss(loss_scale_mode='sequence'/'none') requires a "
+                "positive `fsdp_world_size` to cancel FSDP's gradient_divide_factor. "
+                f"Got fsdp_world_size={fsdp_world_size}. Production callers should "
+                "pass `parallel_dims.fsdp_gradient_divide_factor`; tests can pass 1."
+            )
         scaled_loss = total_loss * float(fsdp_world_size)
 
     aggregated: dict[str, Any] = {}

@@ -78,7 +78,11 @@ main() {
     uv tool install prime
 
     log_info "Syncing virtual environment..."
-    uv sync --all-extras
+    # `--extra all` (the aggregate extra defined in pyproject.toml) excludes
+    # `flash-attn-3` because its wheels ship Hopper sm_90 kernels only and
+    # crash on B200 with "no kernel image available." `uv sync --all-extras`
+    # would enumerate every named extra and pull FA3 in.
+    uv sync --extra all
 
     log_info "Installing pre-commit hooks..."
     uv run pre-commit install

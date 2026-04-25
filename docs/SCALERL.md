@@ -84,15 +84,21 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
 - 8 GPUs visible to one node (config splits 4 train / 4 inference).
 - SLURM with a partition you pass via `sbatch -p <name>` (the sbatch defaults
   to `gpu`).
-- Network reachable from the compute node, OR run `huggingface-cli download`
+- Network reachable from the compute node, OR run `hf download`
   and `bash scripts/fix-flash-attn-cute.sh` on the login node before submit.
 - For Terminal-Bench: a Docker daemon reachable from the rollout process
   (host or `/var/run/docker.sock` bind-mounted into the container).
 
-**Resume.** Pass `--ckpt.resume_step=-1` to load the latest checkpoint:
+**Resume.** Resubmit the same sbatch with `--export=...,SCALERL_RESUME=1`:
 ```bash
-.venv/bin/rl @ configs/scalerl_math/rl.toml --ckpt.resume_step=-1
+sbatch -p <partition> --export=ALL,REPO_ROOT="$PWD",OUTPUT_ROOT="$PWD/slurm-logs",\
+SCALERL_CONFIG=configs/scalerl_math/rl.toml,SCALERL_RESUME=1 \
+       scripts/scalerl_smoke.sbatch
 ```
+Caveat: a run that crashes BEFORE the first checkpoint at `[ckpt] interval`
+(default 100 steps) leaves no checkpoint to resume from — the resume run
+will error out at startup. Lower `[ckpt] interval` if early crashes are
+likely, or accept restarting from step 0.
 The shipped configs set `output_dir = "outputs/scalerl_math"` (and
 `outputs/scalerl_terminal_bench`) so resume is deterministic and concurrent
 submissions don't collide. Checkpoints land under
@@ -112,7 +118,7 @@ num_infer_nodes = 4
 gpus_per_node = 8
 ```
 and submit with `#SBATCH --nodes=8` plus a `[slurm]` section if you use
-baker/torchrun rendezvous (see `prime-rl/docs/slurm.md`). Multi-node NCCL
+baker/torchrun rendezvous (see `docs/slurm.md`). Multi-node NCCL
 weight broadcast still requires the experimental override (already on); on
 hardware without EFA set `SCALERL_NO_EFA=1` in your `.env` and switch
 `[weight_broadcast] type = "filesystem"` (then drop the override).

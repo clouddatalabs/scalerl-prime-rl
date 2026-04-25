@@ -6,7 +6,6 @@ from prime_rl.orchestrator.advantage import (
     _NORM_EPS,
     AdvantageInputs,
     AdvantageOutputs,
-    _efficiency_length_shaping,
     apply_batch_advantage_normalization,
     compute_advantages,
     default_advantage_fn,
@@ -311,7 +310,11 @@ def test_apply_batch_advantage_normalization_no_op_for_non_batch_modes():
 
 def test_apply_batch_advantage_normalization_handles_few_surviving():
     """Fewer than 2 surviving rollouts → std undefined; mark as filtered AND
-    zero advantage. Filters key is a dict (matches `apply_filters` schema)."""
+    zero advantage. Filters key is a dict (matches `apply_filters` schema).
+    Critical: the new key (`batch_norm_too_few_survivors`) is seeded on EVERY
+    rollout in the batch (False for non-degenerate ones, True for those we
+    filtered). This keeps the downstream pandas DataFrame columns aligned —
+    without this, mean() reports the rate over only the affected rollouts."""
     rollouts = [
         {"advantage": 1.0, "is_filtered": False, "filters": {"gibberish": False, "zero_advantage": False}},
         {"advantage": -1.0, "is_filtered": True, "filters": {"gibberish": False, "zero_advantage": True}},
@@ -324,7 +327,10 @@ def test_apply_batch_advantage_normalization_handles_few_surviving():
     assert isinstance(rollouts[0]["filters"], dict)
     assert rollouts[0]["filters"]["batch_norm_too_few_survivors"] is True
     assert rollouts[0]["filters"]["gibberish"] is False  # pre-existing keys preserved
-    assert rollouts[1]["advantage"] == -1.0  # already-filtered rollouts untouched
+    # The pre-filtered rollout also gets the new key seeded as False so the
+    # DataFrame has uniform columns across rows.
+    assert rollouts[1]["filters"]["batch_norm_too_few_survivors"] is False
+    assert rollouts[1]["advantage"] == -1.0  # already-filtered rollouts' advantages untouched
 
 
 def test_apply_batch_advantage_normalization_zeros_constant_advantages():
