@@ -918,9 +918,19 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
                     # on the same compute node). Time-gate the sweep
                     # well above the per-task test timeout so concurrent
                     # active runs don't race their own live rollouts.
-                    leak_max_age = max(
-                        2 * self._test_timeout_seconds, 30 * 60
-                    )
+                    # Floor at 5 min: we observed real leak windows of
+                    # 15-25 min from prior cancelled jobs, so the previous
+                    # 30-min floor missed the leakers that were saturating
+                    # docker0's veth slots and still cascading "exchange full"
+                    # into our fresh start. 5 min is well above any
+                    # observed healthy rollout setup window in this repo's
+                    # configs (single-step rollouts that exceed 5 min are
+                    # rare and would already be timing out at the test
+                    # harness layer); concurrent peer-user runs that JUST
+                    # started have run_ids different from ours but
+                    # containers younger than 5 min, so the age guard
+                    # still protects them.
+                    leak_max_age = max(2 * self._test_timeout_seconds, 5 * 60)
                     leaked = await self._docker.ps_leaked_by_label(
                         "prime_rl_tb_env", "1",
                         exclude_run_id=self._run_id,
