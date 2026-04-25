@@ -161,8 +161,27 @@ class MultiCheckpointManager:
                     try:
                         shutil.copytree(broadcast_src, weight_dst)
                     except FileNotFoundError:
+                        # Broadcast folder absent means weight isn't pinned
+                        # under the checkpoint dir — the rank shards are
+                        # still on disk, but eval/resume scanning for the
+                        # broadcast folder will miss this step. Logged for
+                        # visibility, but treated as soft (saved_ok stays True).
                         self.logger.error(
                             f"Broadcast folder not found for run {idx} at step {step}. Looking for it in {broadcast_src}"
+                        )
+                    except OSError as e:
+                        # Anything else master-only (FileExistsError if
+                        # weight_dst exists from a prior partial save,
+                        # ENOSPC mid-copy, EACCES) used to escape to the
+                        # outer `except Exception` and quietly mark master
+                        # as failed while workers stayed `saved_ok=True`.
+                        # That divergence skipped the STABLE marker (master-
+                        # only) without diverging the rank-shard saves on
+                        # disk: the rank files exist but eval/resume cannot
+                        # see them. Catch it locally so master's saved_ok
+                        # is consistent with the workers'.
+                        self.logger.error(
+                            f"Master broadcast-copy failed for run {idx} at step {step}: {type(e).__name__}: {e}"
                         )
                 saved_ok = True
             except FileNotFoundError:
@@ -174,6 +193,20 @@ class MultiCheckpointManager:
             # try-except outcome. Replaces the prior pair of barriers (one
             # inside the try, one after) which deadlocked on per-rank failure.
             dist.barrier()
+
+            # Reduce per-rank `saved_ok` to a global "all ranks succeeded"
+            # bool so ranks agree before mark_stable / ckpt_steps.append.
+            # Without this, a rank-asymmetric failure (e.g. master-only
+            # copytree error escaping the inner catch) leaves master with
+            # `saved_ok=False` and workers with True — workers append step
+            # to their per-rank ckpt_steps and master doesn't, so the
+            # master-only `mark_stable` STABLE marker is never written and
+            # the step is invisible to eval/resume even though rank shards
+            # exist on disk.
+            saved_ok_tensor = torch.tensor(int(saved_ok), device="cuda")
+            dist.all_reduce(saved_ok_tensor, op=dist.ReduceOp.MIN)
+            saved_ok = bool(saved_ok_tensor.item())
+
             if saved_ok:
                 manager.mark_stable(step)
                 manager.ckpt_steps.append(step)
