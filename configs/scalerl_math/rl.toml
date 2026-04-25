@@ -155,3 +155,8 @@ dp = 4
 
 [inference.model]
 fp32_lm_head = true
+# Disable vLLM's torchinductor-compiled forward + cuda graph capture. The
+# compiled QKV mm path hits CUBLAS_STATUS_INVALID_VALUE on B200 with
+# vllm 0.19.1; enforce_eager runs uncompiled which sidesteps it. Re-enable
+# (drop this line) once the compile path is validated on B200.
+enforce_eager = true

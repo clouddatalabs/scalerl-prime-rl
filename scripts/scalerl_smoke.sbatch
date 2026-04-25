@@ -32,6 +32,25 @@ cd "$REPO_ROOT"
 # Slurm sets a minimal PATH; uv lives in /usr/local/bin on this cluster.
 export PATH="/usr/local/bin:$PATH"
 
+# Clear inherited LD_PRELOAD — the cluster's .bashrc points at a libcublas under
+# /opt/dlami/nvme/venv_build/ that conflicts with whatever the venv's torch ships.
+# Baker does the same via `sbatch --export ALL,LD_PRELOAD=`; we do it here so the
+# fix lands without changing how we submit.
+unset LD_PRELOAD
+
+# Mirror baker's container-side runtime env (baker/cli/docker_runtime.py
+# EFA_RUNTIME_ENV). Baker runs prime-rl inside Docker and sets these on the
+# container; without Docker we set them on the slurm shell. CUDA_DEVICE_MAX_CONNECTIONS=1
+# in particular constrains kernel concurrency on B200 and is part of the working
+# baker recipe.
+export FI_PROVIDER=efa
+export FI_EFA_USE_DEVICE_RDMA=1
+export FI_EFA_USE_HUGE_PAGE=0
+export NCCL_SOCKET_IFNAME='^lo,docker'
+export NCCL_NET_GDR_LEVEL=PHB
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+
 # The cluster's user shell sets HF_HUB_OFFLINE=1, which breaks first-time
 # dataset/model downloads. Override here for the smoke run; set to 1 once
 # everything is cached.
