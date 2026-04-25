@@ -155,11 +155,35 @@ class NCCLWeightBroadcastSender:
         else:
             preprocess_fn = preprocess_layer_checkpoint
 
+        # Track master-only broadcast failure so peer ranks don't deadlock.
+        # `_resolve_dtensors` calls `full_tensor()` which is a collective on
+        # the FSDP mesh — every rank must participate every iteration. If
+        # master raised inside `broadcast_state_dict` (NCCL drop with the
+        # inference pool, OOM in the cat, pickle on a non-picklable shape)
+        # without this guard, master's exception unwinds past the next
+        # iteration's `full_tensor()` collective, peer ranks block waiting
+        # for master, and NCCL watchdog kills the job (~10 min). Same shape
+        # as the previously-fixed `gather_weights_on_master` and
+        # `synchronize_state` deadlocks. Continue the loop on master with
+        # `_resolve_dtensors` collectives still firing so peers complete,
+        # and re-raise the captured error after the loop.
+        master_error: Exception | None = None
         for layer_id, layer_state_dict in filter_state_dict_by_layers(state_dict, num_layers, layer_prefix):
             layer_state_dict = self._resolve_dtensors(layer_state_dict)
             layer_state_dict = preprocess_fn(model, layer_state_dict, layer_id)
-            if self.world.is_master:
-                broadcast_state_dict(layer_state_dict, self.communicator)
+            if self.world.is_master and master_error is None:
+                try:
+                    broadcast_state_dict(layer_state_dict, self.communicator)
+                except Exception as e:
+                    self.logger.error(
+                        f"NCCL broadcast failed on master at layer_id={layer_id}: "
+                        f"{type(e).__name__}: {e}. Continuing the per-layer loop "
+                        "to keep peer ranks' collectives alive; will re-raise after."
+                    )
+                    master_error = e
+
+        if master_error is not None:
+            raise master_error
 
     def _resolve_dtensors(self, state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
         for key, value in list(state_dict.items()):
