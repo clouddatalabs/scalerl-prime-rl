@@ -422,4 +422,3 @@ Each ingredient cites its origin in the config docstrings. Primary sources:
 - Batch-level advantage normalization: Hu et al., *Reinforce++*, also Magistral.
 - No-Positive-Resampling: Polaris (An et al., 2025), 0.9 threshold.
 - FP32 LM-head: Minimax-M1 §3.2.
-
