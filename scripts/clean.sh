@@ -28,7 +28,6 @@ confirm_cleanup() {
     echo "This will remove the following paths recursively under that root:"
     echo "  - **/logs    **/checkpoints   **/weights"
     echo "  - **/rollouts **/wandb         **/evals"
-    echo "  - **/torchrun"
     echo "  - *.pydantic_config (top-level)"
     while true; do
         read -r -p "Proceed? [y/N]: " response
@@ -44,6 +43,9 @@ confirm_cleanup
 cd "$REPO_ROOT"
 # `nullglob` makes the globs expand to nothing (instead of the literal `**/...`)
 # when no matches exist; combined with `globstar`, the recursive globs work.
-rm -rf -- **/logs **/checkpoints **/weights **/rollouts **/wandb **/evals **/torchrun
+# `**/torchrun` removed — would also nuke `.venv/bin/torchrun` and any
+# user file named `torchrun`, with no actual benefit (torchrun output
+# lives under `logs/` already).
+rm -rf -- **/logs **/checkpoints **/weights **/rollouts **/wandb **/evals
 rm -f -- *.pydantic_config
 log_info "Cleaned up under $REPO_ROOT"

@@ -242,16 +242,22 @@ def pretokenize_rollout_trajectory(
         # importance-ratio losses can refuse to train on it.
         reconstructed["_logprobs_synthesized"] = True
         step["tokens"] = reconstructed
-        logger.warning(
-            "pretokenize_rollout_trajectory: step %d for example %s reconstructed token IDs "
-            "WITHOUT real generator logprobs (chat client did not preserve token data). "
-            "completion_logprobs = [0.0]*N; this is SAFE for SFT but corrupts CISPO/Default "
-            "importance ratios. The config-level validator should have rejected this "
-            "combination at load time — if you see this warning, please verify your "
-            "rollout-path config.",
-            step_idx,
-            output["example_id"],
-        )
+        # Warn at most ONCE per rollout (not once per step) — a 16-rollout
+        # × 10-turn TB run would otherwise spam stderr with 160 lines per step.
+        # The config-level validator (`validate_is_ratio_loss_with_external_rollout_string_client`)
+        # is the load-bearing guard; this warning is observability only.
+        if not output.get("_logprobs_synthesized_warned"):
+            output["_logprobs_synthesized_warned"] = True
+            logger.warning(
+                "pretokenize_rollout_trajectory: example %s reconstructed token IDs "
+                "WITHOUT real generator logprobs (chat client did not preserve token data; "
+                "first occurrence at step %d). completion_logprobs = [0.0]*N; this is SAFE "
+                "for SFT but corrupts CISPO/Default importance ratios. The config-level "
+                "validator should have rejected this combination at load time — if you see "
+                "this warning, please verify your rollout-path config.",
+                output["example_id"],
+                step_idx,
+            )
 
     return True
 

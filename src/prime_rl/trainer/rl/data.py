@@ -31,6 +31,12 @@ class TensorMicroBatch(TypedDict):
     # batch). Empty list when the packer chose the neutral path (loss_scale_mode="token").
     sequence_loss_weights: list[float]
 
+    # True iff any sample in this micro-batch carries reconstructed (zero-fill)
+    # completion_logprobs. The trainer rejects this for IS-ratio losses
+    # (CISPO, Default) before computing the loss — `rho = exp(trainer_lp - 0)`
+    # is not the IS ratio.
+    inference_logprobs_synthesized: bool
+
     # MoE router replay
     routed_experts: Int[Tensor, "batch seq layers topk"] | None
 
@@ -205,6 +211,9 @@ class DataLoader:
             temperatures=torch.tensor(micro_batch.temperatures, dtype=torch.float).unsqueeze(0),
             lora_num_tokens=torch.tensor(micro_batch.lora_num_tokens, dtype=torch.int32),
             sequence_loss_weights=list(micro_batch.sequence_loss_weights),
+            inference_logprobs_synthesized=bool(
+                getattr(micro_batch, "inference_logprobs_synthesized", False)
+            ),
             # Multimodal fields - no batch dimension for these as they are variable-sized
             pixel_values=torch.frombuffer(bytearray(micro_batch.pixel_values), dtype=torch.float32).reshape(
                 micro_batch.pixel_values_shape

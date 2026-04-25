@@ -13,8 +13,12 @@ export FLASH_ATTENTION_SKIP_CUDA_BUILD=FALSE
     "flash-attn==2.8.3" --no-build-isolation --no-binary flash-attn --no-cache)
 
 echo "=== reinstalling flash-attn-cute (flash-attn overwrites it with a stub) ==="
+# Pin matches `pyproject.toml::tool.uv.sources.flash-attn-4.rev` and
+# `scripts/fix-flash-attn-cute.sh` so all three FA4-install paths agree on
+# the same commit. Drift here would silently install a different FA4
+# revision than the lockfile guarantees.
 uv pip install --reinstall --no-deps \
-    "flash-attn-cute @ git+https://github.com/Dao-AILab/flash-attention.git@2b5db43#subdirectory=flash_attn/cute"
+    "flash-attn-cute @ git+https://github.com/Dao-AILab/flash-attention.git@abd9943b#subdirectory=flash_attn/cute"
 
 # TODO: remove once flash-attn gates the ampere_helpers import or cutlass-dsl re-adds it.
 echo "=== copying ampere_helpers.py from flashinfer vendor ==="

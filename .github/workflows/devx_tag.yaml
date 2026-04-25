@@ -15,7 +15,11 @@ concurrency:
 jobs:
   create-dev-tag:
     name: Create .dev tag
-    if: github.ref == 'refs/heads/main'
+    # Upstream-only: auto-tags `.devN` releases on every push to main.
+    # On a fork that doesn't share the upstream release cadence, this would
+    # silently start tagging once a release exists. Re-enable for a fork by
+    # changing the `if:` line below to your repo slug.
+    if: github.repository == 'PrimeIntellect-ai/prime-rl' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Create next .dev tag from latest release

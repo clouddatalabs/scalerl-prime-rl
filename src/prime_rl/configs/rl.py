@@ -460,42 +460,16 @@ class RLConfig(BaseConfig):
             )
         return self
 
-    @model_validator(mode="after")
-    def validate_is_ratio_loss_with_external_rollout_string_client(self):
-        """Reject IS-ratio losses (CISPO, default with importance ratios) when
-        the rollout path produces synthesized zero logprobs.
-
-        With `orchestrator.use_token_client=False` (chat-client), local vLLM
-        (`teacher_rollout_model is None`) returns real per-token logprobs via
-        the orchestrator's `return_token_ids=true` extra_body — see
-        `OrchestratorConfig.resolve_env_config`. But an external
-        OpenAI-compatible rollout service (`teacher_rollout_model` set) does
-        NOT preserve token logprobs through the chat-completions API, and
-        `pretokenize_rollout_trajectory` reconstructs them as `[0.0]*N`. CISPO's
-        `rho = exp(trainer_lp - 0)` is then exp(trainer_lp), not the IS ratio
-        the recipe needs — silent paper-fidelity regression.
-
-        SFT does not consume inference_logprobs (already validated by
-        `validate_sft_no_teacher`), so this guard fires only on cispo/default.
-        """
-        if self.trainer.loss.type not in {"cispo", "default"}:
-            return self
-        if self.orchestrator.use_token_client:
-            return self
-        if self.orchestrator.teacher_rollout_model is None:
-            return self
-        raise ValueError(
-            f"trainer.loss.type='{self.trainer.loss.type}' with "
-            "orchestrator.use_token_client=False AND an external "
-            "[orchestrator.teacher_rollout_model] is unsafe: the chat-client "
-            "path will reconstruct completion_logprobs as [0.0]*N for any rollout "
-            "where the external service didn't return token-level logprobs, and "
-            "CISPO/Default importance ratios computed against zero inference_logprobs "
-            "are not the recipe IS ratios. Either use use_token_client=True (TITO "
-            "client preserves real logprobs), drop the external "
-            "teacher_rollout_model and use local vLLM (which sets return_token_ids=true), "
-            "or switch to loss.type='sft' (does not consume inference_logprobs)."
-        )
+    # Note: a previously-added `validate_is_ratio_loss_with_external_rollout_string_client`
+    # was redundant — `validate_external_rollout_mode` (below) already rejects
+    # `teacher_rollout_model` with any non-SFT loss. The remaining gap is when an
+    # operator overrides `[orchestrator.client] base_url` to point at an external
+    # service WITHOUT setting `teacher_rollout_model` — neither validator catches
+    # that, and `pretokenize_rollout_trajectory` reconstructs zero logprobs that
+    # would silently corrupt CISPO/Default. The runtime check in
+    # `prime_rl.trainer.rl.train` raises before compute_loss when a micro-batch
+    # carries `inference_logprobs_synthesized=True` and the loss is CISPO/Default —
+    # that's the load-bearing guard for the bypass path.
 
     @model_validator(mode="after")
     def validate_fp32_lm_head_no_fp8_transfer(self):

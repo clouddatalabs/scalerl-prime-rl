@@ -138,3 +138,49 @@ def test_pretokenize_rollout_trajectory_for_sft():
         [True] * len(step1_completion_ids) + [False] * len(step2_new_prompt_ids) + [True] * len(step2_completion_ids)
     )
     assert rollout.completion_logprobs == [0.0] * len(rollout.completion_ids)
+    # Reconstructed steps must mark `inference_logprobs_synthesized=True` so
+    # downstream code can refuse to run an importance-ratio loss against
+    # zero-fill logprobs. Both contributing steps had `tokens=None` and ran
+    # the reconstruction path; the sample-level flag must reflect that.
+    assert rollout.inference_logprobs_synthesized is True
+
+
+def test_pretokenize_does_not_mark_synthesized_when_tokens_present():
+    """When the chat client preserves real token data (vLLM with
+    return_token_ids=true), `pretokenize_rollout_trajectory` should NOT mark
+    the step synthesized — the logprobs are real generator logprobs."""
+    tokenizer = SimpleChatTokenizer()
+    output = vf.RolloutOutput(
+        example_id=99,
+        trajectory=[
+            vf.TrajectoryStep(
+                prompt=[{"role": "user", "content": "U1"}],
+                completion=[{"role": "assistant", "content": "A1"}],
+                response=MagicMock(),
+                tokens={
+                    "prompt_ids": [1, 2, 3],
+                    "prompt_mask": [False, False, False],
+                    "completion_ids": [10, 11, 12],
+                    "completion_mask": [True, True, True],
+                    "completion_logprobs": [-0.5, -0.7, -0.9],
+                    "routed_experts": None,
+                },
+                reward=None,
+                advantage=None,
+                is_truncated=False,
+                trajectory_id="1",
+                extras={},
+            )
+        ],
+        sampling_args={"temperature": 1.0},
+        error=None,
+    )
+
+    pretokenize_rollout_trajectory(output, tokenizer)
+    rollouts = interleave_rollout(output)
+    assert rollouts is not None
+    assert len(rollouts) == 1
+    rollout = rollouts[0]
+    # Real logprobs preserved → synthesized flag must remain False.
+    assert rollout.inference_logprobs_synthesized is False
+    assert rollout.completion_logprobs == [-0.5, -0.7, -0.9]

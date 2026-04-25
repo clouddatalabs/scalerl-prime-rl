@@ -97,7 +97,13 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
 **Cluster preconditions:**
 - 8 GPUs visible to one node (config splits 4 train / 4 inference).
 - SLURM with a partition you pass via `sbatch -p <name>` (the sbatch defaults
-  to `gpu`).
+  to `gpu`). Run `sinfo` on the login node first to find the right name.
+- **Build toolchain on the login node** (where `uv sync --extra all` runs):
+  `build-essential` (gcc/g++), `git`, `curl`. CUTLASS + flash-attn-cute build
+  from source on first sync. On a minimal/distroless image, install via
+  `INSTALL_BASE_PACKAGES=1 bash scripts/install.sh` or your cluster's
+  package manager — `uv sync` will otherwise fail with an opaque CUTLASS
+  error halfway through.
 - **Network from the COMPUTE node, OR pre-stage on the login node.** Many
   managed clusters firewall compute nodes off github.com / huggingface.co.
   If yours does, `hf download Qwen/Qwen3-8B` and

@@ -84,6 +84,24 @@ _DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
 _TEST_TIMEOUT_SECONDS = 300
 
 
+def _compute_run_id() -> str:
+    """Per-run-unique ID for the TB env's container labels.
+
+    `SLURM_JOB_ID` is the canonical SLURM context (slurm guarantees
+    uniqueness across jobs). For ad-hoc launches we use a 16-hex-char
+    uuid (64 bits, ~1e-9 collision at 100k containers) — NOT
+    `pid + integer-second time`, which would silently collide on two
+    ad-hoc launches in the same wall-clock second on the same host
+    and cause the second's startup sweep to kill the first's
+    containers. Module-level so tests pin the production path
+    rather than re-implementing it in a stub subclass.
+    """
+    slurm_id = os.environ.get("SLURM_JOB_ID")
+    if slurm_id:
+        return f"slurm-{slurm_id}"
+    return f"adhoc-{uuid.uuid4().hex[:16]}"
+
+
 @dataclass(frozen=True)
 class _TaskSpec:
     name: str
@@ -494,13 +512,7 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         # PID + start time (good enough for ad-hoc launches).
         self._stale_sweep_lock = asyncio.Lock()
         self._stale_sweep_done = False
-        slurm_id = os.environ.get("SLURM_JOB_ID")
-        if slurm_id:
-            self._run_id = f"slurm-{slurm_id}"
-        else:
-            # uuid (not pid+integer-second time) so two ad-hoc launches in
-            # the same wall-clock second on the same host don't collide.
-            self._run_id = f"adhoc-{uuid.uuid4().hex[:16]}"
+        self._run_id = _compute_run_id()
 
         # ``_container_id`` is injected by ``update_tool_args`` on every
         # call; advertising it in the model-visible signature would just

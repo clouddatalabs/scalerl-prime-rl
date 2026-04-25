@@ -97,6 +97,14 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
         # Default to a neutral 1.0 weight per packed sequence; overwritten by
         # apply_prompt_average_sequence_weights when prompt_average_loss is set.
         sequence_loss_weights=[1.0],
+        # Carry forward the synthesized-logprobs flag so compute_loss can
+        # refuse importance-ratio losses against zero-fill inference_logprobs
+        # (the load-bearing config validator may have been bypassed if the
+        # operator points `[orchestrator.client]` at an external service
+        # without setting `teacher_rollout_model`).
+        inference_logprobs_synthesized=bool(
+            getattr(training_example, "inference_logprobs_synthesized", False)
+        ),
     )
 
 
@@ -156,6 +164,11 @@ def packed_samples_into_micro_bs(
                     bin_content.mm_token_type_ids.extend(sample.mm_token_type_ids)
                 bin_content.position_ids.extend(sample.position_ids)
                 bin_content.sequence_loss_weights.extend(sample.sequence_loss_weights)
+                # Bin is "synthesized" if ANY contributing sample has the flag —
+                # one corrupted sample in the pack contaminates the whole bin's
+                # importance-ratio computation.
+                if sample.inference_logprobs_synthesized:
+                    bin_content.inference_logprobs_synthesized = True
                 bin_content.lora_num_tokens[idx] += len(sample.input_ids)
                 break
         else:

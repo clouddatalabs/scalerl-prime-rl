@@ -84,3 +84,10 @@ class MicroBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
     # averaging). Default `[]` keeps msgspec backward-compat with old serialized
     # batches — readers fall through the `not weights` branch in compute_loss.
     sequence_loss_weights: list[float] = []
+    # True iff ANY of the packed samples in this micro-batch has
+    # `inference_logprobs_synthesized=True` (i.e. completion_logprobs were
+    # reconstructed from chat-template render with no real generator
+    # logprobs). The trainer's `compute_loss` rejects this case for
+    # importance-ratio losses (CISPO, Default) — `rho = exp(trainer_lp - 0)`
+    # is not the IS ratio. SFT can train on it (does not consume the field).
+    inference_logprobs_synthesized: bool = False

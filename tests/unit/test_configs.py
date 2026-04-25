@@ -383,6 +383,41 @@ def test_rl_config_rejects_sft_with_teacher_model():
         )
 
 
+def test_rl_config_rejects_cispo_with_external_rollout_model():
+    """`validate_external_rollout_mode` rejects any non-SFT loss with
+    `teacher_rollout_model` set. CISPO + external rollout would also hit
+    the silent-zero-logprobs path; this test pins the rejection.
+    """
+    with pytest.raises(ValidationError, match="teacher_rollout_model.*sft"):
+        RLConfig.model_validate(
+            {
+                "orchestrator": {
+                    "prompt_average_loss": True,
+                    "use_token_client": False,
+                    "teacher_rollout_model": {"client": {}, "model": {}},
+                },
+                "trainer": {"loss": {"type": "cispo", "loss_scale_mode": "sequence"}},
+                "inference": None,
+            }
+        )
+
+
+def test_rl_config_accepts_sft_with_external_rollout_string_client():
+    """SFT does not consume inference_logprobs, so it's safe even with the
+    string-client + external-rollout reconstruction path."""
+    config = RLConfig.model_validate(
+        {
+            "orchestrator": {
+                "use_token_client": False,
+                "teacher_rollout_model": {"client": {}, "model": {}},
+            },
+            "trainer": {"loss": {"type": "sft", "loss_scale_mode": "token"}},
+            "inference": None,
+        }
+    )
+    assert config.trainer.loss.type == "sft"
+
+
 def test_rl_config_rejects_fp32_lm_head_with_fp8_weight_transfer():
     """fp32_lm_head + NCCL FP8 weight transfer is self-defeating: the
     LM-head weights would be quantized to FP8 before vLLM's promote-to-fp32
