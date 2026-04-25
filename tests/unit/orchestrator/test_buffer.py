@@ -302,15 +302,35 @@ def test_buffer_no_positive_resampling_disabled_by_default(dummy_envs, make_roll
 
 
 def test_buffer_no_positive_resampling_save_load_round_trip(dummy_envs, make_rollouts, tmp_path):
-    """Save+load preserves excluded_examples and pass_rate_stats."""
+    """Save+load preserves excluded_examples and pass_rate_stats.
+
+    Note on `make_rollouts(buffer, env_name, indices, ...)`: `indices` is a
+    POSITIONAL index into `list(eb.examples.values())` at call time, not an
+    example_id. After update #1 excludes example 0, `eb.examples.values()`
+    starts at example_id=1 — so `[0]` in the second call targets example_id=1.
+    """
     buffer = Buffer(
         dummy_envs,
         BufferConfig(no_positive_resampling=True, no_positive_resampling_threshold=0.9),
     )
 
-    # Push example 0 into excluded; let example 1 accumulate one below-threshold group.
+    # update #1: positional 0 is example_id=0 (no eviction yet). Reward 1.0 ≥ 0.9
+    # → NPR moves it to excluded. Save the example dict so we can verify hash
+    # round-trip after load (saved hash should match new_buffer's hash for ex0).
+    excluded_example_dict = dict(buffer.env_buffers["env_a"].examples[0])
     buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[1.0]))
-    buffer.update(make_rollouts(buffer, "env_a", [1], rewards=[0.5]))
+    assert 0 in buffer.env_buffers["env_a"].excluded_examples, (
+        "Sanity: the first update should have excluded example 0 (reward 1.0 ≥ threshold 0.9)."
+    )
+
+    # update #2: positional 0 NOW resolves to example_id=1, since 0 was just
+    # evicted. Reward 0.5 stays below threshold → NPR records stats only.
+    below_threshold_example_dict = dict(buffer.env_buffers["env_a"].examples[1])
+    buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[0.5]))
+    assert 1 in buffer.env_buffers["env_a"].examples, (
+        "Sanity: example 1 should still be in the active pool after a sub-threshold update."
+    )
+
     buffer.save(tmp_path / "buffer")
 
     new_buffer = Buffer(
@@ -322,12 +342,47 @@ def test_buffer_no_positive_resampling_save_load_round_trip(dummy_envs, make_rol
 
     assert 0 in eb.excluded_examples, "Excluded example must round-trip."
     assert 0 not in eb.examples, "Excluded example must NOT be back in the active pool."
-    # Both examples accumulated stats — example 0 (excluded) and example 1 (still in pool).
     assert len(eb.pass_rate_stats) == 2, f"Expected stats for both examples; got {eb.pass_rate_stats}"
-    # Verify the below-threshold example's stats round-trip with the right pass rate.
-    h_below = eb.get_example_hash(eb.examples[1])
+
+    h_excluded = eb.get_example_hash(excluded_example_dict)
+    h_below = eb.get_example_hash(below_threshold_example_dict)
+    assert eb.pass_rate_stats[h_excluded]["pass_rate"] == pytest.approx(1.0, abs=1e-6)
+    assert eb.pass_rate_stats[h_excluded]["num_groups"] == 1.0
     assert eb.pass_rate_stats[h_below]["pass_rate"] == pytest.approx(0.5, abs=1e-6)
     assert eb.pass_rate_stats[h_below]["num_groups"] == 1.0
+    # And the live example_buffer hash matches the saved hash for the still-active prompt.
+    assert eb.get_example_hash(eb.examples[1]) == h_below
+
+
+def test_buffer_no_positive_resampling_save_load_hashes_match_new_dataset(dummy_envs, make_rollouts, tmp_path):
+    """Hashes stored in pass_rate_stats survive a fresh Buffer over the same dataset.
+
+    Regression on the property the round-trip relies on: hashing
+    `eb.examples[i]` from a freshly-constructed Buffer against the same envs
+    yields the same bytes as the save-time hash. If `Buffer.__init__` ever
+    mutates the example dict in a way that affects `hash_keys`, this fails
+    and the round-trip silently loses stats.
+    """
+    buffer = Buffer(
+        dummy_envs,
+        BufferConfig(no_positive_resampling=True, no_positive_resampling_threshold=0.9),
+    )
+    saved_hashes = {
+        eid: buffer.env_buffers["env_a"].get_example_hash(buffer.env_buffers["env_a"].examples[eid])
+        for eid in (0, 1, 2)
+    }
+    # Drive at least one stats write so the file is non-empty.
+    buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[0.5]))
+    buffer.save(tmp_path / "buffer")
+
+    new_buffer = Buffer(
+        dummy_envs,
+        BufferConfig(no_positive_resampling=True, no_positive_resampling_threshold=0.9),
+    )
+    new_buffer.load(tmp_path / "buffer")
+    eb = new_buffer.env_buffers["env_a"]
+    for eid, expected_hash in saved_hashes.items():
+        assert eb.get_example_hash(eb.examples[eid]) == expected_hash
 
 
 def test_buffer_no_positive_resampling_threshold_required():
