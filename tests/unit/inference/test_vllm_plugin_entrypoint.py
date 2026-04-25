@@ -187,6 +187,73 @@ def test_promote_parallel_lm_head_to_fp32_refuses_tied_embeddings(monkeypatch):
         promote_parallel_lm_head_to_fp32(model)
 
 
+def test_promote_parallel_lm_head_to_fp32_refuses_storage_aliased_embedding(monkeypatch):
+    """Belt-and-suspenders: even when `tie_word_embeddings=False` is *declared*,
+    some vLLM load paths still alias `ParallelLMHead.weight` to the input
+    embedding's storage. Promoting in place would push fp32 weights into the
+    embedding's bf16 forward and produce dtype-mismatch or silent garbage —
+    defeating the §3.2 logprob parity ingredient. Storage-id check (`id()`
+    comparison) catches this case the declared-flag check misses.
+    """
+    import pytest
+    import torch
+
+    from prime_rl.inference.patches import promote_parallel_lm_head_to_fp32
+
+    monkeypatch.setenv("PRIME_RL_VLLM_FP32_LM_HEAD", "1")
+    _stub_parallel_lm_head_class(monkeypatch, _FakeFloatLMHead)
+
+    head = _FakeFloatLMHead(torch.bfloat16)
+
+    class _ModelWithAliasedEmbedding:
+        def __init__(self, head_):
+            self.config = type("Cfg", (), {"tie_word_embeddings": False})()
+            self._head = head_
+            # Same tensor object as the LM-head weight — the alias case.
+            self._embedding = type("Emb", (), {"weight": head_.weight})()
+
+        def modules(self):
+            return [self._head]
+
+        def get_input_embeddings(self):
+            return self._embedding
+
+    model = _ModelWithAliasedEmbedding(head)
+    with pytest.raises(RuntimeError, match="aliased to the input embedding"):
+        promote_parallel_lm_head_to_fp32(model)
+
+
+def test_promote_parallel_lm_head_to_fp32_accepts_distinct_embedding(monkeypatch):
+    """Sanity: when the embedding weight is a SEPARATE tensor (no aliasing),
+    the storage-id check must NOT trip. Same-shape weights with different
+    storage are the typical untied-embedding case."""
+    import torch
+
+    from prime_rl.inference.patches import promote_parallel_lm_head_to_fp32
+
+    monkeypatch.setenv("PRIME_RL_VLLM_FP32_LM_HEAD", "1")
+    _stub_parallel_lm_head_class(monkeypatch, _FakeFloatLMHead)
+
+    head = _FakeFloatLMHead(torch.bfloat16)
+
+    class _ModelWithDistinctEmbedding:
+        def __init__(self, head_):
+            self.config = type("Cfg", (), {"tie_word_embeddings": False})()
+            self._head = head_
+            self._embedding = type("Emb", (), {"weight": torch.zeros_like(head_.weight)})()
+
+        def modules(self):
+            return [self._head]
+
+        def get_input_embeddings(self):
+            return self._embedding
+
+    model = _ModelWithDistinctEmbedding(head)
+    promoted = promote_parallel_lm_head_to_fp32(model)
+    assert promoted == 1
+    assert head.weight.dtype == torch.float32
+
+
 def test_promote_parallel_lm_head_to_fp32_raises_when_zero_promoted(monkeypatch):
     """No ParallelLMHead found but env var is on → raise instead of silently
     shipping a recipe regression. Catches vLLM module-hierarchy drift.

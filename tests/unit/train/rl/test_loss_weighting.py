@@ -570,6 +570,26 @@ def test_cispo_loss_default_scale_mode_is_sequence():
     assert getattr(loss_fn, "loss_scale_mode") == "sequence"
 
 
+def test_cispo_loss_does_not_propagate_inf_trainer_logprob_at_masked_position():
+    """Symmetric guard with default_loss_fn: a non-finite `trainer_logprobs`
+    at a `loss_mask=False` position would yield IEEE NaN under
+    `0.0 * (-inf)` and poison `.sum()`. trainer_logprobs is finite on the
+    shipped FP32 LM-head + Qwen3-8B path, but the cispo path now applies
+    the same belt-and-suspenders mask as default_loss_fn for symmetry.
+    """
+    from prime_rl.trainer.rl.loss import cispo_loss_fn
+
+    inputs = LossInputs(
+        trainer_logprobs=torch.tensor([0.0, float("-inf"), 0.0]),
+        inference_logprobs=torch.tensor([0.0, 0.0, 0.0]),
+        teacher_logprobs=None,
+        advantages=torch.tensor([1.0, 1.0, 1.0]),
+        loss_mask=torch.tensor([True, False, True]),
+    )
+    out = cispo_loss_fn(inputs, CISPOLossConfig(eps_max=4.0, adv_tau=1.0))
+    assert torch.isfinite(out.loss), f"cispo leaked NaN/Inf via trainer_logprobs: {out.loss}"
+
+
 def test_setup_loss_fn_attaches_loss_scale_mode_to_all_paths():
     for cfg in [
         DefaultLossConfig(),

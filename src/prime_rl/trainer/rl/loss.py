@@ -211,7 +211,18 @@ def cispo_loss_fn(inputs: LossInputs, loss_config: CISPOLossConfig) -> LossOutpu
     truncated_ratio = torch.clamp(importance_ratio, max=loss_config.eps_max).detach()
 
     advantages = loss_config.adv_tau * inputs.advantages
-    pg_per_token = inputs.loss_mask * truncated_ratio * advantages * inputs.trainer_logprobs
+    # Mirror the IEEE 0.0 * NaN/Inf = NaN defense applied in default_loss_fn:
+    # `trainer_logprobs` is the gradient-carrying factor here. On the shipped
+    # FP32 LM-head + Qwen3-8B path it is always finite, but the same hazard
+    # default_loss_fn guards against (selective_log_softmax can return -inf
+    # when labels indexes a row the model masked to -inf) applies here too —
+    # `loss_mask=False * finite * finite * -inf` evaluates to NaN under IEEE
+    # 754 and would poison the entire batch's gradient via `.sum()`. Mask
+    # before multiplying so non-trainable positions truly contribute zero.
+    safe_trainer_logprobs = torch.where(
+        inputs.loss_mask, inputs.trainer_logprobs, torch.zeros_like(inputs.trainer_logprobs)
+    )
+    pg_per_token = inputs.loss_mask * truncated_ratio * advantages * safe_trainer_logprobs
     loss = -pg_per_token.sum()
 
     metrics = {

@@ -324,9 +324,10 @@ def test_rl_config_rejects_fp32_lm_head_with_default_matmul_precision():
 
 
 def test_trainer_config_rejects_fp32_lm_head_with_default_matmul_precision():
-    """The matmul_precision check must fire on the SFT path too, not just RL.
-    SFT loads TrainerConfig directly and would otherwise silently get TF32
-    on a fp32_lm_head=True child config that omits matmul_precision."""
+    """TrainerConfig validates standalone for direct cli(TrainerConfig) callers
+    (the RL trainer subprocess, custom test fixtures). Belt-and-suspenders to
+    the RLConfig-level cross-validator. (SFT goes through SFTConfig, which
+    has its own validator below.)"""
     with pytest.raises(ValidationError, match="matmul_precision='highest'"):
         TrainerConfig.model_validate(
             {"model": {"fp32_lm_head": True}}
