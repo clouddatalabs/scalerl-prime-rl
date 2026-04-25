@@ -75,8 +75,13 @@ class TrainSamplingConfig(BaseConfig):
     temperature: Annotated[
         float,
         Field(
-            ge=0,
-            description="Temperature for sampling.",
+            # `gt=0` not `ge=0`: the trainer divides logits by temperature
+            # (trainer/rl/train.py compute_train_logits / scaled_logits).
+            # `temperature=0` is legal under vLLM (greedy decode) but on the
+            # trainer side produces division-by-zero → ±inf logits → NaN
+            # log_softmax → silent training corruption. Reject at config-load.
+            gt=0,
+            description="Temperature for sampling. Must be > 0 because the trainer divides logits by temperature; temperature=0 is allowed by vLLM (greedy decode) but corrupts trainer-side log-softmax. Use a small positive value (e.g. 0.01) for near-greedy.",
         ),
     ] = 1.0
 
@@ -780,7 +785,11 @@ class DefaultAdvantageConfig(BaseModel):
                 "orchestrator runs filters first (zero-advantage / NPR / etc.) and then "
                 "calls `apply_batch_advantage_normalization`, so the std reflects only "
                 "rollouts that actually train. Filtered rollouts keep their pre-norm "
-                "advantage value (they don't enter training, so it's irrelevant)."
+                "advantage value (they don't enter training, so it's irrelevant). "
+                "DEVIATION: ScaleRL §3.4 prescribes 'batch'. The default is 'none' to "
+                "preserve upstream prime-rl behavior on non-ScaleRL paths; both shipped "
+                "configs (configs/scalerl_*/rl.toml) override to 'batch'. A child config "
+                "that drops the override silently reverts to Dr. GRPO."
             )
         ),
     ] = "none"
@@ -1154,7 +1163,17 @@ class OrchestratorConfig(BaseConfig):
         int,
         Field(
             ge=0,
-            description="Maximum number of policies that are allowed to generate a single rollout. Rollouts that are generated from more than `max_off_policy_steps` steps ahead of training will be discarded. Higher values yield better throughput, but lead to more off-policyness in training.",
+            description=(
+                "Maximum number of policies that are allowed to generate a single rollout. "
+                "Rollouts that are generated from more than `max_off_policy_steps` steps "
+                "ahead of training will be discarded. Higher values yield better throughput, "
+                "but lead to more off-policyness in training. "
+                "DEVIATION: ScaleRL Async Pipeline-RL §3.1 is never-cancel — rollouts "
+                "started for an older policy still complete and contribute. The default 8 "
+                "preserves upstream prime-rl's discard policy; both shipped ScaleRL configs "
+                "(configs/scalerl_*/rl.toml) override to 1_000_000_000 to disable cancellation. "
+                "A child config that drops the override silently re-enables cancellation."
+            ),
         ),
     ] = 8
 
