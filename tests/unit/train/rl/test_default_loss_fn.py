@@ -192,6 +192,32 @@ def test_default_loss_does_not_propagate_inf_inference_logprob_at_masked_positio
     assert torch.isfinite(out.loss), f"loss leaked NaN/Inf via importance_ratio: {out.loss}"
 
 
+def test_cispo_loss_does_not_propagate_nan_at_trainable_position():
+    """CISPO must mirror default_loss_fn's `torch.isfinite` AND-gate at
+    trainable positions. The clamp `truncated_ratio = clamp(rho, max=eps_max)`
+    only bounds the upper tail; a NaN flows through clamp unchanged. If both
+    `trainer_logprobs[t]` and `inference_logprobs[t]` are simultaneously
+    `-inf` (an aliased adapter rollout where inference is several adapters
+    off-policy), `(-inf) - (-inf) = NaN` then `exp(NaN) = NaN` and a single
+    such position would NaN the entire micro-batch's loss.
+    """
+    from prime_rl.configs.trainer import CISPOLossConfig
+    from prime_rl.trainer.rl.loss import cispo_loss_fn
+
+    inputs = _inputs(
+        # Position 1 has both trainer and inference logprobs at -inf, so
+        # `exp(trainer - inference) = exp(NaN) = NaN`.
+        trainer_lp=[0.0, float("-inf"), 0.0],
+        inference_lp=[0.0, float("-inf"), 0.0],
+        advantages=[0.5, 0.5, 0.5],
+        loss_mask=[True, True, True],
+    )
+    out = cispo_loss_fn(inputs, CISPOLossConfig(eps_max=4.0, adv_tau=1.0))
+    assert torch.isfinite(out.loss), (
+        f"cispo loss leaked NaN at trainable position with both logprobs=-inf: {out.loss}"
+    )
+
+
 def test_default_loss_does_not_propagate_inf_inference_logprob_at_TRAINABLE_position():
     """Belt-and-suspenders for the importance-ratio path at TRAINABLE positions.
 

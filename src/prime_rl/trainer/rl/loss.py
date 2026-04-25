@@ -235,16 +235,36 @@ def cispo_loss_fn(inputs: LossInputs, loss_config: CISPOLossConfig) -> LossOutpu
     # against future schema changes that introduce non-finite values
     # upstream (e.g. external generators emitting -inf at impossible
     # tokens).
+    #
+    # AND: gate non-finite ratios at TRAINABLE positions too. The clamp
+    # `truncated_ratio = clamp(importance_ratio, max=eps_max)` only bounds
+    # the upper tail; a NaN flows through clamp unchanged. If both
+    # `trainer_logprobs[t]` and `inference_logprobs[t]` are simultaneously
+    # `-inf` (an aliased adapter rollout where inference is several adapters
+    # off-policy, or any future generator emitting -inf at "impossible"
+    # tokens), `(-inf) - (-inf) = NaN` then `exp(NaN) = NaN` and a single
+    # such position NaNs the entire micro-batch's loss. Mirror
+    # default_loss_fn's `torch.isfinite(...)` AND-gate on the trainable
+    # path so cispo is symmetric with default_loss_fn's defense rather than
+    # only half of it.
+    # Combined finite-AND-trainable mask — a position contributes only if it
+    # is trainable AND every factor (ratio AND trainer_logprobs) is finite
+    # there. Otherwise `safe_truncated_ratio == 0` but `safe_trainer_logprobs ==
+    # ±inf` would still reach the multiply and `0 * ±inf = NaN` poisons the
+    # batch. Gating every factor by the same combined mask fixes that.
+    finite_ratio = torch.isfinite(truncated_ratio)
+    finite_lp = torch.isfinite(inputs.trainer_logprobs)
+    safe_mask = inputs.loss_mask & finite_ratio & finite_lp
     safe_trainer_logprobs = torch.where(
-        inputs.loss_mask, inputs.trainer_logprobs, torch.zeros_like(inputs.trainer_logprobs)
+        safe_mask, inputs.trainer_logprobs, torch.zeros_like(inputs.trainer_logprobs)
     )
     safe_truncated_ratio = torch.where(
-        inputs.loss_mask, truncated_ratio, torch.zeros_like(truncated_ratio)
+        safe_mask, truncated_ratio, torch.zeros_like(truncated_ratio)
     )
     safe_advantages = torch.where(
-        inputs.loss_mask, advantages, torch.zeros_like(advantages)
+        safe_mask, advantages, torch.zeros_like(advantages)
     )
-    pg_per_token = inputs.loss_mask * safe_truncated_ratio * safe_advantages * safe_trainer_logprobs
+    pg_per_token = safe_mask * safe_truncated_ratio * safe_advantages * safe_trainer_logprobs
     loss = -pg_per_token.sum()
 
     metrics = {
