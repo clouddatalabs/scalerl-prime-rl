@@ -63,18 +63,13 @@ def compute_entropy(shifted_logits: Float[Tensor, "batch seq vocab"]) -> Float[T
     return entropy
 
 
-@jaxtyped(typechecker=typechecker)
-def shift_logits(
-    logits: Float[Tensor, "batch seq vocab"], left_pad_logit: Float[Tensor, "batch 1 vocab"] | None = None
-) -> Float[Tensor, "batch seq vocab"]:
-    """Removes final token logits and adds a left pad logit for the first token."""
-    # We drop the last logit because it corresponds to the next token that will be sampled but is not here yet
-    batch, seq, vocab = logits.shape
-    logits = logits[:, :-1, :]  # (batch, seq-1, vocab)
-    if left_pad_logit is None:
-        left_pad_logit = torch.zeros(batch, 1, vocab, device=logits.device, dtype=logits.dtype)  # (batch, 1, vocab)
-    logits = torch.cat([left_pad_logit, logits], dim=1)  # (batch, seq, vocab)
-    return logits
+# NOTE: `shift_logits` previously lived here but was dead code (zero callers,
+# verified via repo-wide grep). The live shift functions are
+# `shift_tensor_left` / `shift_tensor_right` below, which operate on
+# already-reduced log-prob / entropy tensors (1-D per token) rather than the
+# full vocab-dimensional logits. Deleted to remove a single-use abstraction
+# footgun. Reintroduce per CLAUDE.md "extract only when there's a second
+# caller" if a vocab-shape shift is ever needed.
 
 
 def shift_tensor_left(t: Float[Tensor, "batch seq"]) -> Float[Tensor, "batch seq"]:
@@ -249,9 +244,9 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     loss = (-pg_loss + loss_config.kl_tau * kl_loss).sum()
 
     metrics = {
-        "mismatch_kl": _safe_mean(mismatch_kl, loss_mask),  # all trainable tokens
-        "masked_mismatch_kl": _safe_mean(mismatch_kl, loss_mask & is_masked),  # all trainable, masked tokens
-        "unmasked_mismatch_kl": _safe_mean(mismatch_kl, keep_mask),  # all trainable, unmasked tokens
+        # `mismatch_kl` family is populated below by the finite-gated writes;
+        # the upstream pre-finite-gate writes were dead (every key was
+        # immediately overwritten on the next block).
         "is_masked": _safe_mean(is_masked, loss_mask),
         "is_masked_low": _safe_mean(is_masked_low, loss_mask),
         "is_masked_high": _safe_mean(is_masked_high, loss_mask),

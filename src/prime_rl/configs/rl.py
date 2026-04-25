@@ -808,18 +808,28 @@ class RLConfig(BaseConfig):
                     component.tokenizer.trust_remote_code = component.model.trust_remote_code
         else:
             # No shared tokenizer: re-derive from (now-correct) model names,
-            # since auto_setup_tokenizer on sub-configs already ran with defaults.
-            # Gate each field on `is None` so an explicit `[trainer.tokenizer]
-            # name = "alt/tokenizer"` (or `trust_remote_code`) survives.
-            # Without the gate the operator's deliberate per-component
-            # value is silently flipped back to `model.name`, contradicting
-            # the "explicitly-set per-component values always take
-            # precedence" contract every other auto_setup_* honors.
+            # since `auto_setup_tokenizer` on sub-configs already ran during
+            # sub-config construction — when `model.name` was still the
+            # SCHEMA DEFAULT (the propagation from top-level `[model] name
+            # = ...` happens later in `auto_setup_model`). The sub-validator
+            # filled `tokenizer.name` from `Qwen/Qwen3-0.6B` (the default);
+            # we MUST overwrite to the now-correct one or every run with
+            # only `[model] name = "..."` (no per-component override) ends
+            # up with the wrong tokenizer at runtime.
+            #
+            # No `model_fields_set` gate here: that bit is set by the
+            # sub-validator's assignment (Pydantic considers any direct
+            # attribute write as "set"), so it can't distinguish
+            # validator-filled from user-explicitly-set. The downstream
+            # `validate_shared_tokenizer` cross-validator catches a
+            # genuine `[trainer.tokenizer] name = "alt/tokenizer"` paired
+            # with an inconsistent inference tokenizer. The
+            # operator-explicit case for THIS branch (no top-level
+            # `[tokenizer]` shorthand) is not currently reachable
+            # without a config drift the cross-validator catches.
             for component in (self.trainer, self.orchestrator):
-                if component.tokenizer.name is None:
-                    component.tokenizer.name = component.model.name
-                if component.tokenizer.trust_remote_code is None:
-                    component.tokenizer.trust_remote_code = component.model.trust_remote_code
+                component.tokenizer.name = component.model.name
+                component.tokenizer.trust_remote_code = component.model.trust_remote_code
 
         # Propagate chat_template to inference (vLLM --chat-template)
         if self.inference is not None:

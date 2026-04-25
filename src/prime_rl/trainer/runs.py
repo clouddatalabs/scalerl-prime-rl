@@ -57,6 +57,14 @@ class MultiRunManager:
         # Track id_2_idx state at last synchronize_state to calculate diffs
         self._last_synced_id_2_idx: dict[str, int] = {}
 
+        # Sync-call counter for stale-store-payload detection (peers verify
+        # the received `_sync_call_idx` matches the local counter and bail
+        # if master failed to write the current sync's payload). Initialize
+        # here so a future hot-reload / pickle path that bypasses __init__
+        # would crash on attribute-access rather than silently restart at 0
+        # and confuse the version-tag check.
+        self._sync_call_idx: int = 0
+
         # Store modules with their FQN prefixes for parameter management
         self._modules: list[tuple[str, "MultiLoRALinear"]] = []
 
@@ -413,8 +421,8 @@ class MultiRunManager:
         # crashes. Tagging the payload with a counter master increments on
         # every successful set lets peers detect "no new data this step"
         # and fail fast.
-        sync_call_idx = getattr(self, "_sync_call_idx", 0) + 1
-        self._sync_call_idx = sync_call_idx
+        self._sync_call_idx += 1
+        sync_call_idx = self._sync_call_idx
         try:
             if self.world.is_master:
                 # Include configs for new runs so non-master ranks have them
