@@ -68,7 +68,11 @@ def test_transformers_v5_compat_does_not_raise_at_module_top():
     # Should return cleanly, even on a vLLM pin where some internal
     # patches log warnings about renamed symbols. The contract is
     # "umbrella body executes without raising"; per-patch failures are
-    # logged and isolated.
+    # logged and isolated. The DOWNSTREAM contract — that the FP32
+    # LM-head patch actually installs the sentinel attribute — is
+    # pinned separately by `test_promote_parallel_lm_head_to_fp32_*`
+    # below, which exercises `promote_parallel_lm_head_to_fp32` directly
+    # against stub classes (the umbrella just dispatches to it).
     transformers_v5_compat()
 
 

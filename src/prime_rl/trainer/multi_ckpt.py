@@ -186,8 +186,19 @@ class MultiCheckpointManager:
                 saved_ok = True
             except FileNotFoundError:
                 self.logger.warning(f"Run {idx} deleted during checkpoint, skipping")
-            except Exception as e:
-                self.logger.error(f"Error checkpointing run {idx}: {e}")
+            except OSError as e:
+                # Narrow the catch to documented runtime failures — `OSError`
+                # covers ENOSPC mid-`torch.save`, EACCES on a read-only mount,
+                # NFS hiccups, FileExistsError on a re-save. Logical bugs
+                # (None-deref in `run_state` construction, a schema regression
+                # that makes a value non-picklable, a `KeyError`) used to be
+                # silently swallowed by the previous `except Exception` —
+                # `saved_ok=False` flowed through the all-reduce-MIN, master
+                # skipped `mark_stable`, and the run produced no checkpoints
+                # across many intervals while continuing to burn compute. Now
+                # such bugs raise loudly so they show up in the run log on the
+                # first occurrence.
+                self.logger.error(f"Error checkpointing run {idx}: {type(e).__name__}: {e}")
 
             # Single sync point — every rank reaches this regardless of
             # try-except outcome. Replaces the prior pair of barriers (one
