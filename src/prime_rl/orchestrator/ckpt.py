@@ -59,15 +59,20 @@ class CheckpointManager:
         self.logger.debug(f"Loading checkpoint from {ckpt_path}")
         start_time = time.perf_counter()
 
-        # Load progress
+        # `next_group_id` is logically a buffer-side datum (it stamps rollouts
+        # in `rollout_buffer.jsonl`), even though it lives on Progress for
+        # serialization. Restore it iff the buffer is being restored — otherwise
+        # `skip_progress=True + skip_buffer=False` (the default) would reset
+        # the counter to 0 while old rollouts on disk still carry stamped
+        # group_ids in {0..N}, silently colliding in `apply_prompt_average_sequence_weights`.
+        loaded_progress = None
+        with open(ckpt_path / "progress.pt", "rb") as f:
+            loaded_progress = torch.load(f, weights_only=False)["progress"]
+
         if self.config.skip_progress:
             self.logger.info("Skipping progress loading from checkpoint")
         else:
-            with open(ckpt_path / "progress.pt", "rb") as f:
-                state = torch.load(f, weights_only=False)
-
-            # Set progress in-place
-            for key, value in asdict(state["progress"]).items():
+            for key, value in asdict(loaded_progress).items():
                 setattr(progress, key, value)
 
         # Load buffer
@@ -75,6 +80,16 @@ class CheckpointManager:
             self.logger.info("Skipping buffer loading from checkpoint")
         else:
             buffer.load(ckpt_path / "buffer")
+            # If skip_progress dropped next_group_id but we're keeping the
+            # buffer, restore just that field so the scheduler doesn't reissue
+            # colliding ids against the restored rollouts.
+            if self.config.skip_progress:
+                progress.next_group_id = loaded_progress.next_group_id
+                self.logger.info(
+                    "Restored next_group_id=%d from checkpoint (skip_progress is set "
+                    "but the buffer was loaded; the field is logically buffer-side).",
+                    progress.next_group_id,
+                )
 
         self.logger.debug(f"Orchestrator checkpoint loaded in {time.perf_counter() - start_time:.2f} seconds")
 

@@ -148,8 +148,9 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
   (NOT inside a container), so the `prime-rl` user needs **either** read
   access to `/var/run/docker.sock` (typically via `docker` group
   membership) **or** passwordless `sudo docker` configured. If neither
-  applies, the rollouts crash early with a clear "Docker daemon
-  unreachable" error from `environments/terminal_bench/env.py`.
+  applies, the rollouts crash early with a clear error from
+  `environments/terminal_bench/env.py` naming the failed
+  `/var/run/docker.sock` access and the missing `sudo` fallback.
 
 **Resume.** Resubmit the same sbatch with `SCALERL_RESUME=1`:
 ```bash
@@ -187,10 +188,11 @@ raise `keep_last` if you want fast random-step resume and have the storage.
 
 **Reproducibility.** Two consecutive runs of either shipped config will NOT
 be bit-equivalent. Sources of non-determinism:
-- Sampling seeds: `[orchestrator] seed` defaults to 42 (fixed). But
-  `[orchestrator.train.sampling] seed`, `[orchestrator.eval.sampling] seed`,
-  and `[inference] seed` are all unset by default — vLLM samples differently
-  each run. Pin these to integers if you need deterministic rollouts.
+- Sampling seeds: `[orchestrator] seed` defaults to 42 (fixed) and
+  `[inference] seed` defaults to 0 (fixed). But
+  `[orchestrator.train.sampling] seed` and `[orchestrator.eval.sampling] seed`
+  are unset by default, and vLLM's GPU-level kernel non-determinism still
+  yields different samples across runs even with all seeds pinned.
 - NCCL all-reduce ordering across ranks produces ~1e-6 numerical drift even
   with seeds pinned.
 - FA4 (flash_attn.cute) is non-deterministic by design (atomic adds in the
@@ -259,7 +261,9 @@ NCCL experimental override).
 
 ## CI on this fork
 
-Only the `style.yaml` workflow runs on push/PR to this fork. Every other workflow
+Only the `style.yaml` workflow runs on PRs to this fork (push triggers are
+restricted to upstream's `main`/`refactor`, so direct pushes to fork branches
+do not invoke it). Every other workflow
 (`cpu_tests`, `gpu_tests`, `nightly_tests`, `release`, `sync-docs`, `devx_tag`) is gated on
 `github.repository == 'PrimeIntellect-ai/prime-rl'` so the fork doesn't (a) try to invoke
 upstream secrets it doesn't have or (b) push tags / docs into upstream's namespace. To run
