@@ -14,8 +14,11 @@ Preconditions:
   either exist locally or be pullable; the first rollout of a task will
   trigger a pull which dominates time-to-first-step.
 
-The 30 tasks under ``environments/terminal_bench/tasks/`` are checked-in
-Harbor-format directories — no external dataset download required.
+28 usable Harbor-format tasks are checked in under
+``environments/terminal_bench/tasks/`` — no external dataset download required.
+Two task names (``fix-code-vulnerability``, ``sqlite-with-gcov``) are present
+as symlinks to a sibling ``opencode_harbor`` tree that is not vendored here;
+they are excluded from the runtime configs in ``configs/scalerl_terminal_bench``.
 
 Usage in an orchestrator config:
 

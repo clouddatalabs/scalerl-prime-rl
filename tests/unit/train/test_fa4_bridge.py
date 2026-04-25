@@ -112,6 +112,55 @@ def test_model_config_accepts_fa4_with_auto_impl():
     assert cfg.attn == "fa4"
 
 
+@pytest.mark.gpu
+def test_fa4_attention_forward_runs_on_gpu_with_packed_position_ids():
+    """Exercise the cute kernels through `_fa4_attention_forward` on real GPU.
+
+    Constructs a synthetic packed RL batch (two short "sequences" packed into
+    a single buffer with restart position_ids) and checks the bridge returns
+    a tensor with the right shape and no NaN. Runs only when CUDA is
+    available; the math smoke job 694 is the empirical backstop.
+
+    Marked with `@pytest.mark.gpu` so the default CPU `baker test` matrix
+    skips it (consistent with how the rest of the GPU tests are gated).
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for FA4 forward path")
+
+    _register_fa4_attention_interface()
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+
+    # Pretend two packed sequences of length 4 each, with 8 attention heads,
+    # 8 kv heads, head_dim 64. Positions restart at the boundary.
+    batch, total_q, num_heads, head_dim = 1, 8, 8, 64
+    query = torch.randn(batch, num_heads, total_q, head_dim, device=device, dtype=dtype)
+    key = torch.randn(batch, num_heads, total_q, head_dim, device=device, dtype=dtype)
+    value = torch.randn(batch, num_heads, total_q, head_dim, device=device, dtype=dtype)
+    position_ids = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]], device=device)
+
+    class _StubModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.is_causal = True
+            self.linear = torch.nn.Linear(head_dim, head_dim, dtype=dtype, device=device)
+            self.config = type("C", (), {})()
+
+    module = _StubModule()
+    out, _ = _fa4_attention_forward(
+        module,
+        query,
+        key,
+        value,
+        attention_mask=None,
+        scaling=1.0 / (head_dim**0.5),
+        position_ids=position_ids,
+    )
+    assert out.shape[0] == batch
+    assert out.shape[-1] == head_dim
+    assert not torch.isnan(out).any(), "FA4 produced NaN — kernel/dtype mismatch on this GPU"
+
+
 def test_model_config_rejects_fa4_with_invalid_impl():
     """impl is a Literal["hf", "custom", "auto"], so anything outside that set
     fails the typed-value check before our FA4 validator sees it. The
