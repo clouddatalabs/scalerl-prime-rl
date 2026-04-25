@@ -196,6 +196,43 @@ def transformers_v5_compat():
                 patch_name,
             )
 
+    # Postcondition for the LOAD-BEARING fp32-LM-head patch. The per-patch
+    # try/except above is correct (one failure must not cascade-disable later
+    # patches), but it has the converse footgun: a vLLM internal-symbol rename
+    # that breaks `monkey_patch_vllm_fp32_lm_head` would silently no-op the
+    # patch — the operator set `fp32_lm_head=true`, the warning landed in a
+    # log nobody re-reads, training proceeds with bf16 LM-head, logprob
+    # correlation drops to ~0.9, and CISPO's importance ratio carries the
+    # bias on every step with no dashboard signal. ScaleRL §3.2 calls this
+    # ingredient out as a hard recipe requirement; if the operator asked for
+    # it (env var set) and we couldn't deliver it, fail loudly here so the
+    # bug surfaces at vLLM-worker boot, not in a post-hoc score regression.
+    if vllm_fp32_lm_head_enabled():
+        try:
+            from vllm.model_executor.layers.vocab_parallel_embedding import (
+                UnquantizedEmbeddingMethod,
+            )
+        except ImportError as e:
+            raise RuntimeError(
+                "PRIME_RL_VLLM_FP32_LM_HEAD is set but "
+                "`vllm.model_executor.layers.vocab_parallel_embedding."
+                "UnquantizedEmbeddingMethod` could not be imported "
+                f"({type(e).__name__}: {e}). vLLM moved/renamed the symbol — "
+                "the fp32-LM-head patch is silently no-oped and ScaleRL §3.2 "
+                "logprob parity is broken. Either pin a compatible vLLM or "
+                "update `monkey_patch_vllm_fp32_lm_head` to the new symbol."
+            ) from e
+        if not getattr(UnquantizedEmbeddingMethod.apply, "_prime_rl_fp32_lm_head_patch", False):
+            raise RuntimeError(
+                "PRIME_RL_VLLM_FP32_LM_HEAD is set but "
+                "`UnquantizedEmbeddingMethod.apply` does NOT carry the "
+                "`_prime_rl_fp32_lm_head_patch` marker — `monkey_patch_vllm_fp32_lm_head` "
+                "raised an exception above (see prior `prime-rl: monkey_patch_vllm_fp32_lm_head "
+                "failed (...)` warning) and the patch was silently dropped. "
+                "ScaleRL §3.2 fp32 LM-head ingredient is OFF. Fix the underlying "
+                "vLLM-symbol rename or unset PRIME_RL_VLLM_FP32_LM_HEAD."
+            )
+
 
 def monkey_patch_vllm_fp32_lm_head():
     """Enable an fp32 LM-head projection for vLLM's ParallelLMHead when requested.
