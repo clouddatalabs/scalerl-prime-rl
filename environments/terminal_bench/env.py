@@ -598,6 +598,23 @@ class _DockerClient:
             cmd += ["-f", os.fspath(dockerfile)]
         cmd += [os.fspath(context_dir)]
 
+        # When force-no-caching, also disable BuildKit. The on-disk
+        # poisoning we observed (job 720: "failed to extract layer
+        # ... failed to get reader from content store" on EVERY rebuild
+        # of assign-seats, even with --no-cache) is in BuildKit's
+        # content store at /var/lib/docker/buildkit/. The output layer's
+        # content digest is deterministic from the inputs, so even a
+        # --no-cache rebuild produces the SAME layer digest and BuildKit
+        # dedupes back to the corrupt blob. The legacy (DOCKER_BUILDKIT=0)
+        # builder doesn't use BuildKit's content store at all — it commits
+        # intermediate containers into images via the daemon's own image
+        # storage. That sidesteps the poisoned blob entirely. Our
+        # Dockerfiles are simple (FROM/RUN/WORKDIR/COPY) — no BuildKit-only
+        # features (--secret, --ssh, multi-stage with --target).
+        env = None
+        if no_cache:
+            env = {**os.environ, "DOCKER_BUILDKIT": "0"}
+
         if log_path is not None:
             log_file = open(log_path, "ab")
             try:
@@ -605,6 +622,7 @@ class _DockerClient:
                     *cmd,
                     stdout=log_file,
                     stderr=asyncio.subprocess.STDOUT,
+                    env=env,
                 )
                 try:
                     rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
@@ -653,6 +671,7 @@ class _DockerClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env=env,
             )
             try:
                 stdout_b, _ = await asyncio.wait_for(
