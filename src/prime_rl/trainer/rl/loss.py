@@ -156,7 +156,23 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
         # `-inf` logprobs at non-trainable positions for tokens it rates as
         # impossible — those would silently poison `advantages` and propagate
         # NaN through the entire batch's gradient. Mask first, fold second.
-        teacher_kl = torch.where(loss_mask, teacher_kl, torch.zeros_like(teacher_kl))
+        #
+        # AND: gate teacher_kl on finiteness too. The `loss_mask`-only gate
+        # zeros teacher_kl at non-trainable positions, but at TRAINABLE
+        # positions a `-inf` teacher logprob produces `teacher_kl = -inf`,
+        # then `advantages = adv + teacher_tau * (-inf) = -inf`, then
+        # `safe_advantages` (gated by keep_mask only, no finiteness check)
+        # propagates `-inf` into `pg_loss = keep_mask * (-inf) * finite = -inf`,
+        # then `loss = (-pg_loss).sum() = +inf` and `.backward()` produces
+        # NaN gradients across every parameter. Mirror cispo_loss_fn's
+        # `safe_mask = loss_mask & finite_*` pattern by AND-ing in
+        # `torch.isfinite(teacher_kl)` so the asymmetry vs cispo's defense
+        # closes.
+        teacher_kl = torch.where(
+            loss_mask & torch.isfinite(teacher_kl),
+            teacher_kl,
+            torch.zeros_like(teacher_kl),
+        )
         advantages = advantages + loss_config.teacher_tau * teacher_kl.detach()
     else:
         teacher_kl = None

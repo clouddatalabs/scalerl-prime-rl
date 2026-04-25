@@ -341,8 +341,12 @@ def apply_prompt_average_sequence_weights(
 
     Empty samples (zero trainable tokens after truncation) get weight 0 — they
     contribute nothing under any choice of weight, so this just makes that
-    explicit. Prompts whose every sample is empty also degenerate to 0 mass;
-    that's correct (no tokens, no loss) and avoids divide-by-zero.
+    explicit. Empty PROMPTS (every sample empty) are excluded from the
+    `num_prompts` denominator: counting them would dilute every surviving
+    prompt's contribution by `1 - num_empty/num_total`, deviating from
+    ScaleRL §3.3's "every prompt contributes equally" objective. With one
+    all-empty prompt in a 4-prompt batch, surviving prompts would otherwise
+    lose 25% mass for no semantic reason.
 
     Returns None when no rollouts have prompt_average_loss set (caller leaves the
     default neutral 1.0 weight in place). Raises if the flag is set inconsistently
@@ -388,14 +392,31 @@ def apply_prompt_average_sequence_weights(
             key = (str(env_name), str(rollout.example_id))
         by_prompt.setdefault(key, []).append(i)
 
-    num_prompts = len(by_prompt)
-    if num_prompts == 0:
+    if len(by_prompt) == 0:
         raise ValueError("prompt_average_loss requires at least one prompt in the batch")
 
-    weights = [0.0] * len(rollouts)
+    # First pass: compute per-prompt token totals so we can exclude empty
+    # prompts from `num_prompts`. ScaleRL §3.3 prescribes "mean over prompts"
+    # of the per-prompt token-mean. An empty prompt has no per-prompt mean
+    # (no tokens), so it's not part of the outer mean's domain — counting
+    # it in the denominator would shrink every other prompt's contribution
+    # by the empty-prompt fraction.
+    prompt_buckets: list[tuple[list[int], list[int], int]] = []
     for indices in by_prompt.values():
         sample_tokens = [_trainable_completion_tokens(rollouts[i], seq_len) for i in indices]
         total = sum(sample_tokens)
+        prompt_buckets.append((indices, sample_tokens, total))
+
+    num_prompts = sum(1 for _, _, total in prompt_buckets if total > 0)
+    weights = [0.0] * len(rollouts)
+    if num_prompts == 0:
+        # Every prompt was empty — no signal to weight. Caller's neutral
+        # 1.0 default never reaches here (we'd return None upstream), but
+        # the all-empty-yet-prompt-avg-flagged case still needs a valid
+        # `weights` list.
+        return weights
+
+    for indices, sample_tokens, total in prompt_buckets:
         if total == 0:
             continue
         per_sample_weight = 1.0 / (total * num_prompts)
