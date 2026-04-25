@@ -266,6 +266,34 @@ class ClientConfig(BaseConfig):
         """Check if elastic mode is enabled."""
         return self.elastic is not None
 
+    @model_validator(mode="after")
+    def validate_base_url_vs_elastic(self):
+        # The schema's `base_url` description says "Ignored if elastic config
+        # is provided." That's a soft contract: an operator who sets both
+        # explicitly has no way to know which one took effect. Reject the
+        # ambiguous combination at config load.
+        #
+        # `base_url` retains its schema default `["http://localhost:8000/v1"]`
+        # so we'd ideally check `"base_url" in self.model_fields_set`, but
+        # `pydantic_config.cli` records every field as "set" when the
+        # elastic block is present (the CLI layer normalizes the dict into
+        # an explicit dict-with-defaults before validation). So check for
+        # divergence from the default value AND the empty-list shape used
+        # by `auto_setup_*` to reset the field on elastic-mode propagation.
+        # Anything other than the schema default OR `[]` is explicit operator
+        # intent.
+        if self.elastic is not None:
+            default = ["http://localhost:8000/v1"]
+            if self.base_url not in (default, []):
+                raise ValueError(
+                    "client.elastic and client.base_url are mutually exclusive. "
+                    "Elastic mode discovers servers via DNS and ignores base_url. "
+                    "Either drop the explicit base_url or remove the elastic "
+                    "config — the schema's silent override silently masks an "
+                    "operator's intent."
+                )
+        return self
+
 
 class LogConfig(BaseConfig):
     """Configures the logger."""

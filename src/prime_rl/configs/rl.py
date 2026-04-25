@@ -655,16 +655,26 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def auto_setup_model(self):
-        """Auto-setup shared model config for trainer, orchestrator, and inference."""
+        """Auto-setup shared model config for trainer, orchestrator, and inference.
+
+        The top-level `[model]` shorthand only fills in subconfigs whose
+        `name` was NOT explicitly set. Silently overwriting an operator's
+        deliberate per-component model name (e.g. a quantized FP8 inference
+        variant against an FP16 trainer) is a foot-gun the inference branch
+        already guards against; trainer and orchestrator should match.
+        """
         if self.model is not None:
-            self.trainer.model.name = self.model.name
+            if "name" not in self.trainer.model.model_fields_set:
+                self.trainer.model.name = self.model.name
             if self.inference is not None:
                 inference_model_explicitly_set = "name" in self.inference.model.model_fields_set
                 if not inference_model_explicitly_set:
                     self.inference.model.name = self.model.name
-                self.orchestrator.model.name = self.inference.model.name
+                if "name" not in self.orchestrator.model.model_fields_set:
+                    self.orchestrator.model.name = self.inference.model.name
             else:
-                self.orchestrator.model.name = self.model.name
+                if "name" not in self.orchestrator.model.model_fields_set:
+                    self.orchestrator.model.name = self.model.name
 
             if self.model.vlm is not None:
                 self.trainer.model.vlm = self.model.vlm
@@ -734,10 +744,18 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def auto_setup_max_steps(self):
-        """Auto-setup shared max steps for trainer and orchestrator."""
+        """Auto-setup shared max steps for trainer and orchestrator.
+
+        The shorthand only fills in subconfig values that the user did NOT
+        set explicitly — silently overwriting an operator's deliberate
+        per-component value would be a foot-gun. Mirrors `auto_setup_seq_len`
+        which uses the same `model_fields_set` pattern.
+        """
         if self.max_steps is not None:
-            self.trainer.max_steps = self.max_steps
-            self.orchestrator.max_steps = self.max_steps
+            if "max_steps" not in self.trainer.model_fields_set:
+                self.trainer.max_steps = self.max_steps
+            if "max_steps" not in self.orchestrator.model_fields_set:
+                self.orchestrator.max_steps = self.max_steps
 
         validate_shared_max_steps(self.trainer, self.orchestrator)
 
@@ -745,10 +763,16 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def auto_setup_async_level(self):
-        """Auto-setup shared async level for trainer and orchestrator."""
+        """Auto-setup shared async level for trainer and orchestrator.
+
+        Same explicit-set guard as `auto_setup_max_steps` — silent overwrite
+        of an operator's deliberate per-component value is a foot-gun.
+        """
         if self.max_async_level is not None:
-            self.trainer.max_async_level = self.max_async_level
-            self.orchestrator.max_async_level = self.max_async_level
+            if "max_async_level" not in self.trainer.model_fields_set:
+                self.trainer.max_async_level = self.max_async_level
+            if "max_async_level" not in self.orchestrator.model_fields_set:
+                self.orchestrator.max_async_level = self.max_async_level
 
         validate_shared_max_async_level(self.trainer, self.orchestrator)
 
@@ -1200,17 +1224,29 @@ class RLConfig(BaseConfig):
             # Without EP, vLLM only creates api_server_count * tp workers per node,
             # not gpus_per_node workers. If DP isn't set, the broadcast group expects
             # more workers than exist, deadlocking NCCL init.
+            #
+            # Auto-derive only when the operator did NOT explicitly set the field
+            # (Pydantic's `model_fields_set`). The previous heuristic
+            # `self.inference.parallel.dp == 1 and dp_per_node > 1` over-fired
+            # whenever an operator deliberately wrote `dp = 1` on a multi-node
+            # layout — there was no way to express "I want dp=1 on this multi-
+            # node mesh" through this validator. Mirror the single-node
+            # branch's pattern: silent overwrite is a foot-gun; auto-derive
+            # only on missing fields.
             if (
                 self.inference is not None
                 and not self.inference.enable_expert_parallel
                 and self.inference.deployment.type != "disaggregated"
             ):
                 dp_per_node = self.deployment.gpus_per_node // self.inference.parallel.tp
-                if self.inference.parallel.dp == 1 and dp_per_node > 1:
+                if "dp" not in self.inference.parallel.model_fields_set and dp_per_node > 1:
                     self.inference.parallel.dp = dp_per_node
                 if self.inference.data_parallel_size_local is None and dp_per_node > 1:
                     self.inference.data_parallel_size_local = dp_per_node
-                if self.inference.api_server_count == 1 and dp_per_node > 1:
+                if (
+                    "api_server_count" not in self.inference.model_fields_set
+                    and dp_per_node > 1
+                ):
                     self.inference.api_server_count = dp_per_node
 
             if self.weight_broadcast is not None and self.weight_broadcast.type == "nccl":

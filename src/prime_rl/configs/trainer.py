@@ -1147,6 +1147,26 @@ class TrainerConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
+    def validate_multi_run_requires_lora(self):
+        # `max_concurrent_runs > 1` is the multi-run path: the trainer hosts
+        # a single base model with N LoRA adapters, one per concurrent
+        # orchestrator. Without `[model.lora]` set, `setup_multi_run_manager`
+        # registers no LoRA validation hook, the multi-run optimizer/scheduler
+        # paths still expect per-run adapters, and downstream `MultiLoRA*`
+        # modules (registered in `trainer/runs.py`) crash at runtime in
+        # confusing ways. Reject at config load.
+        if self.max_concurrent_runs > 1 and self.model.lora is None:
+            raise ValueError(
+                f"trainer.max_concurrent_runs={self.max_concurrent_runs} "
+                "requires `[trainer.model.lora]` to be set. The multi-run "
+                "path hosts one base model with per-orchestrator LoRA "
+                "adapters; without LoRA, the multi-run scheduler/optimizer "
+                "have no per-run state to manage. Either set `[model.lora] "
+                "rank = ..., alpha = ...` or drop max_concurrent_runs to 1."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_lora_broadcast(self):
         if self.model.lora is not None and self.weight_broadcast.type == "nccl":
             # TODO: Support this

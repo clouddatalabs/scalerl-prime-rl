@@ -152,11 +152,21 @@ class TrainSamplingConfig(BaseConfig):
     @model_validator(mode="before")
     @classmethod
     def _deprecate_max_tokens(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
-            get_logger().warning(
-                "'max_tokens' is deprecated, use 'max_completion_tokens' instead. "
-                "Auto-translating for now, but this will be removed in a future release."
-            )
+        if isinstance(data, dict):
+            if "max_tokens" in data and "max_completion_tokens" in data:
+                # Pydantic's AliasChoices silently picks one when both are
+                # set — the operator can't tell which won. Reject explicitly.
+                raise ValueError(
+                    "Both 'max_tokens' and 'max_completion_tokens' are set on the "
+                    "same sampling block. They alias the same field; pick one. "
+                    "'max_tokens' is the deprecated spelling — prefer "
+                    "'max_completion_tokens'."
+                )
+            if "max_tokens" in data and "max_completion_tokens" not in data:
+                get_logger().warning(
+                    "'max_tokens' is deprecated, use 'max_completion_tokens' instead. "
+                    "Auto-translating for now, but this will be removed in a future release."
+                )
         return data
 
 
@@ -251,11 +261,21 @@ class EvalSamplingConfig(BaseConfig):
     @model_validator(mode="before")
     @classmethod
     def _deprecate_max_tokens(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
-            get_logger().warning(
-                "'max_tokens' is deprecated, use 'max_completion_tokens' instead. "
-                "Auto-translating for now, but this will be removed in a future release."
-            )
+        if isinstance(data, dict):
+            if "max_tokens" in data and "max_completion_tokens" in data:
+                # Pydantic's AliasChoices silently picks one when both are
+                # set — the operator can't tell which won. Reject explicitly.
+                raise ValueError(
+                    "Both 'max_tokens' and 'max_completion_tokens' are set on the "
+                    "same sampling block. They alias the same field; pick one. "
+                    "'max_tokens' is the deprecated spelling — prefer "
+                    "'max_completion_tokens'."
+                )
+            if "max_tokens" in data and "max_completion_tokens" not in data:
+                get_logger().warning(
+                    "'max_tokens' is deprecated, use 'max_completion_tokens' instead. "
+                    "Auto-translating for now, but this will be removed in a future release."
+                )
         return data
 
 

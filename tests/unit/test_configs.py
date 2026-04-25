@@ -584,9 +584,14 @@ def test_cispo_eps_max_bounds():
 
 
 def test_shipped_poc_configs_load_cleanly():
-    """Both shipped POC configs must validate. A typo (e.g.
-    `use_token_clinet = false`) would otherwise only surface at launch
-    time, hours into a SLURM allocation."""
+    """Both shipped POC configs must validate AND pin every paper-faithful
+    knob the recipe depends on. A typo (`use_token_clinet = false`) or a
+    deleted DEVIATION override (`max_off_policy_steps`, `prompt_average_loss`,
+    etc.) would otherwise only surface at launch time, hours into a SLURM
+    allocation. Each assertion below corresponds to one of the seven
+    ScaleRL ingredients (arXiv:2510.13786) — when the recipe is the
+    contract, the paper's settings must be the test contract too.
+    """
     import tomli
     from pathlib import Path
 
@@ -596,10 +601,51 @@ def test_shipped_poc_configs_load_cleanly():
         with open(config_path, "rb") as f:
             data = tomli.loads(f.read().decode())
         cfg = RLConfig.model_validate(data)
-        # Spot-check: load-bearing knobs we documented in the configs.
-        assert cfg.trainer.optim.eps == 1e-15, f"{relpath}: AdamW eps must round-trip from TOML"
+
+        # Optimizer / scheduler — paper §3.3.
+        assert cfg.trainer.optim.eps == 1e-15, f"{relpath}: AdamW eps"
+        assert cfg.trainer.optim.lr == 5e-7, f"{relpath}: paper LR §3.3"
+        assert cfg.trainer.optim.weight_decay == 0.01, f"{relpath}: paper weight_decay §3.3"
         assert cfg.trainer.scheduler.type == "linear"
         assert cfg.trainer.scheduler.warmup_steps == 100
+
+        # CISPO loss — paper §3.3.
+        assert cfg.trainer.loss.type == "cispo", f"{relpath}: ScaleRL is CISPO"
+        assert cfg.trainer.loss.eps_max == 4.0, f"{relpath}: CISPO eps_max"
+        assert cfg.trainer.loss.loss_scale_mode == "sequence", f"{relpath}: sequence-mode reduction"
+
+        # Prompt-level averaging — paper §3.3.
+        assert cfg.orchestrator.prompt_average_loss is True, f"{relpath}: prompt-avg ON"
+
+        # Batch-level advantage normalization — paper §3.4.
+        assert cfg.orchestrator.advantage.normalization == "batch", (
+            f"{relpath}: batch-level adv-norm (paper §3.4); default is 'none' (Dr. GRPO)"
+        )
+
+        # FP32 LM-head — paper §3.2.
+        assert cfg.trainer.model.fp32_lm_head is True, f"{relpath}: FP32 LM-head trainer"
+        assert cfg.inference.model.fp32_lm_head is True, f"{relpath}: FP32 LM-head inference"
+        assert cfg.trainer.matmul_precision == "highest", (
+            f"{relpath}: matmul_precision='highest' is required when fp32_lm_head=True"
+        )
+
+        # NPR — paper §3.6.
+        assert cfg.orchestrator.buffer.no_positive_resampling is True, f"{relpath}: NPR ON"
+        assert cfg.orchestrator.buffer.no_positive_resampling_threshold == 0.9, (
+            f"{relpath}: NPR threshold from §3.6"
+        )
+
+        # Async pipeline-RL — paper §3.1.
+        assert cfg.trainer.max_async_level == 8, f"{relpath}: paper max_async_level=8"
+        assert cfg.orchestrator.max_async_level == 8, f"{relpath}: paper max_async_level=8 (orch)"
+        assert cfg.orchestrator.max_off_policy_steps == 1_000_000_000, (
+            f"{relpath}: never-cancel (§3.1); default 8 silently re-enables cancellation"
+        )
+        assert cfg.weight_broadcast.type == "nccl", f"{relpath}: NCCL weight broadcast"
+        # The NCCL+max_async_level>1 combo requires the experimental override.
+        assert cfg.trainer.experimental.allow_nccl_async_level_override is True, (
+            f"{relpath}: NCCL async-level override is required for max_async_level>1"
+        )
 
 
 def test_adamw_config_carries_eps_and_rejects_typos():
