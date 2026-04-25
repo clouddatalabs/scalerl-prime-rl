@@ -347,6 +347,32 @@ def test_trainer_config_no_op_when_fp32_lm_head_off():
     assert config.matmul_precision == "high"
 
 
+# SFTConfig is a SIBLING to TrainerConfig (it does NOT inherit), so the
+# validator must be attached to both classes independently. The SFT entry
+# point is `cli(SFTConfig)` in `prime_rl/trainer/sft/train.py`.
+
+def test_sft_config_rejects_fp32_lm_head_with_default_matmul_precision():
+    """SFT path: same TF32 footgun as RL/Trainer. The SFTConfig validator
+    must fire on `[model] fp32_lm_head = true` with the default
+    `matmul_precision = "high"`.
+    """
+    with pytest.raises(ValidationError, match="matmul_precision='highest'"):
+        SFTConfig.model_validate({"model": {"fp32_lm_head": True}})
+
+
+def test_sft_config_accepts_fp32_lm_head_with_highest_matmul_precision():
+    config = SFTConfig.model_validate(
+        {"model": {"fp32_lm_head": True}, "matmul_precision": "highest"}
+    )
+    assert config.model.fp32_lm_head is True
+    assert config.matmul_precision == "highest"
+
+
+def test_sft_config_no_op_when_fp32_lm_head_off():
+    config = SFTConfig.model_validate({"model": {"fp32_lm_head": False}})
+    assert config.matmul_precision == "high"
+
+
 def test_rl_config_skips_fp32_lm_head_check_when_inference_omitted():
     """RLConfig.inference may legitimately be None (externally managed inference pools or
     num_infer_nodes=0 fake-data runs). The fp32 consistency check must skip rather than

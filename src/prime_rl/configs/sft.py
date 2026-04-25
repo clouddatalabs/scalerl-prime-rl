@@ -295,6 +295,29 @@ class SFTConfig(BaseConfig):
     ### Validate configs (e.g. raise for unsupported (combinations of) configs)
 
     @model_validator(mode="after")
+    def fp32_lm_head_requires_highest_matmul_precision(self):
+        """Refuse fp32_lm_head=True with matmul_precision != "highest".
+
+        Mirrors the TrainerConfig + RLConfig validators: PyTorch's
+        `set_float32_matmul_precision("high")` (the SFT default) silently
+        relaxes FP32 matmuls to TF32 on NVIDIA Ampere+, defeating the
+        train/inference logprob parity that fp32_lm_head exists for.
+        SFTConfig is a sibling top-level class to TrainerConfig (it doesn't
+        inherit), so the validator must be attached here independently.
+        """
+        if not self.model.fp32_lm_head:
+            return self
+        if self.matmul_precision != "highest":
+            raise ValueError(
+                "model.fp32_lm_head=True requires matmul_precision='highest' "
+                f"(got {self.matmul_precision!r}). 'high'/'medium' silently "
+                "relaxes FP32 matmuls to TF32 (10-bit mantissa) on NVIDIA "
+                "Ampere+, defeating the §3.2 logprob-parity ingredient. Set "
+                "matmul_precision = \"highest\" or disable fp32_lm_head."
+            )
+        return self
+
+    @model_validator(mode="after")
     def deepep_disables_grad_clipping(self):
         if self.model.ep_comm_backend == "deepep" and self.optim.max_norm is not None:
             warnings.warn(
