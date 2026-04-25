@@ -337,6 +337,49 @@ suppresses the libfabric provider hint; the TOML still asks for NCCL.
 > unaffected (math-env loads via the `[envs]` extra package, not from
 > the repo tree).
 
+> ⚠️ **Multi-node-only operational gaps vs `scripts/scalerl_smoke.sbatch`.**
+> The Jinja templates the multi-node entrypoint renders
+> (`src/prime_rl/templates/multi_node_rl.sbatch.j2` etc.) do NOT carry the
+> hardening that the single-node smoke sbatch ships. Operators on the
+> multi-node path need to handle these gaps in `.env` or
+> `[slurm] pre_run_command`:
+>
+> - **`HF_HUB_OFFLINE` defaults INVERTED.** Single-node sbatch forces
+>   `HF_HUB_OFFLINE=0`; multi-node defaults to `1` (assumes pre-staged
+>   model + shared `HF_HOME`). On clusters where `HF_HOME` is node-local
+>   instead of NFS/EFS, the multi-node path produces an opaque "model
+>   files not found" failure. Either pre-stage on a shared filesystem
+>   reachable by every compute node, OR `export HF_HUB_OFFLINE=0` in
+>   `.env` to force fresh pull on every node.
+> - **`uv sync --extra all --locked` runs on every compute node** at
+>   job start (templates do this; smoke sbatch deliberately does NOT,
+>   relying on a pre-built `.venv`). Compute-node egress to `pypi.org` /
+>   `files.pythonhosted.org` / `download.pytorch.org` / `astral.sh` /
+>   `github.com` / `hub.primeintellect.ai` is therefore a multi-node
+>   prerequisite — login-node-only egress is not enough.
+> - **No LD_PRELOAD strip / DLAMI probe / EFA probe / FA4 namespace
+>   re-repair.** The smoke sbatch handles AWS DLAMI's libcublas shim
+>   (`SCALERL_FORCE_CLEAR_LD`), the EFA probe (`SCALERL_NO_EFA`), and
+>   the FA4 stub-shadowing repair as defense-in-depth. The multi-node
+>   templates skip all of it. AWS DLAMI users hit
+>   `CUBLAS_STATUS_INVALID_VALUE`; non-EFA clusters hang at NCCL init
+>   exporting `FI_PROVIDER=efa`. Workaround: add a `pre_run_command`
+>   that re-applies the smoke sbatch's preflight, or run the smoke
+>   sbatch's preflight steps in `.env` so they apply cluster-wide.
+> - **Multi-node Terminal-Bench Docker access is on RANK 0 of the
+>   trainer half ONLY.** The orchestrator (which spawns Docker rollouts
+>   via `environments/terminal_bench/env.py`) launches on
+>   `TRAIN_NODE_RANK == 0`. Inference nodes and other trainer nodes do
+>   NOT need Docker. A natural assumption that "rollouts = task-side =
+>   inference half" leads to wrong access provisioning and silent
+>   `reward = 0`.
+
+> ⚠️ **Vendored / mirrored install paths.** `scripts/install.sh` clones
+> `clouddatalabs/scalerl-prime-rl` from public GitHub. Operators using a
+> Snowflake-internal mirror or a vendored tarball drop must set
+> `SKIP_CLONE=1` in the environment before invoking `install.sh`,
+> otherwise it tries to clone the public fork over the existing tree.
+
 ## Configs
 
 Two reference configs ship with the recipe wired up:

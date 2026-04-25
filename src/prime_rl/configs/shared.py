@@ -58,6 +58,36 @@ class SlurmConfig(BaseConfig):
         ),
     ] = None
 
+    @model_validator(mode="after")
+    def reject_placeholder_values(self):
+        # The shipped multi-node config (`configs/scalerl_terminal_bench/
+        # rl_multinode.toml`) ships ALL-CAPS placeholder strings like
+        # `partition = "GPU_PARTITION"` for operators to fill in. An
+        # operator who edits the train/test task lists but skips the
+        # SLURM block hits a `sbatch: error: invalid partition` rejection
+        # at submission with no doc-pointer to the placeholder. A simple
+        # validator that rejects all-uppercase placeholder values catches
+        # the typical copy-paste-and-submit case at config load. Real
+        # SLURM partition / account names are typically lowercase or
+        # CamelCase (e.g. "gpu", "h100", "AccountA") and pass.
+        for field_name in ("partition", "account", "nodelist", "exclude"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            # Heuristic: ALL-CAPS-with-underscores and ≥2 letters is the
+            # placeholder shape. Real partition names like "GPU" alone
+            # are unusual but plausible — require an underscore or a
+            # `YOUR_` prefix to flag.
+            if "_" in value and value == value.upper() and any(c.isalpha() for c in value):
+                raise ValueError(
+                    f"slurm.{field_name} = {value!r} looks like an unfilled "
+                    f"ALL_CAPS placeholder from a template. Replace with your "
+                    "cluster's actual partition / account / nodelist before "
+                    "submitting (or set to None / omit if your cluster doesn't "
+                    "require it)."
+                )
+        return self
+
     @property
     def template_vars(self) -> dict:
         """Common template variables for all SLURM templates."""
