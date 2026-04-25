@@ -16,7 +16,7 @@ ENV PATH=$PATH:/usr/local/cuda/bin
 ARG DEBIAN_FRONTEND=noninteractive
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
-RUN apt-get update && apt-get install -y --no-install-recommends --force-yes \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     sudo \
@@ -103,10 +103,13 @@ RUN apt-get update && apt-get install -y \
 
 ARG USER_ID=1000
 ARG GROUP_ID=1000
+# `appuser` is the runtime user. Do NOT grant passwordless root via sudoers —
+# a public POC image with `NOPASSWD:ALL` is image-hygiene-critical. The
+# rollout container does not need sudo at runtime; if a target environment
+# legitimately needs root, run with `--user 0` at deploy time instead of
+# baking an escalation path into the image.
 RUN groupadd --gid $GROUP_ID appuser && \
-    useradd --uid $USER_ID --gid appuser --create-home --shell /bin/bash appuser && \
-    usermod -aG sudo appuser && \
-    echo "appuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+    useradd --uid $USER_ID --gid appuser --create-home --shell /bin/bash appuser
 
 # Install uv for development use
 ADD https://astral.sh/uv/install.sh /uv-installer.sh

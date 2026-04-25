@@ -1,5 +1,11 @@
 name: CPU Tests
 
+# Upstream-only by default. The `[all]` extra pulls flash-attn-cute (CUTLASS
+# source build, requires nvcc), deep-ep, deep-gemm, nixl, vllm-router — none
+# of which install on a vanilla `ubuntu-latest` runner. On forks without a
+# CPU-only test extra, this workflow goes red on every push. Re-enable for a
+# fork by changing the `if:` line below to your repo slug.
+
 on:
   push:
     branches: [main]
@@ -9,6 +15,7 @@ on:
 jobs:
   unit-tests:
     name: Unit tests
+    if: github.repository == 'PrimeIntellect-ai/prime-rl'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

@@ -234,11 +234,15 @@ def _trainable_completion_tokens(rollout: TrainingSample, seq_len: int) -> int:
 
     prepare_sample builds `loss_mask = prompt_mask + completion_mask` then
     truncates the concatenation to seq_len. compute_loss weights summed
-    losses against the FULL loss_mask, so prompt-side trainable tokens count
-    too — multi-turn envs (e.g. terminal_bench) emit prompt_mask=True on
-    assistant turns inside the prompt segment, and counting only
-    completion_mask would silently up-weight those samples by a factor of
-    `(prompt_trainable + completion_trainable) / completion_trainable`.
+    losses against the FULL loss_mask, so prompt-side trainable tokens
+    would count if any existed.
+
+    Today verifiers' bundled clients hard-zero `prompt_mask` and
+    `prepare_sample` raises if any prompt position is trainable (CISPO's
+    `inference_logprobs=0` for prompt tokens would otherwise zero the IS
+    ratio). The prompt-side branch below is therefore zero in practice
+    but kept for a future env that legitimately plumbs prompt-side
+    inference logprobs and lifts the guard.
 
     The truncation rule: positions [0, prompt_len) come from prompt_mask,
     positions [prompt_len, prompt_len + completion_len) from completion_mask.

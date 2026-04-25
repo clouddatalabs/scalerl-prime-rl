@@ -10,15 +10,21 @@ upstream defaults are preserved.
 
 ## Features
 
-| # | Feature | Where it lives | Default |
-|---|---------|----------------|---------|
-| 1 | Async **Pipeline-RL** (`max_async_level=k`, NCCL broadcast at `k>1`) | `configs/orchestrator.py` (`OrchestratorExperimentalConfig.allow_nccl_async_level_override`) — upstream already has the `max_async_level` knob; we add an opt-in override of the validator that hard-rejected NCCL + async-level > 1. | off |
-| 2 | Canonical **Minimax-CISPO** loss (stop-gradient, upper-truncated IS) | `configs/trainer.py` (`CISPOLossConfig`), `trainer/rl/loss.py` (`cispo_loss_fn`). Loss form: `-sg(min(ρ, ε_max)) · Â · log π_θ`. | off (default loss unchanged) |
-| 3 | **Prompt-level loss averaging** | `configs/orchestrator.py` (`OrchestratorConfig.prompt_average_loss`), `trainer/batch.py` (`apply_prompt_average_sequence_weights`), `trainer/rl/loss.py` (`compute_loss(sequence_loss_weights=...)`). | off |
-| 4 | **Batch-level advantage normalization** | `configs/orchestrator.py` (`DefaultAdvantageConfig.normalization = "none" \| "group" \| "batch"`), `orchestrator/advantage.py`. | `"none"` (upstream behavior) |
-| 5 | **FP32 LM-head** matmul on both trainer and inference | `configs/trainer.py` + `configs/inference.py` (`ModelConfig.fp32_lm_head`), `trainer/models/layers/lm_head.py`, `inference/patches.py` (vLLM monkey-patch via `vllm.general_plugins` entry point). The inference patch reads the env var `PRIME_RL_VLLM_FP32_LM_HEAD`, which `prime_rl.inference.server` sets from `inference.model.fp32_lm_head`. **If you launch vLLM directly (e.g. `vllm serve …`), set `PRIME_RL_VLLM_FP32_LM_HEAD=1` yourself; the config-side flag has no effect outside the prime-rl entrypoint.** | off |
-| 6 | **Zero-variance filtering** | Upstream's existing `ZeroAdvantageFilter` (#2192) ships in the default filter list. Nothing to enable. | on |
-| 7 | **No-Positive-Resampling** (Polaris-style permanent prompt removal at `pass_rate ≥ τ`) | `configs/orchestrator.py` (`BufferConfig.no_positive_resampling`, `no_positive_resampling_threshold`), `orchestrator/buffer.py`. | off |
+The "Schema default" column is what you get with a bare upstream config that
+sets none of the fork's knobs (preserves upstream behavior). The "POC config"
+column is what the shipped `configs/scalerl_math/rl.toml` and
+`configs/scalerl_terminal_bench/rl.toml` actually set — this is the recipe
+end-state the handoff exercises.
+
+| # | Feature | Where it lives | Schema default | POC config |
+|---|---------|----------------|----------------|------------|
+| 1 | Async **Pipeline-RL** (`max_async_level=k`, NCCL broadcast at `k>1`) | `configs/orchestrator.py` (`OrchestratorExperimentalConfig.allow_nccl_async_level_override`) — upstream already has the `max_async_level` knob; we add an opt-in override of the validator that hard-rejected NCCL + async-level > 1. | off | on (`max_async_level=8`, NCCL) |
+| 2 | Canonical **Minimax-CISPO** loss (stop-gradient, upper-truncated IS) | `configs/trainer.py` (`CISPOLossConfig`), `trainer/rl/loss.py` (`cispo_loss_fn`). Loss form: `-sg(min(ρ, ε_max)) · Â · log π_θ`. | off (default loss unchanged) | on (`type="cispo"`, `eps_max=4.0`) |
+| 3 | **Prompt-level loss averaging** | `configs/orchestrator.py` (`OrchestratorConfig.prompt_average_loss`), `trainer/batch.py` (`apply_prompt_average_sequence_weights`), `trainer/rl/loss.py` (`compute_loss(sequence_loss_weights=...)`). | off | on |
+| 4 | **Batch-level advantage normalization** | `configs/orchestrator.py` (`DefaultAdvantageConfig.normalization = "none" \| "group" \| "batch"`), `orchestrator/advantage.py`. | `"none"` (upstream behavior) | `"batch"` |
+| 5 | **FP32 LM-head** matmul on both trainer and inference | `configs/trainer.py` + `configs/inference.py` (`ModelConfig.fp32_lm_head`), `trainer/models/layers/lm_head.py`, `inference/patches.py` (vLLM monkey-patch via `vllm.general_plugins` entry point). The inference patch reads the env var `PRIME_RL_VLLM_FP32_LM_HEAD`, which `prime_rl.inference.server` sets from `inference.model.fp32_lm_head`. **If you launch vLLM directly (e.g. `vllm serve …`), set `PRIME_RL_VLLM_FP32_LM_HEAD=1` yourself; the config-side flag has no effect outside the prime-rl entrypoint.** | off | on (both sides) |
+| 6 | **Zero-variance filtering** | Upstream's existing `ZeroAdvantageFilter` (#2192) ships in the default filter list. Nothing to enable. | on | on |
+| 7 | **No-Positive-Resampling** (Polaris-style permanent prompt removal at `pass_rate ≥ τ`) | `configs/orchestrator.py` (`BufferConfig.no_positive_resampling`, `no_positive_resampling_threshold`, `no_positive_resampling_min_groups`), `orchestrator/buffer.py`. | off | on (`τ=0.9`, `min_groups=4`) |
 
 **Not in this fork:** forced-length interruptions (ScaleRL §2.3 / `sec:length_control`). Lowest-priority
 ingredient per the paper's leave-one-out ablation; monitor truncation rate first and add only if
@@ -90,8 +96,12 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
 - 8 GPUs visible to one node (config splits 4 train / 4 inference).
 - SLURM with a partition you pass via `sbatch -p <name>` (the sbatch defaults
   to `gpu`).
-- Network reachable from the compute node, OR run `hf download`
-  and `bash scripts/fix-flash-attn-cute.sh` on the login node before submit.
+- **Network from the COMPUTE node, OR pre-stage on the login node.** Many
+  managed clusters firewall compute nodes off github.com / huggingface.co.
+  If yours does, `hf download Qwen/Qwen3-8B` and
+  `bash scripts/fix-flash-attn-cute.sh` from step 4 above are MANDATORY on
+  the login node — otherwise the sbatch will spend 3 minutes booting and
+  then fail with a vLLM model-load timeout or a CUTLASS git-clone error.
 - For Terminal-Bench: a Docker daemon reachable from the rollout process
   (host or `/var/run/docker.sock` bind-mounted into the container).
 
@@ -107,6 +117,15 @@ Caveat: a run that crashes BEFORE the first checkpoint at `[ckpt] interval`
 (default 100 steps) leaves no checkpoint to resume from — the resume run
 will error out at startup. Lower `[ckpt] interval` if early crashes are
 likely, or accept restarting from step 0.
+
+**Restart from step 0 after an early crash.** `RLConfig` rejects re-using a
+populated `output_dir` without `SCALERL_RESUME=1`, but if you crashed before
+any checkpoint exists, the resume path also errors. The unblocking sequence:
+```bash
+rm -rf outputs/scalerl_math   # or outputs/scalerl_terminal_bench
+# unset SCALERL_RESUME (or skip exporting it)
+sbatch -p <partition> --export=ALL scripts/scalerl_smoke.sbatch
+```
 The shipped configs set `output_dir = "outputs/scalerl_math"` (and
 `outputs/scalerl_terminal_bench`) so resume is deterministic and concurrent
 submissions don't collide. Checkpoints land under
@@ -140,8 +159,11 @@ slurm log file (path printed by the sbatch). Uncomment `[wandb]` and set
 
 **Multi-node.** The shipped configs target a single 8-GPU node via
 `SingleNodeDeploymentConfig` (`num_train_gpus`/`num_infer_gpus`). To scale
-out, switch `[deployment]` to the multi-node schema AND add a `[slurm]`
-block — the validator (`src/prime_rl/configs/rl.py: validate_deployment`)
+out, **copy the config to a new file** so the single-node smoke target
+stays intact (e.g. `cp configs/scalerl_terminal_bench/rl.toml
+configs/scalerl_terminal_bench/rl_multinode.toml`), then in the copy
+switch `[deployment]` to the multi-node schema AND add a `[slurm]` block.
+The validator (`src/prime_rl/configs/rl.py: validate_deployment`)
 hard-rejects multi-node without `[slurm]`:
 ```toml
 [deployment]
@@ -159,7 +181,7 @@ For multi-node runs you do NOT use `sbatch scripts/scalerl_smoke.sbatch`
 (it's a single-node `--nodes=1` template). The multi-node entrypoint
 submits its own sbatch internally — invoke it directly as:
 ```bash
-uv run rl @ configs/scalerl_terminal_bench/rl.toml
+uv run rl @ configs/scalerl_terminal_bench/rl_multinode.toml
 ```
 See `docs/slurm.md` for the full `[slurm]` knob list (rendezvous host/port,
 `exclude_nodes`, `qos`, etc.). Multi-node NCCL weight broadcast still
@@ -189,7 +211,7 @@ NCCL experimental override).
 
 Each ingredient cites its origin in the config docstrings. Primary sources:
 
-- ScaleRL: Khatri et al. 2026, *The Art of Scaling Reinforcement Learning Compute for LLMs*, arXiv:2510.13786.
+- ScaleRL: Khatri et al. 2025, *The Art of Scaling Reinforcement Learning Compute for LLMs*, arXiv:2510.13786.
 - CISPO origin: Minimax-M1 §3.1, *MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention*, arXiv:2506.13585.
 - Prompt-level loss averaging: DAPO §3.3, arXiv:2503.14476.
 - Batch-level advantage normalization: Hu et al., *Reinforce++*, also Magistral.
