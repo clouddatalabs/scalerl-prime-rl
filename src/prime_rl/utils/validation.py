@@ -133,13 +133,25 @@ def validate_shared_weight_broadcast(
     orchestrator: OrchestratorConfig,
     inference: Optional[InferenceConfig] = None,
 ) -> None:
-    if (
-        inference
-        and trainer.weight_broadcast.type != orchestrator.weight_broadcast.type != inference.weight_broadcast.type
-    ):
-        raise ValueError(
-            f"Inference weight broadcast type ({inference.weight_broadcast.type}) and orchestrator weight broadcast type ({orchestrator.weight_broadcast.type}) are not the same. Please specify the same weight broadcast type for both."
-        )
+    # NB: a chained `a != b != c` evaluates as `(a != b) and (b != c)` in
+    # Python. With trainer="filesystem", orchestrator="filesystem",
+    # inference="nccl" that yields `False and True → False` and the mismatch
+    # silently slips through, so check the set of types explicitly instead.
+    if inference is not None:
+        types = {
+            trainer.weight_broadcast.type,
+            orchestrator.weight_broadcast.type,
+            inference.weight_broadcast.type,
+        }
+        if len(types) > 1:
+            raise ValueError(
+                f"Weight broadcast types disagree across components: "
+                f"trainer={trainer.weight_broadcast.type}, "
+                f"orchestrator={orchestrator.weight_broadcast.type}, "
+                f"inference={inference.weight_broadcast.type}. "
+                "All three must use the same weight_broadcast.type — "
+                "set it once via the top-level [weight_broadcast] block."
+            )
     elif trainer.weight_broadcast.type != orchestrator.weight_broadcast.type:
         raise ValueError(
             f"Trainer weight broadcast type ({trainer.weight_broadcast.type}) and orchestrator weight broadcast type ({orchestrator.weight_broadcast.type}) are not the same. Please specify the same weight broadcast type for both."
