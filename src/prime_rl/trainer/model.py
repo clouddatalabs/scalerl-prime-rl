@@ -768,12 +768,23 @@ def load_dcp_from_hf(model: nn.Module, config: ModelConfig, parallel_dims: Paral
     if lora_modules:
         generator: torch.Generator | None = None
         if parallel_dims.dp_replicate_enabled:
-            # Synchronize LoRA initialization across dp_replicate ranks by broadcasting a seed
-            dp_replicate_mesh = parallel_dims.world_mesh["dp_replicate"]
+            # Synchronize LoRA initialization across dp_replicate ranks by
+            # broadcasting a seed.
+            #
+            # `dist.broadcast(src=...)` interprets `src` as the GLOBAL rank,
+            # not the group-local rank. Hard-coding `src=0` would only be
+            # correct for the one dp_replicate subgroup that actually contains
+            # global rank 0; every other subgroup would block forever (NCCL
+            # hard deadlock) waiting for a sender that isn't a member of
+            # their group. Use `dist.get_global_rank(group, 0)` to translate
+            # the subgroup-local "rank 0" into the corresponding global rank
+            # for each subgroup.
+            dp_replicate_group = parallel_dims.world_mesh["dp_replicate"].get_group()
+            src_global_rank = torch.distributed.get_global_rank(dp_replicate_group, 0)
             seed_tensor = torch.empty(1, dtype=torch.long, device="cuda")
-            if dp_replicate_mesh.get_local_rank() == 0:
+            if torch.distributed.get_rank() == src_global_rank:
                 seed_tensor.random_()
-            torch.distributed.broadcast(seed_tensor, src=0, group=dp_replicate_mesh.get_group())
+            torch.distributed.broadcast(seed_tensor, src=src_global_rank, group=dp_replicate_group)
             generator = torch.Generator(device="cuda").manual_seed(seed_tensor.item())
         for module in lora_modules:
             module._init_lora_parameters(generator)
