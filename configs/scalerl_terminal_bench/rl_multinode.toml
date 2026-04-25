@@ -80,6 +80,26 @@ adv_tau = 1.0
 [trainer.experimental]
 allow_nccl_async_level_override = true
 
+[inference.parallel]
+# REQUIRED on the multi-node non-EP non-disagg path: each inference
+# node runs its OWN vLLM instance (the template `multi_node_rl.sbatch.j2`
+# launches one `uv run inference` per node, no cross-node DP coordination).
+# `dp` is the per-instance/per-node value. With tp=1 and 8 GPUs per
+# inference node, dp=8 fills the node. Across 4 inference nodes that's
+# 32 DP replicas global, each serving prompts independently.
+#
+# Without this block, the schema default `dp=1` leaves 7/8 GPUs idle on
+# every inference node — 4/32 inference GPUs used total. Async pipeline-RL
+# timing breaks because the inference pool can't absorb the full per-step
+# generation load (768 prompts × 16 rollouts). The
+# `RLConfig.auto_setup_deployment` validator auto-fills `dp` for single-
+# node and the multi-node EP branch but not for the non-EP non-disagg
+# path; this config must set it explicitly. Operators with model variants
+# that need TP>1 (Hopper FA3, MoE expert parallel) should adjust tp/dp
+# accordingly so `tp * dp == gpus_per_node`.
+tp = 1
+dp = 8
+
 [inference.model]
 fp32_lm_head = true
 
