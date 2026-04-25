@@ -539,6 +539,7 @@ class _DockerClient:
         dockerfile: str | os.PathLike[str] | None = None,
         timeout: int = 900,
         log_path: str | os.PathLike[str] | None = None,
+        force_no_cache: bool = False,
     ) -> None:
         """``docker build -t <tag> [-f <dockerfile>] <context_dir>``.
 
@@ -554,6 +555,16 @@ class _DockerClient:
         than "docker run: image not found". On detected BuildKit cache
         corruption (see ``_BUILDKIT_CORRUPTION_MARKERS``), retry once
         with ``--no-cache`` to bypass the poisoned cache layer.
+
+        ``force_no_cache=True`` skips the cached path entirely. Used by
+        the run-time recovery: when ``docker run`` against a freshly-built
+        image fails with a layer-extraction marker, the image's manifest
+        is intact but its layers reference content-store entries the
+        daemon's BuildKit cache has poisoned. A normal rebuild reuses the
+        same poisoned cached layers (the build itself looks healthy — no
+        marker emitted) and produces an identical broken manifest. Forcing
+        ``--no-cache`` is the only way to break that loop without `docker
+        builder prune`-ing the host's shared cache.
         """
         await self._build_one(
             tag=tag,
@@ -561,7 +572,7 @@ class _DockerClient:
             dockerfile=dockerfile,
             timeout=timeout,
             log_path=log_path,
-            no_cache=False,
+            no_cache=force_no_cache,
         )
 
     async def _build_one(
@@ -792,19 +803,21 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
                 e,
             )
 
-    async def _resolve_image(self, spec: _TaskSpec) -> str:
+    async def _resolve_image(self, spec: _TaskSpec, *, force_no_cache: bool = False) -> str:
         """Return a ``docker run``-able tag for ``spec``.
 
-        Fast path: tag already resolved this process lifetime.
-        Build path: local Dockerfile exists, tag is missing locally,
-        we're allowed to build -> ``docker build`` under a per-tag
-        in-process asyncio.Lock AND an OS-level flock (the asyncio.Lock
-        alone does NOT serialize peer worker processes spawned by
-        verifiers' ZMQEnvServer — see ``_flock_exclusive`` docstring).
+        Fast path: tag already resolved this process lifetime (skipped
+        when ``force_no_cache=True``, which forces a rebuild).
+        Build path: local Dockerfile exists, tag is missing locally OR
+        ``force_no_cache=True``, we're allowed to build -> ``docker build``
+        under a per-tag in-process asyncio.Lock AND an OS-level flock
+        (the asyncio.Lock alone does NOT serialize peer worker processes
+        spawned by verifiers' ZMQEnvServer — see ``_flock_exclusive``
+        docstring).
         Fallback: no local Dockerfile -> trust ``task.toml::docker_image``
         (still subject to daemon auth when ``docker run`` pulls it).
         """
-        if spec.name in self._resolved_tags:
+        if not force_no_cache and spec.name in self._resolved_tags:
             return self._resolved_tags[spec.name]
 
         dockerfile = self._dockerfile_path(spec)
@@ -820,12 +833,15 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         async with lock:
             # Re-check inside the in-process lock in case a peer
             # coroutine in this process already built while we were
-            # waiting.
-            if spec.name in self._resolved_tags:
-                return self._resolved_tags[spec.name]
-            if await self._docker.image_exists(local_tag):
-                self._resolved_tags[spec.name] = local_tag
-                return local_tag
+            # waiting. Skip the short-circuit on force_no_cache: we
+            # specifically want a fresh build because the existing
+            # tagged image is corrupt.
+            if not force_no_cache:
+                if spec.name in self._resolved_tags:
+                    return self._resolved_tags[spec.name]
+                if await self._docker.image_exists(local_tag):
+                    self._resolved_tags[spec.name] = local_tag
+                    return local_tag
 
             # Cross-process serialization. Without this, peer worker
             # processes (verifiers spawns ``num_workers`` ≈ 3 for the
@@ -834,7 +850,11 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
             # the flock across both the existence re-check and the
             # build itself so a peer that just finished can short-circuit.
             async with _flock_exclusive(_build_lock_path(local_tag)):
-                if await self._docker.image_exists(local_tag):
+                # Inside the cross-process flock: a peer process may
+                # have already done a force_no_cache rebuild before us.
+                # If so, the new image is clean and we can short-circuit
+                # whether or not WE were asked to force_no_cache.
+                if await self._docker.image_exists(local_tag) and not force_no_cache:
                     self._resolved_tags[spec.name] = local_tag
                     return local_tag
 
@@ -844,11 +864,12 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
 
                 _logger.info(
                     "terminal_bench_local: building image tag=%s context=%s "
-                    "(log=%s timeout=%ds)",
+                    "(log=%s timeout=%ds force_no_cache=%s)",
                     local_tag,
                     dockerfile.parent,
                     log_path,
                     self._build_timeout_seconds,
+                    force_no_cache,
                 )
                 await self._docker.build(
                     tag=local_tag,
@@ -856,6 +877,7 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
                     dockerfile=dockerfile,
                     timeout=self._build_timeout_seconds,
                     log_path=log_path,
+                    force_no_cache=force_no_cache,
                 )
                 self._resolved_tags[spec.name] = local_tag
                 return local_tag
@@ -947,6 +969,37 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
                         )
                         for cid in leaked:
                             await self._docker.remove_force(cid)
+
+                    # Pre-build every task's image SERIALLY before the
+                    # first rollout fires. Without pre-building, the
+                    # first batch of N rollouts (different tasks) all
+                    # call _resolve_image concurrently — flock serializes
+                    # cross-process, but each worker still sees a
+                    # cold cache and the daemon still juggles N parallel
+                    # builds end-to-end (image_exists is False for all,
+                    # so each worker enters the build path before any
+                    # finishes). Pre-build under the same one-shot guard
+                    # means: by the time setup_state's `_resolve_image`
+                    # below runs, the image is either already-built
+                    # (image_exists=True, fast-path) or this rollout is
+                    # the first to discover a deferred build need. Either
+                    # way, no peer worker is racing on the same tag.
+                    _logger.info(
+                        "terminal_bench_local: pre-building %d task images",
+                        len(self._task_specs),
+                    )
+                    for prebuild_spec in self._task_specs.values():
+                        try:
+                            await self._resolve_image(prebuild_spec)
+                        except Exception as e:
+                            _logger.warning(
+                                "terminal_bench_local: pre-build for %s "
+                                "failed (%r); the per-rollout build path "
+                                "will retry with --no-cache on first use",
+                                prebuild_spec.name,
+                                e,
+                            )
+
                     self._stale_sweep_done = True
 
         # Resolve the image *before* we mint a container name -- a build
@@ -991,12 +1044,21 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
             ):
                 _logger.warning(
                     "terminal_bench_local: docker run for %s hit BuildKit "
-                    "corruption (%s); untagging + rebuilding under flock",
+                    "corruption (%s); untagging + force_no_cache rebuild "
+                    "under flock",
                     image,
                     e,
                 )
                 await self._invalidate_image(spec, image)
-                image = await self._resolve_image(spec)
+                # force_no_cache=True is load-bearing: the daemon's
+                # BuildKit cache holds a poisoned snapshot for the
+                # build's lineage (the tag is gone but the cached
+                # layers remain). A normal rebuild would silently
+                # produce an identical broken image — same content
+                # digest reference. --no-cache is the only way out
+                # without `docker builder prune`-ing the host's
+                # shared cache (which would also impact other users).
+                image = await self._resolve_image(spec, force_no_cache=True)
                 container = f"tb-{spec.name}-{uuid.uuid4().hex[:16]}"
                 try:
                     await self._docker.run_detached(
