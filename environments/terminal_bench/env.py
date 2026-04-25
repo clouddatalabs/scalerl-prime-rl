@@ -801,9 +801,20 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         # Harbor expects tests at /tests and reward output at
         # /logs/verifier/reward.txt; pre-create both paths.
         prep = "mkdir -p /tests /logs/verifier && rm -rf /tests/* 2>/dev/null || true"
-        exit_code, _, stderr = await self._docker.exec(container, prep, timeout=30)
+        exit_code, stdout, stderr = await self._docker.exec(container, prep, timeout=30)
         if exit_code != 0:
-            raise RuntimeError(f"prep /tests failed: {stderr!r}")
+            # Include exit_code AND stdout — when the container has exited
+            # before exec runs, docker prints to its own stderr but in some
+            # versions the message lands on stdout, leaving the historical
+            # `prep /tests failed: ''` empty-string footprint with no
+            # diagnostic. exec returns 124 on timeout (with a message in
+            # stderr); a 125-126-127 from docker indicates daemon/exec
+            # failure rather than the inner shell command. Surface all of
+            # it so the operator can tell apart "container died" from
+            # "filesystem read-only" from "docker daemon down".
+            raise RuntimeError(
+                f"prep /tests failed: exit={exit_code} stdout={stdout!r} stderr={stderr!r}"
+            )
 
         # ``docker cp <dir>/. <container>:<dst>`` copies dir *contents*
         # (trailing /.), which is what we want because test.sh expects
