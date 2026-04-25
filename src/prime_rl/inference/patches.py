@@ -956,24 +956,22 @@ def monkey_patch_no_moe_lora():
 
     Otherwise, the oracle will always try to pick TritonExperts.
     For blackwells, we want TRTLLMFlashInfer.
+
+    Wraps the upstream `__post_init__` rather than replacing its body —
+    other patches in this file (`monkey_patch_dp_engine_core_pause_resume_deadlock`,
+    `monkey_patch_minimax_m2_for_lora`) follow the same wrap pattern. A
+    body-replacement copy silently drops any new sanity-check / derived-default
+    line vLLM adds upstream on minor bumps; the cap at `vllm<0.20` in
+    pyproject.toml limits the blast radius but does not eliminate it.
     """
-    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, logger
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+
+    _original_post_init = FusedMoEConfig.__post_init__
 
     def _patched__post_init__(self: FusedMoEConfig):
-        if self.dp_size > 1:
-            logger.debug_once("Using FusedMoEConfig::max_num_tokens=%d", self.max_num_tokens)
-
-        assert self.max_num_tokens > 0
-
-        if self.router_logits_dtype is None:
-            self.router_logits_dtype = self.in_dtype
-
-        if self.hidden_dim_unpadded is None:
-            self.hidden_dim_unpadded = self.hidden_dim
-        if self.intermediate_size_per_partition_unpadded is None:
-            self.intermediate_size_per_partition_unpadded = self.intermediate_size_per_partition
-
-        # Disable LoRA for MoE layers
+        _original_post_init(self)
+        # Disable LoRA for MoE layers (post-condition only — upstream's
+        # derived defaults run first).
         self.is_lora_enabled = False
 
     FusedMoEConfig.__post_init__ = _patched__post_init__

@@ -147,13 +147,20 @@ def train(config: SFTConfig):
         config.optim, list(model.named_parameters()), parallel_dims, cpu_offload=config.model.optim_cpu_offload
     )
 
-    # Set up the learning rate scheduler
-    scheduler_steps = (
-        config.max_steps - config.ckpt.resume_step
-        if config.max_steps is not None
-        and (config.ckpt and config.ckpt.skip_scheduler and config.ckpt.resume_step is not None)
-        else config.max_steps
-    )
+    # Set up the learning rate scheduler. When skip_scheduler is set, we want
+    # the scheduler to advance only over the *remaining* steps after resume —
+    # use `checkpoint_step` (the resolved value) rather than
+    # `config.ckpt.resume_step` so that the documented sentinel `resume_step=-1`
+    # doesn't yield `max_steps - (-1) = max_steps + 1` steps of slower decay.
+    if (
+        config.max_steps is not None
+        and config.ckpt
+        and config.ckpt.skip_scheduler
+        and checkpoint_step is not None
+    ):
+        scheduler_steps = config.max_steps - checkpoint_step
+    else:
+        scheduler_steps = config.max_steps
     logger.info(f"Setting up {config.scheduler.type} scheduler with {scheduler_steps} steps ({config.scheduler})")
     scheduler = setup_scheduler(optimizer, config.scheduler, scheduler_steps, config.optim.lr)
 
