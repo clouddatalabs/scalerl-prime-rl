@@ -252,11 +252,31 @@ def train(config: TrainerConfig):
         setup_sparse_mla_cp(model, cp_group, cp_rank, parallel_dims.cp)
         setup_nemotron_h_cp(model, cp_group, cp_rank, parallel_dims.cp)
 
-    # Optionally, resume training from a checkpoint
+    # Optionally, resume training from a checkpoint.
+    # Mirror the SFT path's handling of `skip_scheduler` / `skip_progress`:
+    # passing `None` to `load()` for either of those skips that part of the
+    # checkpoint state. The RL path doesn't carry a `StatefulDataLoader` (its
+    # data stream comes from the orchestrator), so `skip_dataloader` is a
+    # no-op here — the schema accepts it on RL only because `CheckpointConfig`
+    # is shared with SFT.
     progress = Progress()
     if checkpoint_step is not None:
-        ckpt_manager.load(checkpoint_step, model, [optimizer], scheduler, progress)
+        ckpt_manager.load(
+            checkpoint_step,
+            model,
+            [optimizer],
+            scheduler if not config.ckpt.skip_scheduler else None,
+            progress if not config.ckpt.skip_progress else None,
+        )
         logger.info(f"Resuming training from checkpoint step {checkpoint_step}")
+        if config.ckpt.skip_scheduler:
+            # Mirror SFT: re-instantiate the scheduler from scratch so any
+            # side-effects from the optimizer-state load on the scheduler's
+            # internal state dict are wiped out and warmup starts fresh.
+            if config.max_concurrent_runs == 1:
+                scheduler = setup_scheduler(optimizer, config.scheduler, config.max_steps, config.optim.lr)
+            else:
+                scheduler = setup_multi_scheduler(optimizer, config.scheduler, config.max_steps)
 
     logger.info(
         f"Starting from step {progress.step} (total_tokens={progress.total_tokens}, total_samples={progress.total_samples})"
