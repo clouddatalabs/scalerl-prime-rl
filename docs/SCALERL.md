@@ -48,7 +48,12 @@ export HF_HOME="$REPO_ROOT/hf-cache"
 #    NOTE: use --extra all (the aggregate extra), NOT --all-extras. The latter
 #    enumerates every extra by name and pulls in [flash-attn-3], whose wheel
 #    ships Hopper sm_90 kernels only and crashes on B200.
-uv sync --extra all
+#    `--locked` forces uv to use uv.lock as-is — without it, uv resolves
+#    every git-pinned dep (transformers, flash-attn-4, verifiers, torchtitan,
+#    dion, pydantic-config, flash-linear-attention) against upstream HEAD and
+#    can silently drift out of sync with what the Dockerfile pins. Match the
+#    Dockerfile.cuda / scripts/install.sh path.
+uv sync --extra all --locked
 
 # 2. Repair flash-attn-cute namespace if `uv sync` happened to install
 #    `flash-attn` (FA2) after `flash-attn-cute` — both ship a `flash_attn/cute/`
@@ -144,6 +149,17 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
   If your compute nodes can't reach any of these, pre-stage on the login
   node: `hf download Qwen/Qwen3-8B`, `bash scripts/fix-flash-attn-cute.sh`,
   and `docker pull` the TB base images you'll need.
+- **`$HOME` and `HF_HOME` must be visible to compute nodes.** The
+  Quickstart above pre-downloads Qwen3-8B (~16 GB) on the login node into
+  `$REPO_ROOT/hf-cache`, and the sbatch defaults `HF_HOME` to that path
+  (`$REPO_ROOT/hf-cache`). Clusters where `$HOME` (or wherever the repo
+  lives) is **node-local** instead of NFS/EFS-mounted will see the compute
+  node hit an empty cache and re-download mid-job — invisibly slow first
+  step that does NOT surface as an error. Verify with
+  `ls "$REPO_ROOT/hf-cache" && srun -N1 ls "$REPO_ROOT/hf-cache"` from the
+  login node before launching; if the second `ls` is empty, point both
+  `REPO_ROOT` and `HF_HOME` at a shared filesystem (`/scratch`, `/lustre`,
+  NFS, or whatever your cluster mounts cluster-wide).
 - **Non-AWS clusters with `LD_PRELOAD` shimming `libcublas`.** Set
   `SCALERL_FORCE_CLEAR_LD=1` in `.env` (or before `sbatch`). The smoke
   script auto-clears `LD_LIBRARY_PATH` and `LD_PRELOAD` when it sees the

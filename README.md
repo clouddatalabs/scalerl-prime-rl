@@ -136,13 +136,20 @@ source $HOME/.local/bin/env
 3. Install dependencies from the lock file
 
 ```bash
-uv sync --extra all
+uv sync --extra all --locked
 ```
 
 > ⚠️ Use `--extra all` (the aggregate `[all]` extra in `pyproject.toml`), NOT
 > `--all-extras`. The latter enumerates every extra by name and pulls in
 > `flash-attn-3`, whose published wheel ships Hopper sm_90 kernels only and
 > crashes on B200. The fork's `[all]` extra deliberately excludes FA3.
+
+> ⚠️ Always include `--locked`. Without it, `uv` resolves the git-pinned
+> deps (`transformers`, `flash-attn-4`, `verifiers`, `torchtitan`, `dion`,
+> `pydantic-config`, `flash-linear-attention`) against upstream HEAD on
+> every install, which silently drifts away from what `uv.lock` /
+> `Dockerfile.cuda` / `scripts/install.sh` pin. The smoke job and the
+> handoff configs were validated against the lock-file resolution.
 
 3.1. Optional: Install Flash Attention 3 (on Hopper GPUs only, for flash_attention_3 attention backend)
 

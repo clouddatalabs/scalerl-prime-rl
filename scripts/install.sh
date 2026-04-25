@@ -115,6 +115,16 @@ main() {
     # can drift from uv.lock if any of the git-pinned deps moved upstream.
     uv sync --extra all --locked
 
+    # FA4 lives in the `flash_attn.cute.*` namespace, which the FA2 stub
+    # shadow-installs by default; without this repair `import flash_attn`
+    # *succeeds* but FA4 kernels silently fall back to FA2 — a wrong-kernel
+    # hazard that does NOT surface during `uv run python -c "import flash_attn"`
+    # (the README's only smoke check). Run the same repair the Dockerfile
+    # and sbatch run, immediately after `uv sync`, so the standalone-install
+    # path matches the container build.
+    log_info "Repairing flash_attn.cute namespace (FA4)..."
+    bash "$(dirname "${BASH_SOURCE[0]}")/fix-flash-attn-cute.sh"
+
     log_info "Installing pre-commit hooks..."
     uv run pre-commit install
 
