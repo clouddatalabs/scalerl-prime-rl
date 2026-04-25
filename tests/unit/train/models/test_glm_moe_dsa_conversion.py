@@ -48,6 +48,36 @@ def test_convert_tt_layer_to_vllm_kernel_no_fp8():
     assert "model.layers.0.mlp.gate.weight" in out
     assert "model.layers.0.mlp.gate.e_score_correction_bias" in out
 
+    # Cat-order content checks: vLLM's de-fuser slices these tensors at fixed
+    # offsets. Shape alone cannot catch a regression that swaps cat operands
+    # (the gate_up and w13 halves are equal-size and structurally invisible to
+    # shape; fused_qkv_a halves are different sizes but also yield identical
+    # shape under either ordering). Pin the slice content against the source
+    # tensors so a future refactor cannot silently corrupt the bridge to vLLM.
+    fused_qkv = out["model.layers.0.self_attn.fused_qkv_a_proj.weight"]
+    assert torch.equal(fused_qkv[:4], state["model.layers.0.self_attn.q_a_proj.weight"]), (
+        "fused_qkv_a_proj should be cat([q_a, kv_a]); first 4 rows must match q_a"
+    )
+    assert torch.equal(fused_qkv[4:], state["model.layers.0.self_attn.kv_a_proj_with_mqa.weight"]), (
+        "fused_qkv_a_proj should be cat([q_a, kv_a]); rows 4-6 must match kv_a"
+    )
+
+    gate_up = out["model.layers.0.mlp.gate_up_proj.weight"]
+    assert torch.equal(gate_up[:8], state["model.layers.0.mlp.gate_proj.weight"]), (
+        "gate_up_proj should be cat([gate, up]); first 8 rows must match gate"
+    )
+    assert torch.equal(gate_up[8:], state["model.layers.0.mlp.up_proj.weight"]), (
+        "gate_up_proj should be cat([gate, up]); rows 8-15 must match up"
+    )
+
+    w13 = out["model.layers.0.mlp.experts.w13_weight"]
+    assert torch.equal(w13[:, :3, :], state["model.layers.0.mlp.experts.w1"]), (
+        "experts.w13_weight should be cat([w1, w3], dim=1); first 3 rows must match w1"
+    )
+    assert torch.equal(w13[:, 3:, :], state["model.layers.0.mlp.experts.w3"]), (
+        "experts.w13_weight should be cat([w1, w3], dim=1); rows 3-5 must match w3"
+    )
+
 
 def test_convert_tt_layer_to_vllm_kernel_with_fp8():
     state = _build_prime_layer_state()

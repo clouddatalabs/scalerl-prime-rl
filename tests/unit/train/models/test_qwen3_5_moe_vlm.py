@@ -188,10 +188,19 @@ def test_vlm_router_replay():
     topk = config.text_config.num_experts_per_tok
     routed_experts = torch.randint(0, config.text_config.num_experts, (1, seq_len, num_layers, topk), device="cuda")
 
+    # Reference forward without router_replay so we can pin a value difference,
+    # not just shape. A regression that drops the `routed_experts` branch in
+    # moe.py would still produce shape-correct logits but match the routerless
+    # forward bit-for-bit, and ScaleRL §3.2 train/inference parity would
+    # silently regress.
+    out_normal = model(input_ids=input_ids, pixel_values=pixel_values, image_grid_thw=image_grid_thw)
     out = model(
         input_ids=input_ids, pixel_values=pixel_values, image_grid_thw=image_grid_thw, routed_experts=routed_experts
     )
     assert out["logits"].shape == (1, seq_len, vocab)
+    assert not torch.allclose(out["logits"], out_normal["logits"]), (
+        "router_replay was silently ignored — VLM forward matches routerless forward."
+    )
 
     out["logits"].sum().backward()
     assert model.model.language_model.embed_tokens.weight.grad is not None

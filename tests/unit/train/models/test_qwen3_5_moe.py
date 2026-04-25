@@ -107,7 +107,14 @@ def test_qwen3_5_moe_router_replay():
     prime_model.zero_grad()
     out_replay = prime_model(input_ids, position_ids=position_ids, routed_experts=routed_experts)
 
+    # Pin VALUE difference, not just shape — otherwise a regression that
+    # drops the `routed_experts` branch in moe.py silently regresses to
+    # topk(scores) and the test still passes. ScaleRL §3.2 logprob parity
+    # depends on this branch firing.
     assert out_replay["logits"].shape == out_normal["logits"].shape
+    assert not torch.allclose(out_replay["logits"], out_normal["logits"]), (
+        "router_replay was silently ignored — out_replay matches out_normal."
+    )
 
     out_replay["logits"].sum().backward()
     assert prime_model.model.embed_tokens.weight.grad is not None

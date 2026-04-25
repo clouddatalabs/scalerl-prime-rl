@@ -144,8 +144,17 @@ def test_qwen3_moe_router_replay():
     prime_model.zero_grad()
     out_replay = prime_model(input_ids, position_ids, routed_experts=routed_experts)
 
-    # Outputs should differ because routing is forced to different experts
+    # Outputs should differ because routing is forced to different experts.
+    # Shape parity is the floor; pinning shape alone would let a regression
+    # that drops the `routed_experts` branch in moe.py silently fall back to
+    # topk(scores) — out_replay would then equal out_normal and ScaleRL §3.2
+    # train/inference logprob parity (the whole reason router_replay exists)
+    # would silently regress.
     assert out_replay["logits"].shape == out_normal["logits"].shape
+    assert not torch.allclose(out_replay["logits"], out_normal["logits"]), (
+        "router_replay was silently ignored — out_replay matches out_normal. "
+        "Check moe.py's `if routed_experts is not None` branch."
+    )
 
     # Verify gradients flow through the model with router replay
     out_replay["logits"].sum().backward()
