@@ -144,15 +144,37 @@ from prime_rl.inference.vllm.serving_chat_with_tokens import (
     OpenAIServingChatWithTokens,
 )
 
-# NOTE: Fix harmony stop token propagation for GPT-OSS models
-# Upstream issue still open: https://github.com/vllm-project/vllm/issues/22519
-monkey_patch_harmony_stop_token_propagation()
-# NOTE: Monkeypatch LoadLoRAAdapter to allow loading the same adapter multiple times
-# May be removable if we pass load_inplace=True (supported since vLLM 0.18, PR #31326)
-monkey_patch_load_lora_adapter()
-# NOTE: Monkeypatch TokenizeParams to fix overly conservative validation
-# Still needed in vLLM 0.19 — upstream rejects prompt_len > max_model_len - max_tokens
-monkey_patch_tokenize_params_validation()
+# Each patch reaches into deep vLLM internals (`vllm.entrypoints.openai.*`,
+# `vllm.lora.*`) — symbols that vLLM rearranges between minor versions. Wrap
+# each in its own try/except so a downstream consumer's vLLM pin (where one
+# of these symbols has moved or been renamed) does NOT crash the entire
+# vLLM API server on `import`. Mirrors the isolation pattern in
+# `prime_rl.inference.patches.transformers_v5_compat` and
+# `prime_rl.inference.vllm.worker.__init__`.
+import logging as _server_patch_logging
+
+for _patch_name, _patch_fn in [
+    # Fix harmony stop token propagation for GPT-OSS models
+    # Upstream issue still open: https://github.com/vllm-project/vllm/issues/22519
+    ("monkey_patch_harmony_stop_token_propagation", monkey_patch_harmony_stop_token_propagation),
+    # Allow loading the same LoRA adapter multiple times.
+    # May be removable if we pass load_inplace=True (supported since vLLM 0.18, PR #31326)
+    ("monkey_patch_load_lora_adapter", monkey_patch_load_lora_adapter),
+    # Fix overly conservative TokenizeParams validation.
+    # Still needed in vLLM 0.19 — upstream rejects prompt_len > max_model_len - max_tokens
+    ("monkey_patch_tokenize_params_validation", monkey_patch_tokenize_params_validation),
+]:
+    try:
+        _patch_fn()
+    except Exception as _e:
+        _server_patch_logging.getLogger(__name__).warning(
+            "prime-rl: vLLM API-server patch %s failed (%s: %s); "
+            "the server continues. If your model relies on this patch, "
+            "fix the underlying error.",
+            _patch_name,
+            type(_e).__name__,
+            _e,
+        )
 
 logger = init_logger("vllm.entrypoints.openai.api_server")
 

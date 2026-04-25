@@ -202,8 +202,21 @@ def _efficiency_length_shaping(
     correct_lengths = completion_lengths * correct_mask
     mean_correct_len = correct_lengths.sum(dim=1, keepdim=True) / num_correct.clamp(min=1)
 
-    # Bounded brevity bonus: [0, 1], positive for below-average length, zero for above
-    bonus = (1 - completion_lengths / mean_correct_len).clamp(0, 1)
+    # Bounded brevity bonus: [0, 1], positive for below-average length, zero for above.
+    # Guard against division by zero — degenerate groups where every "correct"
+    # rollout has zero length (e.g. instant EOS) yield `mean_correct_len == 0`,
+    # which would produce `1 - len/0 = NaN`. NaN flows through `correct_mask *
+    # NaN`, then into `shaped_rewards`, then into advantages. ZeroAdvantageFilter
+    # tests `advantage == 0.0` and NaN compares unequal — so the rollout is
+    # silently kept; CISPO/default loss safe-masks gate by finite_ratio /
+    # finite_lp / loss_mask but NOT by `isfinite(advantages)`, so NaN
+    # advantages flow into `pg_per_token = mask * NaN * ...` → NaN loss → NaN
+    # gradients across the batch. `apply_batch_advantage_normalization`
+    # explicitly raises on non-finite advantages, but only under
+    # `normalization == "batch"`. Add a `clamp(min=1)` on the divisor so the
+    # bonus is finite and zero on the degenerate group (matching the
+    # has_correct=False fallback's intent).
+    bonus = (1 - completion_lengths / mean_correct_len.clamp(min=1)).clamp(0, 1)
 
     # Shape rewards: correct rollouts amplified by up to 2x, incorrect untouched
     shaped_rewards = rewards * (1 + bonus * correct_mask)
