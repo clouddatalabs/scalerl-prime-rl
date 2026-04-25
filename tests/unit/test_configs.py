@@ -683,6 +683,28 @@ def test_shipped_poc_configs_load_cleanly():
             f"{relpath}: NCCL async-level override is required for max_async_level>1"
         )
 
+        # `extra_env_kwargs["max_seq_len"]` must match `orchestrator.seq_len`
+        # on every train AND eval env. `OrchestratorConfig.resolve_env_config`
+        # historically froze max_seq_len at the orchestrator's schema default
+        # (2048) when top-level `seq_len` propagated AFTER resolve_env_config
+        # had run, silently truncating rollouts at 2K while the trainer-side
+        # packer used 8K. Re-propagation lives in `auto_setup_seq_len` now;
+        # pin it.
+        for env in cfg.orchestrator.train.env or []:
+            assert env.extra_env_kwargs.get("max_seq_len") == cfg.orchestrator.seq_len, (
+                f"{relpath}: train env {env.id!r} max_seq_len="
+                f"{env.extra_env_kwargs.get('max_seq_len')} disagrees with "
+                f"orchestrator.seq_len={cfg.orchestrator.seq_len} — "
+                "rollouts will be silently truncated at the smaller value."
+            )
+        if cfg.orchestrator.eval is not None:
+            for env in cfg.orchestrator.eval.env or []:
+                assert env.extra_env_kwargs.get("max_seq_len") == cfg.orchestrator.seq_len, (
+                    f"{relpath}: eval env {env.id!r} max_seq_len="
+                    f"{env.extra_env_kwargs.get('max_seq_len')} disagrees with "
+                    f"orchestrator.seq_len={cfg.orchestrator.seq_len}"
+                )
+
 
 def test_adamw_config_carries_eps_and_rejects_typos():
     """AdamW `eps` field must round-trip into the optimizer constructor.

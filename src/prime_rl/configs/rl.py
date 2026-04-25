@@ -968,6 +968,23 @@ class RLConfig(BaseConfig):
             if "seq_len" not in self.orchestrator.model_fields_set:
                 self.orchestrator.seq_len = self.seq_len
 
+        # Re-propagate the resolved orchestrator.seq_len into every env's
+        # `extra_env_kwargs["max_seq_len"]`. `OrchestratorConfig.resolve_env_config`
+        # ran at orchestrator-construction time when `self.seq_len` was still
+        # the schema default 2048, freezing `max_seq_len = 2048` on every
+        # train env. By the time this RLConfig-level validator updates
+        # `orchestrator.seq_len = 8192`, the env-iteration validator does
+        # NOT re-fire — so verifiers' `parse_response_tokens` would truncate
+        # rollouts at 2K while the trainer-side packer uses 8K. Result:
+        # every shipped POC config (math, TB) was silently mistraining on
+        # 2K-truncated rollouts even though every other place said 8192.
+        # Also cover eval envs (the original validator only iterated train).
+        for env in self.orchestrator.train.env or []:
+            env.extra_env_kwargs["max_seq_len"] = self.orchestrator.seq_len
+        if self.orchestrator.eval is not None:
+            for env in self.orchestrator.eval.env or []:
+                env.extra_env_kwargs["max_seq_len"] = self.orchestrator.seq_len
+
         if self.trainer.model.seq_len < self.orchestrator.seq_len:
             raise ValueError(
                 f"Trainer model seq_len ({self.trainer.model.seq_len}) must be >= orchestrator seq_len ({self.orchestrator.seq_len}). "
