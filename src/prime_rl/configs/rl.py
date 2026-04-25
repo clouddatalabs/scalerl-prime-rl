@@ -674,6 +674,32 @@ class RLConfig(BaseConfig):
 
         validate_shared_model_name(self.trainer, self.orchestrator, self.inference)
 
+        # Refuse to launch with an implicit `Qwen/Qwen3-0.6B` fallback.
+        # `BaseModelConfig.name` defaults to that tiny upstream-test model;
+        # a real ScaleRL launch should explicitly set `model.name`. Without
+        # this guard, dropping the `[model]` block from any of the shipped
+        # configs silently downgrades to 0.6B with the full §3.2 stack
+        # (FP32 LM-head, FA4) pointed at the wrong architecture, no error.
+        # Use `model_fields_set` so an operator who explicitly writes
+        # `name = "Qwen/Qwen3-0.6B"` (e.g. for testing) is allowed through.
+        explicitly_set = (
+            (self.model is not None and "name" in self.model.model_fields_set)
+            or "name" in self.trainer.model.model_fields_set
+            or "name" in self.orchestrator.model.model_fields_set
+            or (self.inference is not None and "name" in self.inference.model.model_fields_set)
+        )
+        if not explicitly_set:
+            raise ValueError(
+                "model.name was not explicitly set in any component "
+                "([model], [trainer.model], [orchestrator.model], or "
+                "[inference.model]). The schema default is "
+                "'Qwen/Qwen3-0.6B' — a tiny model used by upstream tests — "
+                "which silently downgrades real training runs. Set "
+                "`[model] name = ...` (top-level shorthand) or one of the "
+                "per-component `name` fields explicitly. Both shipped "
+                "configs/scalerl_*/rl.toml use the top-level shorthand."
+            )
+
         return self
 
     @model_validator(mode="after")
@@ -868,6 +894,50 @@ class RLConfig(BaseConfig):
                 f"The trainer needs to be able to handle sequences at least as long as those produced by the orchestrator."
             )
 
+        # Reject any sampling config whose `max_completion_tokens` exceeds
+        # `orchestrator.seq_len`. The orchestrator silently truncates over-budget
+        # rollouts and only surfaces it as the `is_truncated` metric — an
+        # operator who bumps `max_completion_tokens` for a long-context task
+        # without raising `seq_len` would lose hours of SLURM time before
+        # noticing. Walk every train + eval sampling block (per-env overrides
+        # included) so this catches the typical foot-gun shapes. `None`
+        # means "unbounded — generate until context or EOS"; that is also
+        # rejected when seq_len is set (the orchestrator will hit seq_len
+        # first anyway, but be loud rather than silent — an operator who
+        # left `max_completion_tokens` unset is unlikely to want exactly
+        # seq_len's worth of generation, so this surfaces the missing knob).
+        seq_limit = self.orchestrator.seq_len
+        max_completion_locations: list[tuple[str, int | None]] = [
+            ("orchestrator.train.sampling", self.orchestrator.train.sampling.max_completion_tokens),
+        ]
+        for env_cfg in self.orchestrator.train.env or []:
+            if env_cfg.sampling is not None:
+                max_completion_locations.append(
+                    (f"orchestrator.train.env[{env_cfg.id!r}].sampling", env_cfg.sampling.max_completion_tokens)
+                )
+        if self.orchestrator.eval is not None:
+            max_completion_locations.append(
+                ("orchestrator.eval.sampling", self.orchestrator.eval.sampling.max_completion_tokens)
+            )
+            for env_cfg in self.orchestrator.eval.env or []:
+                if env_cfg.sampling is not None:
+                    max_completion_locations.append(
+                        (f"orchestrator.eval.env[{env_cfg.id!r}].sampling", env_cfg.sampling.max_completion_tokens)
+                    )
+        for label, max_completion in max_completion_locations:
+            # None means "unbounded" — that's a valid upstream choice, skip.
+            if max_completion is None:
+                continue
+            if max_completion > seq_limit:
+                raise ValueError(
+                    f"{label}.max_completion_tokens ({max_completion}) exceeds "
+                    f"orchestrator.seq_len ({seq_limit}). The orchestrator would "
+                    "silently truncate rollouts past seq_len and surface it only "
+                    "as the `is_truncated` metric. Either lower max_completion_tokens "
+                    "or raise [orchestrator] seq_len (and the trainer model seq_len "
+                    "alongside it)."
+                )
+
         return self
 
     @model_validator(mode="after")
@@ -1033,15 +1103,29 @@ class RLConfig(BaseConfig):
             # set num_train_workers to the number of data replicas
             non_data_parallel_size = self.trainer.model.cp
             if self.deployment.num_train_gpus > 1:
+                if self.deployment.num_train_gpus % non_data_parallel_size != 0:
+                    # `num_train_workers = num_train_gpus // cp` silently
+                    # rounds down on a non-divisible cp; raise loudly so an
+                    # operator with `num_train_gpus=4, cp=3` doesn't get a
+                    # mis-sized FSDP mesh.
+                    raise ValueError(
+                        f"deployment.num_train_gpus ({self.deployment.num_train_gpus}) "
+                        f"must be divisible by trainer.model.cp ({non_data_parallel_size})."
+                    )
                 self.orchestrator.num_train_workers = self.deployment.num_train_gpus // non_data_parallel_size
 
             # fill up inference capacity with dp ranks
             if self.inference is not None:
                 num_infer_gpus = self.deployment.num_infer_gpus
                 if num_infer_gpus != self.inference.parallel.dp * self.inference.parallel.tp:
-                    assert num_infer_gpus % self.inference.parallel.tp == 0, (
-                        "Number of inference GPUs must be divisible by the tensor parallel size"
-                    )
+                    # `assert` raises AssertionError (not ValidationError) and
+                    # gets stripped under `python -O`; use `raise ValueError`
+                    # so the contract holds in optimized images.
+                    if num_infer_gpus % self.inference.parallel.tp != 0:
+                        raise ValueError(
+                            f"deployment.num_infer_gpus ({num_infer_gpus}) must be "
+                            f"divisible by inference.parallel.tp ({self.inference.parallel.tp})."
+                        )
                     self.inference.parallel.dp = num_infer_gpus // self.inference.parallel.tp
                 # Ensure api_server_count matches DP so all workers are created.
                 # Without this, the NCCL broadcast group expects dp*tp workers

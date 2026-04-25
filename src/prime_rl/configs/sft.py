@@ -27,6 +27,13 @@ from prime_rl.utils.config import BaseConfig
 class BaseDataConfig(BaseModel):
     """Base config for SFT data."""
 
+    # Reject unknown fields rather than silently dropping them as Pydantic's
+    # `extra="ignore"` default does. The trainer-side configs all set this
+    # via `BaseConfig`, but `BaseDataConfig` subclassed `BaseModel` directly
+    # and inherited the silent-drop default; a typo in `[data] subesets` or
+    # `seedz` would silently train with the schema default.
+    model_config = ConfigDict(extra="forbid")
+
     batch_size: Annotated[int, Field(ge=1)] = 128
     seq_len: Annotated[int, Field(ge=1)] = 128
     pack_function: Literal["cat", "stack"] = "cat"

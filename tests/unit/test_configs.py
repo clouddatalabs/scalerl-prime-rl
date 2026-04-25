@@ -241,6 +241,13 @@ def test_paper_faithful_empty_batch_opt_in():
 
 
 _RL_BASE = {
+    # `model.name` must be explicitly set so the new "no implicit
+    # Qwen/Qwen3-0.6B fallback" validator (auto_setup_model in rl.py)
+    # accepts these test fixtures. Use the same default model the
+    # individual ModelConfigs default to so the test contract remains
+    # equivalent to "construct with all defaults" — only the explicit-set
+    # bit changes.
+    "model": {"name": "Qwen/Qwen3-0.6B"},
     "trainer": {},
     "orchestrator": {},
     "inference": {},
@@ -386,6 +393,7 @@ def test_rl_config_skips_fp32_lm_head_check_when_inference_omitted():
         warnings.simplefilter("always")
         config = RLConfig.model_validate(
             {
+                "model": {"name": "Qwen/Qwen3-0.6B"},
                 "trainer": {"model": {"fp32_lm_head": True}, "matmul_precision": "highest"},
                 "orchestrator": {},
                 "inference": None,
@@ -408,6 +416,7 @@ def test_rl_config_no_warning_when_inference_omitted_and_fp32_off():
         warnings.simplefilter("always")
         RLConfig.model_validate(
             {
+                "model": {"name": "Qwen/Qwen3-0.6B"},
                 "trainer": {"model": {"fp32_lm_head": False}},
                 "orchestrator": {},
                 "inference": None,
@@ -498,6 +507,7 @@ def test_rl_config_accepts_sft_with_external_rollout_string_client():
     string-client + external-rollout reconstruction path."""
     config = RLConfig.model_validate(
         {
+            "model": {"name": "Qwen/Qwen3-0.6B"},
             "orchestrator": {
                 "use_token_client": False,
                 "teacher_rollout_model": {"client": {}, "model": {}},
