@@ -43,8 +43,30 @@ if ! flock -x -w 300 "$LOCK_FD"; then
 fi
 
 echo "Reinstalling flash-attn-cute to fix namespace conflict with flash-attn..."
-# Match the pin in pyproject.toml so this script and `uv sync --extra all` agree.
-uv pip install --reinstall --no-deps "flash-attn-4 @ git+https://github.com/Dao-AILab/flash-attention.git@abd9943b#subdirectory=flash_attn/cute"
+# Read the FA4 git rev from `pyproject.toml` rather than hardcoding it here —
+# previously this script's pin and pyproject's pin were two independent
+# constants. A future bump of pyproject (with matching `uv lock` update) would
+# silently leave this script reinstalling the OLD rev, downgrading FA4
+# whenever the script ran (which the sbatch + Dockerfile both invoke after
+# `uv sync` as defense-in-depth). The line-count check below would still
+# pass on the wrong rev (any real FA4 has >1000 lines), so the downgrade
+# would surface only as wrong attention numerics deep into a training run.
+FA4_REV=$(
+    python -c "
+import sys, tomllib
+with open('$REPO_ROOT/pyproject.toml', 'rb') as f:
+    cfg = tomllib.load(f)
+src = cfg.get('tool', {}).get('uv', {}).get('sources', {}).get('flash-attn-4')
+if not isinstance(src, dict) or 'rev' not in src:
+    print('ERROR: pyproject.toml [tool.uv.sources.flash-attn-4].rev not found', file=sys.stderr)
+    sys.exit(1)
+print(src['rev'])
+"
+) || exit 1
+
+echo "Pinning to flash-attn-4 rev $FA4_REV (read from pyproject.toml)"
+uv pip install --reinstall --no-deps \
+    "flash-attn-4 @ git+https://github.com/Dao-AILab/flash-attention.git@${FA4_REV}#subdirectory=flash_attn/cute"
 
 # Verify installation
 LINES=$(wc -l < "$(python -c 'import flash_attn.cute.interface as m; print(m.__file__)')")
