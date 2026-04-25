@@ -10,9 +10,12 @@
 # template at `src/prime_rl/templates/multi_node_rl.sbatch.j2`).
 #
 # Edit the four ALL-CAPS placeholders in the [slurm] block below for your
-# cluster, plus the node-count split. The recipe knobs match the single-
-# node config (kept duplicated so this config is loadable on its own,
-# without an overlay loader).
+# cluster, plus the node-count split. Recipe knobs are duplicated from
+# the single-node config (kept duplicated so this config is loadable on
+# its own, without an overlay loader). Keep the train/eval task lists
+# in lockstep with rl.toml — separation between train and held-out test
+# is by explicit `tasks=[...]` lists, NOT a `split` kwarg (the env's
+# `load_environment` rejects unknown kwargs).
 
 max_steps = 500
 seq_len = 8192
@@ -41,15 +44,18 @@ time = "24:00:00"             # adjust to your QoS cap
 # `ModuleNotFoundError: No module named 'environments'` and surfaces as
 # `reward = 0` in the rollout JSONL — silently indistinguishable from
 # "model failed the task." Math-env users (other config) don't need this.
+#
+# NOTE: under SLURM clusters configured with `SBATCH_EXPORT=NONE` (common
+# in air-gapped/hardened deployments), env exports from `pre_run_command`
+# do NOT inherit into srun children. If your cluster is NONE, instead
+# bake PYTHONPATH into your `.env` file (`echo 'PYTHONPATH=...:$PYTHONPATH'
+# >> .env`) so it's re-sourced inside the srun heredocs.
 pre_run_command = "export PYTHONPATH=$PROJECT_DIR:$PYTHONPATH"
 
 [model]
 name = "Qwen/Qwen3-8B"
 
 [trainer]
-# `matmul_precision = "highest"` is required when fp32_lm_head=true;
-# "high"/"medium" silently relaxes FP32 matmuls to TF32 on Ampere+,
-# defeating the §3.2 train/inference parity.
 matmul_precision = "highest"
 
 [trainer.model]
@@ -83,6 +89,12 @@ rollouts_per_example = 16
 seq_len = 8192
 prompt_average_loss = true
 max_off_policy_steps = 1_000_000_000
+# REQUIRED for TB: the multi-turn chat template inserts/removes tokens
+# between turns; with use_token_client=true (the default), the orchestrator
+# would silently corrupt train/inference logprob alignment, biasing the
+# CISPO IS-ratio. Always set false on TB-shaped multi-turn envs. Mirrors
+# the single-node config's `rl.toml` line 53.
+use_token_client = false
 
 [orchestrator.train.sampling]
 max_completion_tokens = 6144
@@ -94,19 +106,61 @@ normalization = "batch"
 [orchestrator.buffer]
 no_positive_resampling = true
 no_positive_resampling_threshold = 0.9
+no_positive_resampling_min_groups = 4
 
+# 18 train task fixtures committed under environments/terminal_bench/tasks/.
+# train/eval separation is by explicit `tasks=[...]` lists — the env has
+# no `split` kwarg.
 [[orchestrator.train.env]]
 id = "environments.terminal_bench"
-name = "terminal_bench_train"
-args = { task_root = "environments/terminal_bench/tasks", split = "train" }
+name = "terminal-bench-train"
+args = { tasks = [
+  "aimo-airline-departures",
+  "analyze-access-logs",
+  "ancient-puzzle",
+  "assign-seats",
+  "bank-trans-filter",
+  "catch-me-if-you-can",
+  "count-call-stack",
+  "countdown-game",
+  "cpp-compatibility",
+  "csv-to-parquet",
+  "debug-long-program",
+  "fix-git",
+  "flood-monitoring-basic",
+  "git-workflow-hack",
+  "grid-pattern-transform",
+  "heterogeneous-dates",
+  "jq-data-processing",
+  "jsonl-aggregator",
+], task_root = "environments/terminal_bench/tasks" }
 
 [orchestrator.eval]
+interval = 50
 eval_base_model = false
 
+[orchestrator.eval.sampling]
+temperature = 0.6
+top_p = 0.95
+max_completion_tokens = 6144
+
+# 10 held-out test tasks. rollouts_per_example=16 per ScaleRL §2.1.
 [[orchestrator.eval.env]]
 id = "environments.terminal_bench"
-name = "terminal_bench_eval"
-args = { task_root = "environments/terminal_bench/tasks", split = "test" }
+name = "terminal-bench-test"
+rollouts_per_example = 16
+args = { tasks = [
+  "log-summary",
+  "npm-conflict-resolution",
+  "overfull-hbox",
+  "pandas-etl",
+  "pandas-sql-query",
+  "recover-accuracy-log",
+  "recover-obfuscated-files",
+  "schedule-vacation",
+  "sha-puzzle",
+  "sql-injection-attack",
+], task_root = "environments/terminal_bench/tasks" }
 
 [weight_broadcast]
 # On hardware without EFA, override BOTH halves: set `SCALERL_NO_EFA=1`
