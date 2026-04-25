@@ -109,11 +109,13 @@ rollouts_per_example = 4
 matmul_precision = "highest"
 
 [trainer.model]
-# FA3 (flash_attention_3) — works on B200 with the upstream HF impl. The
-# custom impl supports FA4 (better perf) but doesn't yet have dense Qwen3
-# registered, only the MoE variants. Switch back to `attn = "fa4"` +
-# `impl = "custom"` once a dense Qwen3 is added to AutoModelForCausalLMPrimeRL.
-attn = "flash_attention_3"
+# Stage 1: sdpa (torch's bundled kernels — works on all sm_>=80 incl. B200).
+# The FA3 wheel from pytorch-cu128-test ships Hopper sm_90 kernels only and
+# crashes on B200 with "no kernel image is available for execution on the
+# device". Once smoke passes end-to-end on sdpa, move trainer to FA4
+# (`attn = "fa4"` + `impl = "custom"`) — note dense Qwen3 needs to be
+# registered in AutoModelForCausalLMPrimeRL first; only Qwen3*Moe* is today.
+attn = "sdpa"
 impl = "hf"
 # Match vLLM inference dtype to avoid optimizer/inference numerical drift.
 optimization_dtype = "bfloat16"
