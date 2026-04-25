@@ -138,7 +138,13 @@ fp32_lm_head = true
 [orchestrator]
 batch_size = 768
 rollouts_per_example = 16
-seq_len = 8192
+# `seq_len` is set ONCE at the top of the file (line 21). Duplicating it
+# here would land in `OrchestratorConfig.model_fields_set` and prevent
+# `auto_setup_seq_len`'s `model_fields_set` gate from propagating a
+# top-level bump (e.g. operator changes top-level to 16384) into the
+# orchestrator side. The trainer would run at the bumped value, but
+# verifiers would re-stamp `extra_env_kwargs["max_seq_len"]` at the
+# stale 8192 — silent rollout truncation.
 prompt_average_loss = true
 max_off_policy_steps = 1_000_000_000
 # REQUIRED for TB: the multi-turn chat template inserts/removes tokens
