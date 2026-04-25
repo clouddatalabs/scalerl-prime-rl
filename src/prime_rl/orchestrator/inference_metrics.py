@@ -103,12 +103,39 @@ class InferenceMetricsCollector:
     async def start(self):
         wandb.define_metric("inference/*", step_metric="_timestamp")
 
+        # Persistent inference-metrics failures (admin-client misconfig, schema
+        # change in vLLM's Prometheus output, parser regression) used to be
+        # invisible at default INFO log level — wandb's `inference/*` panels
+        # would silently flatline. Track consecutive failures and escalate
+        # to WARNING after a threshold so a real problem surfaces while a
+        # transient blip stays at debug. Threshold = 12 ≈ 1 minute at the
+        # 5s poll interval.
+        consecutive_failures = 0
+        warned = False
+
         async def poll_loop():
+            nonlocal consecutive_failures, warned
             while True:
                 try:
                     await self._collect_and_log()
+                    if warned:
+                        self.logger.info("Inference metrics poll recovered after %d failures", consecutive_failures)
+                    consecutive_failures = 0
+                    warned = False
                 except Exception as e:
-                    self.logger.debug(f"Inference metrics poll failed: {e!r}")
+                    consecutive_failures += 1
+                    if consecutive_failures >= 12 and not warned:
+                        self.logger.warning(
+                            "Inference metrics poll has failed %d times in a row "
+                            "(latest: %r); the inference/* panels are flatlining. "
+                            "Likely causes: admin-client URL drift, vLLM Prometheus "
+                            "schema change, or parser regression in parse_prometheus_text.",
+                            consecutive_failures,
+                            e,
+                        )
+                        warned = True
+                    else:
+                        self.logger.debug(f"Inference metrics poll failed: {e!r}")
                 await asyncio.sleep(POLL_INTERVAL)
 
         self._task = asyncio.create_task(poll_loop())
