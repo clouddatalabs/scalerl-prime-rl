@@ -111,9 +111,19 @@ Manual Setup
 
 1. Clone the repository
 
+> ⚠️ **On this fork, clone `clouddatalabs/scalerl-prime-rl`, NOT upstream.**
+> The upstream URL below is preserved for reference. Cloning upstream
+> would strip every ScaleRL ingredient added in this fork; see the
+> top-of-README banner.
+
 ```bash
-git clone https://github.com/PrimeIntellect-ai/prime-rl.git
-cd prime-rl
+# This fork (recommended):
+git clone https://github.com/clouddatalabs/scalerl-prime-rl.git
+cd scalerl-prime-rl
+
+# Upstream (reference only; lacks ScaleRL ingredients):
+# git clone https://github.com/PrimeIntellect-ai/prime-rl.git
+# cd prime-rl
 ```
 
 2. Install [uv](https://docs.astral.sh/uv/)
