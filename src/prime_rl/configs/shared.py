@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from prime_rl.utils.config import BaseConfig
 
@@ -450,7 +450,13 @@ class MetricsServerConfig(BaseConfig):
 class BaseTransportConfig(BaseModel):
     """Base configuration for transport."""
 
-    pass
+    # Mirror BaseWeightBroadcastConfig — without `extra="forbid"`, switching
+    # `type` between `filesystem` and `zmq` while leaving the other variant's
+    # host/port/hwm fields in the TOML silently drops them. The discriminated
+    # union picks the variant by `type`, but Pydantic's default `extra="ignore"`
+    # then quietly eats the wrong-variant fields rather than rejecting the
+    # config at load.
+    model_config = ConfigDict(extra="forbid")
 
 
 class FileSystemTransportConfig(BaseTransportConfig):
