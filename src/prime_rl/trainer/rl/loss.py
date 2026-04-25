@@ -150,17 +150,22 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     probs_diff = trainer_probs - inference_probs
     dppo_invalid_mask_high = probs_diff > loss_config.dppo_mask_high
     dppo_invalid_mask_low = probs_diff < -loss_config.dppo_mask_low
-    dppo_invalid_mask = torch.where(advantages > 0, dppo_invalid_mask_high, dppo_invalid_mask_low)
-
-    is_masked = dppo_invalid_mask
-    is_masked_high = (advantages > 0) & dppo_invalid_mask_high
-    is_masked_low = (advantages < 0) & dppo_invalid_mask_low
-    keep_mask = loss_mask & ~is_masked
 
     log_importance_ratio = trainer_logprobs - inference_logprobs
     importance_ratio = torch.exp(log_importance_ratio)
     mismatch_kl = importance_ratio - log_importance_ratio - 1
 
+    # Apply adv_tau + teacher_kl fold BEFORE deriving the DPPO trust-region
+    # mask. The trust-region direction (mask-high for "we're upweighting too
+    # aggressively"; mask-low for "we're downweighting too aggressively")
+    # must reflect the EFFECTIVE gradient sign — i.e. the sign of the
+    # post-fold advantage that actually drives the policy gradient. Pinning
+    # the mask to the raw pre-fold sign was a latent bug whenever
+    # `teacher_tau > 0` and `teacher_kl` flips the sign of the effective
+    # advantage (the trust-region constraint then protected the wrong tail).
+    # The shipped CISPO recipe never reaches this loss; the bug was dormant
+    # for `default_loss_fn + teacher_tau=0` (teacher_kl term is zero, no
+    # sign flip). Latent for `default_loss_fn + teacher_tau > 0`.
     advantages = loss_config.adv_tau * advantages
     if teacher_logprobs is not None:
         teacher_kl = teacher_logprobs - trainer_logprobs
@@ -192,6 +197,15 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
         advantages = advantages + loss_config.teacher_tau * teacher_kl.detach()
     else:
         teacher_kl = None
+
+    # NOW derive the DPPO trust-region mask against the post-fold advantage
+    # sign. The `is_masked_high` / `is_masked_low` decomposition uses
+    # post-fold sign too so the metrics match the actual gradient.
+    dppo_invalid_mask = torch.where(advantages > 0, dppo_invalid_mask_high, dppo_invalid_mask_low)
+    is_masked = dppo_invalid_mask
+    is_masked_high = (advantages > 0) & dppo_invalid_mask_high
+    is_masked_low = (advantages < 0) & dppo_invalid_mask_low
+    keep_mask = loss_mask & ~is_masked
 
     # Same IEEE 0*NaN=NaN hazard on the importance-ratio path: if either
     # `trainer_logprobs` or `inference_logprobs` is non-finite at a non-trainable
@@ -351,7 +365,18 @@ def cispo_loss_fn(inputs: LossInputs, loss_config: CISPOLossConfig) -> LossOutpu
         # in that case; this metric reports the clamped value used by the loss
         # itself. Named to be honest about that — a previous label
         # ("importance_ratio") read like the unclipped ratio on dashboards.
-        "truncated_importance_ratio": _safe_mean(truncated_ratio, inputs.loss_mask),
+        # Gate by `finite_ratio` so a NaN at a trainable position (the
+        # both-logprobs-`-inf` case `safe_mask` defends in the gradient
+        # path) doesn't leak NaN to wandb / Prometheus dashboards.
+        # `clamp(NaN, max=eps_max) == NaN` (PyTorch clamp is NaN-pass), so
+        # the bare `_safe_mean(truncated_ratio, loss_mask)` would surface
+        # `mean(...NaN...) = NaN` even though the loss-side
+        # `safe_truncated_ratio` already zeros these positions. Same shape
+        # of asymmetry that was just closed for `mismatch_kl` (commit
+        # 5e9578c8b). `ratio_truncated` and `ratio_collapsed` use boolean
+        # comparisons (`>`, `<`) which evaluate False on NaN and are
+        # already safe — no fix needed there.
+        "truncated_importance_ratio": _safe_mean(truncated_ratio, inputs.loss_mask & finite_ratio),
         # Fraction of trainable tokens whose ratio hit the eps_max ceiling. Useful
         # as a sanity gauge — too high (e.g. > ~10%) suggests the recipe drifted
         # off-policy beyond what the truncation bound was tuned for.

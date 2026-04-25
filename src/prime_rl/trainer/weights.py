@@ -177,33 +177,14 @@ def gather_weights_on_master(
     return cpu_state
 
 
-def get_adapter_state_dict(model: nn.Module, is_master: bool) -> dict[str, Tensor]:
-    """Get adapter weights with clean keys for PEFT compatibility."""
-    lora_state = {}
-
-    named_params = {_strip_pytorch_wrapper_prefix(key): value for key, value in model.named_parameters()}
-    for key, value in model.state_dict().items():
-        param = named_params.get(key)
-        if param is None or not param.requires_grad:
-            continue
-
-        if isinstance(value, DTensor):
-            value = value.full_tensor()
-
-        if is_master:
-            clean_key = next(iter(get_fqns(model, key)))
-            clean_key = clean_key.replace(".base_layer.", ".")
-
-            # Add PEFT-expected prefix
-            peft_key = f"base_model.model.{clean_key}"
-
-            # Add .weight suffix for LoRA parameters if missing
-            if ("lora_A" in peft_key or "lora_B" in peft_key) and not peft_key.endswith(".weight"):
-                peft_key = f"{peft_key}.weight"
-
-            lora_state[peft_key] = value.to("cpu", non_blocking=False)
-
-    torch.distributed.barrier()
-    if is_master and len(lora_state) == 0:
-        raise ValueError("The LoRA state dict is empty. Something went wrong.")
-    return lora_state
+# NOTE: `get_adapter_state_dict` previously lived here. Removed because
+# (a) zero in-tree callers (verified via `grep -rn get_adapter_state_dict
+# src/ tests/`) and (b) it carried the master-mid-loop deadlock pattern
+# that the live sister functions `gather_weights_on_master` (above) and
+# `WeightCheckpointManager.get_run_adapter_state_dict` (in
+# trainer/ckpt.py) explicitly fixed: a master-only `value.to("cpu")`
+# raise would unwind past the next iteration's `value.full_tensor()`
+# collective, blocking peer ranks until NCCL watchdog fired (~10 min).
+# Footgun for a future refactor that copy-pastes or re-wires it. If
+# reintroducing, mirror the `master_error: Exception | None = None`
+# capture-and-rethrow pattern from `gather_weights_on_master`.
