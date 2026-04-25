@@ -109,7 +109,18 @@ class SharedCheckpointConfig(BaseConfig):
     interval: Annotated[int | None, Field(description="The interval at which to save checkpoints.")] = None
 
     resume_step: Annotated[
-        int | None, Field(description="The step to resume from. If None, will not resume from a checkpoint.")
+        int | None,
+        Field(
+            ge=-1,
+            description=(
+                "The step to resume from. None = no resume, -1 = latest, "
+                "non-negative = literal step index. Bound matches the "
+                "per-component `TrainerCheckpointConfig.resume_step` and "
+                "`OrchestratorCheckpointConfig.resume_step` so the shared "
+                "shorthand can't bypass the constraint by setting a "
+                "less-than-`-1` sentinel."
+            ),
+        ),
     ] = None
 
     keep_last: Annotated[
@@ -1144,20 +1155,27 @@ class RLConfig(BaseConfig):
                 # load and crashes vLLM at server startup ("max_lora_rank=24
                 # not in supported set"). Mirror the rounding loop so the
                 # contract holds for trainer-derived ranks too.
-                from prime_rl.configs.inference import VALID_VLLM_LORA_RANKS
+                #
+                # Only auto-derive when the operator did NOT explicitly set
+                # `[inference] max_lora_rank` (Pydantic's `model_fields_set`).
+                # An explicit `max_lora_rank = 64` (e.g. headroom for a future
+                # rank bump) paired with `trainer.lora.rank = 16` previously
+                # had the inference cap silently downgraded to 16.
+                if "max_lora_rank" not in self.inference.model_fields_set:
+                    from prime_rl.configs.inference import VALID_VLLM_LORA_RANKS
 
-                trainer_rank = self.trainer.model.lora.rank
-                for valid_rank in VALID_VLLM_LORA_RANKS:
-                    if valid_rank >= trainer_rank:
-                        self.inference.max_lora_rank = valid_rank
-                        break
-                else:
-                    raise ValueError(
-                        f"trainer.model.lora.rank={trainer_rank} exceeds vLLM "
-                        f"maximum of {VALID_VLLM_LORA_RANKS[-1]} — vLLM cannot "
-                        "serve adapters of this rank. Lower trainer LoRA rank "
-                        "or upgrade vLLM."
-                    )
+                    trainer_rank = self.trainer.model.lora.rank
+                    for valid_rank in VALID_VLLM_LORA_RANKS:
+                        if valid_rank >= trainer_rank:
+                            self.inference.max_lora_rank = valid_rank
+                            break
+                    else:
+                        raise ValueError(
+                            f"trainer.model.lora.rank={trainer_rank} exceeds vLLM "
+                            f"maximum of {VALID_VLLM_LORA_RANKS[-1]} — vLLM cannot "
+                            "serve adapters of this rank. Lower trainer LoRA rank "
+                            "or upgrade vLLM."
+                        )
             else:
                 get_logger().warning(
                     "LoRA is enabled, but inference is not configured. When manually starting the inference server, "
@@ -1250,9 +1268,25 @@ class RLConfig(BaseConfig):
                         f"deployment.num_train_nodes ({self.deployment.num_train_nodes}) must be divisible by "
                         f"deployment.nodes_per_fsdp_group ({self.deployment.nodes_per_fsdp_group})"
                     )
-                self.trainer.model.dp_replicate = (
+                derived_dp_replicate = (
                     self.deployment.num_train_nodes // self.deployment.nodes_per_fsdp_group
                 )
+                # Don't silently overwrite an explicit `[trainer.model] dp_replicate
+                # = ...`. If the operator set it deliberately and the deployment-
+                # derived value disagrees, reject loudly instead of picking the
+                # auto-derived value behind their back. Mirrors the
+                # explicit-set guard pattern used elsewhere in this validator.
+                if "dp_replicate" in self.trainer.model.model_fields_set:
+                    if self.trainer.model.dp_replicate != derived_dp_replicate:
+                        raise ValueError(
+                            f"trainer.model.dp_replicate was explicitly set to "
+                            f"{self.trainer.model.dp_replicate}, but "
+                            f"deployment.num_train_nodes / nodes_per_fsdp_group = "
+                            f"{derived_dp_replicate} disagrees. Either set the two "
+                            "to match or omit one to inherit."
+                        )
+                else:
+                    self.trainer.model.dp_replicate = derived_dp_replicate
 
             if (
                 self.inference is not None

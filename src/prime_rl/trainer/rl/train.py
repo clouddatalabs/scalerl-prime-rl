@@ -397,6 +397,24 @@ def train(config: TrainerConfig):
         seq_len = micro_batches[0]["input_ids"].shape[1]
 
         # Normalize by the local number of unmasked tokens in the batch (per-batch length normalization)
+        #
+        # NOT-VERIFIED — token-mode global-mean approximation:
+        # Naively dividing by `local_tokens` then averaging across ranks
+        # via FSDP's gradient_divide_factor produces
+        # `mean_rank(local_loss / local_tokens)` rather than the textbook
+        # `global_loss / global_tokens`. The two coincide only under
+        # perfectly balanced packing. The packer pads micro-batch *count*
+        # per rank, not token count — so per-rank token counts drift by
+        # ±10–20% in practice and the per-step gradient direction differs
+        # from a single-process reference by the same amount. SFT solves
+        # this differently (post-backward `param.grad.mul_(...)` rescale
+        # using a global token count) — see `sft/train.py:402-413`. The RL
+        # path inherits the upstream pattern; switching to SFT's post-
+        # backward rescale would be a real semantic change that needs
+        # empirical verification (compare gradient norms / final loss
+        # against a single-rank reference) before deploying. Flagged here
+        # so a future pass that tackles it knows the SFT recipe is the
+        # ready-made fix.
         loss_scale = sum(micro_batch["loss_mask"].sum().item() for micro_batch in micro_batches)
         loss_scale = max(loss_scale, 1)
 
