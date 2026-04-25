@@ -1374,4 +1374,21 @@ class OrchestratorConfig(BaseConfig):
                 env.sampling.extra_body.setdefault("top_k", -1)
                 env.sampling.extra_body.setdefault("min_p", 0.0)
                 env.sampling.extra_body.setdefault("return_token_ids", True)
+        # Also iterate eval envs so they get the same `max_seq_len` plumbing.
+        # The original implementation only walked train envs; standalone
+        # `OrchestratorConfig` loads (multi-run discovery via
+        # `runs.get_orchestrator_config`, the orchestrator's CLI entrypoint
+        # `cli(OrchestratorConfig)`) skipped eval entirely, so verifiers'
+        # `parse_response_tokens` truncated eval rollouts at its own default.
+        # The RLConfig path's `auto_setup_seq_len` re-propagation also covers
+        # this via `extra_env_kwargs["max_seq_len"]` updates, but only on the
+        # RLConfig codepath — make the OrchestratorConfig invariant hold
+        # standalone too.
+        if self.eval is not None:
+            for env in self.eval.env or []:
+                env.extra_env_kwargs.update(max_seq_len=self.seq_len)
+                if is_vllm:
+                    env.sampling.extra_body.setdefault("top_k", -1)
+                    env.sampling.extra_body.setdefault("min_p", 0.0)
+                    env.sampling.extra_body.setdefault("return_token_ids", True)
         return self

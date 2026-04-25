@@ -1358,8 +1358,26 @@ class RLConfig(BaseConfig):
                 # Ensure api_server_count matches DP so all workers are created.
                 # Without this, the NCCL broadcast group expects dp*tp workers
                 # but only api_server_count*tp exist, causing a deadlock.
+                #
+                # Mirror the explicit-set guard pattern used for `dp` above
+                # (and the multi-node EP/non-EP branches): an operator who
+                # writes `[inference] api_server_count = 1` deliberately
+                # (single-replica debug, simpler logs) should NOT have it
+                # silently bumped to dp. Reject the conflict loudly so the
+                # operator's intent is preserved or they're told to update.
                 dp = self.inference.parallel.dp
                 if self.inference.api_server_count < dp and not self.inference.enable_lora:
+                    if "api_server_count" in self.inference.model_fields_set:
+                        raise ValueError(
+                            f"inference.api_server_count was explicitly set to "
+                            f"{self.inference.api_server_count} but inference.parallel.dp "
+                            f"resolves to {dp} on the single-node deployment. With "
+                            "api_server_count < dp, vLLM creates fewer workers than the "
+                            "NCCL broadcast group expects → deadlock at first weight "
+                            "broadcast. Either raise api_server_count to match dp, "
+                            "lower dp via `--deployment.num_infer_gpus`, or omit "
+                            "api_server_count to inherit."
+                        )
                     self.inference.api_server_count = dp
 
         elif self.deployment.type == "multi_node":  # multi-node
