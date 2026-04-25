@@ -204,7 +204,15 @@ def pad_micro_batch(micro_batch: MicroBatch, pad_to_multiple_of: int) -> MicroBa
     # and num_packed_sequences is unchanged; appending a phantom weight would produce a
     # length-mismatch crash in compute_loss.
     if micro_batch.sequence_loss_weights and padding_size >= 2:
-        micro_batch.sequence_loss_weights.append(0.0)
+        # Match the existing weight semantics: if the packer set non-trivial
+        # weights (prompt-avg path), append `0.0` so the phantom sequence
+        # contributes zero. If the packer left them at the neutral `[1.0]*N`
+        # default (token-mode path), append `1.0` instead — `compute_loss`
+        # rejects non-trivial weights under token mode and would otherwise
+        # raise on the legitimate cp>1 padding case.
+        existing = micro_batch.sequence_loss_weights
+        is_neutral = all(w == 1.0 for w in existing)
+        micro_batch.sequence_loss_weights.append(1.0 if is_neutral else 0.0)
 
     return micro_batch
 
@@ -215,8 +223,13 @@ def _make_dummy_batch(source: MicroBatch) -> MicroBatch:
     dummy.advantages = [0.0] * len(dummy.input_ids)
     dummy.loss_mask = [False] * len(dummy.input_ids)
     # Zero the sequence weights so the dummy contributes nothing to the loss when
-    # loss_scale_mode is "sequence" / "none".
-    dummy.sequence_loss_weights = [0.0] * len(dummy.sequence_loss_weights)
+    # loss_scale_mode is "sequence" / "none". For token-mode runs the source's
+    # weights are the neutral `[1.0]*N` default, and `compute_loss` rejects any
+    # non-1.0 weight under token mode — preserve the `1.0`s in that case (the
+    # loss_mask is all-False so the dummy contributes zero regardless).
+    is_neutral = all(w == 1.0 for w in dummy.sequence_loss_weights)
+    fill = 1.0 if is_neutral else 0.0
+    dummy.sequence_loss_weights = [fill] * len(dummy.sequence_loss_weights)
     return dummy
 
 

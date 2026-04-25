@@ -35,11 +35,13 @@ rollouts exceed budget more than ~5% of the time.
 ```bash
 git clone https://github.com/clouddatalabs/scalerl-prime-rl.git ~/scalerl-prime-rl
 cd ~/scalerl-prime-rl
+REPO_ROOT="$PWD"
 
 # Pin a HuggingFace cache location for the rest of this shell so step 4's
-# pre-download lands where the sbatch will look (the sbatch defaults to
-# $REPO_ROOT/hf-cache).
-export HF_HOME="$PWD/hf-cache"
+# pre-download lands where the sbatch will look. Use the absolute repo path
+# (NOT $PWD) so a `cd` between steps 4 and 5 doesn't orphan the cache —
+# the sbatch defaults `HF_HOME` to `$REPO_ROOT/hf-cache`.
+export HF_HOME="$REPO_ROOT/hf-cache"
 
 # 1. Install. Pinned to vllm>=0.19, torch+cu128, transformers @ a HEAD commit,
 #    flash-attn-cute (FA4) at rev abd9943b. Takes ~10 minutes on a fresh cache.
@@ -175,7 +177,7 @@ gpus_per_node = 8
 [slurm]
 partition = "<your-gpu-partition>"
 account = "<your-slurm-account>"   # omit if your cluster doesn't require it
-time_limit = "24:00:00"
+time = "24:00:00"                  # field name is `time`, NOT `time_limit`
 ```
 For multi-node runs you do NOT use `sbatch scripts/scalerl_smoke.sbatch`
 (it's a single-node `--nodes=1` template). The multi-node entrypoint

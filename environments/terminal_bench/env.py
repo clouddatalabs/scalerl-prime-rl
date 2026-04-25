@@ -176,7 +176,6 @@ class _DockerClient:
         *,
         name: str,
         start_command: list[str] | None = None,
-        extra_args: list[str] | None = None,
         labels: dict[str, str] | None = None,
     ) -> None:
         """``docker run -d --name <name> <image> <start_command>``.
@@ -185,6 +184,13 @@ class _DockerClient:
         ``remove_force``. ``--init`` ensures zombie reaping for
         ``tail -f``-style start commands. ``labels`` forwards to
         ``--label`` so sweep_stale_containers can find siblings.
+
+        Deliberately does NOT accept caller-controlled `extra_args`: a
+        future config that plumbed `["--privileged", "-v", "/:/host"]`
+        through here would silently break the rollout sandbox. If a
+        caller legitimately needs extra docker flags, add them here as
+        an explicit, allow-listed parameter (e.g. `network_mode`,
+        `cpu_limit`) so the surface area stays auditable.
         """
         label_flags: list[str] = []
         for k, v in (labels or {}).items():
@@ -194,7 +200,6 @@ class _DockerClient:
             "run", "-d", "--rm", "--init",
             "--name", name,
             *label_flags,
-            *(extra_args or []),
             image,
             *(start_command or ["tail", "-f", "/dev/null"]),
         ]
@@ -553,17 +558,12 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         # Per-sample Harbor task name lives in ``info["task_name"]`` --
         # see ``load_environment`` for why we don't reuse ``state["task"]``
         # (that's the env id, used by PrimeRL's buffer for routing).
+        # `Environment.run_rollout` always json-decodes `info` to a dict
+        # before this hook runs; trust the contract and read the key
+        # directly. A wrong-type `info` will surface here as a clear
+        # AttributeError on `.get`, not a silent empty-dict downgrade.
         info = state.get("info") or {}
-        if isinstance(info, str):
-            # Defensive: ``Environment.run_rollout`` already json-decodes
-            # info, but a stale client path could leave it as a string.
-            import json as _json
-
-            try:
-                info = _json.loads(info)
-            except Exception:
-                info = {}
-        task_name = (info or {}).get("task_name") or ""
+        task_name = info.get("task_name") or ""
         spec = self._task_specs.get(task_name)
         if spec is None:
             raise ValueError(
@@ -597,10 +597,13 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         # the rollout got further than it did.
         image = await self._resolve_image(spec)
 
-        # Use a short uuid suffix so parallel rollouts of the same task
-        # don't collide on container names. ``tb-`` prefix makes these
-        # greppable with ``docker ps | grep ^tb-``.
-        container = f"tb-{spec.name}-{uuid.uuid4().hex[:8]}"
+        # Use a uuid suffix so parallel rollouts of the same task don't
+        # collide on container names. 16 hex chars = 64 bits — birthday-bound
+        # collision probability is ~1e-9 even at 100k containers per training
+        # run (8 chars = 32 bits gives 50% collision after ~65k, which the
+        # 768-rollout × 500-step × 28-task TB config can hit). ``tb-`` prefix
+        # makes these greppable with ``docker ps | grep ^tb-``.
+        container = f"tb-{spec.name}-{uuid.uuid4().hex[:16]}"
 
         _logger.info(
             "terminal_bench_local: launching container name=%s image=%s task=%s",

@@ -298,7 +298,17 @@ def compute_loss(
     Returns:
         Tuple of (scaled_loss, aggregated_metrics)
     """
-    total_loss = 0.0
+    # Initialize as a 0-d tensor so an empty packed batch (len(trainer_logprobs)==0)
+    # still returns a Tensor with a real device, not a Python float. A Python-float
+    # `total_loss` would crash `loss.backward()` with `AttributeError: 'float'
+    # object has no attribute 'backward'` and on multi-rank DP that crash is
+    # asymmetric (other ranks have data) — NCCL deadlocks instead of a clean fail.
+    if len(trainer_logprobs) > 0:
+        device = trainer_logprobs[0].device
+        dtype = trainer_logprobs[0].dtype
+    else:
+        device, dtype = torch.device("cpu"), torch.float32
+    total_loss: Tensor = torch.zeros((), device=device, dtype=dtype)
     all_metrics: dict[str, list[Tensor]] = {}
 
     if teacher_logprobs is None:

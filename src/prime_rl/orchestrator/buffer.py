@@ -68,7 +68,17 @@ class _EnvBuffer:
     def get_example_hash(self, example: dict) -> str:
         hash_keys = [key for key in self.config.hash_keys if key in example]
         assert hash_keys, "No hashable keys found in example."
-        return hashlib.sha256(json.dumps([example[key] for key in hash_keys]).encode()).hexdigest()
+        # NPR's resume contract depends on these hashes being byte-stable
+        # across runs. `sort_keys=True` keeps any dict-typed value in the
+        # serialized list deterministic; `ensure_ascii=True` (default) keeps
+        # the byte representation independent of locale.
+        return hashlib.sha256(
+            json.dumps(
+                [example[key] for key in hash_keys],
+                sort_keys=True,
+                ensure_ascii=True,
+            ).encode()
+        ).hexdigest()
 
     def update_pools(self, example_id: int, avg_reward: float) -> str:
         """Assign example to pool based on reward. Returns pool name."""

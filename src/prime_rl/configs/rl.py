@@ -446,6 +446,48 @@ class RLConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
+    def validate_sft_no_teacher(self):
+        """Same footgun as CISPO+teacher: `sft_loss_fn` does not consume
+        teacher_logprobs. A `loss.type == "sft"` config with a teacher_model
+        configured would silently pay the prefill compute cost.
+        """
+        if self.trainer.loss.type == "sft" and self.orchestrator.teacher_model is not None:
+            raise ValueError(
+                "trainer.loss.type='sft' with [orchestrator.teacher_model] set: "
+                "SFT does not consume teacher logprobs. Drop [orchestrator.teacher_model] "
+                "or switch to trainer.loss.type='default' with teacher_tau > 0 if you want "
+                "teacher distillation."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_fp32_lm_head_no_fp8_transfer(self):
+        """fp32_lm_head + quantize_in_weight_transfer=true silently undoes
+        the §3.2 ingredient.
+
+        With NCCL FP8 quantized weight transfer, the trainer broadcasts FP8
+        LM-head weights and `inference/patches.py:promote_parallel_lm_head_to_fp32`
+        casts the FP8 result to fp32 — baking in the quantization noise the
+        fp32 LM-head was supposed to prevent. Reject the combination.
+        """
+        if not self.trainer.model.fp32_lm_head:
+            return self
+        wb = getattr(self.trainer, "weight_broadcast", None)
+        if wb is None:
+            return self
+        if getattr(wb, "type", None) == "nccl" and getattr(wb, "quantize_in_weight_transfer", False):
+            raise ValueError(
+                "trainer.model.fp32_lm_head=True with "
+                "trainer.weight_broadcast.quantize_in_weight_transfer=True is "
+                "self-defeating: NCCL FP8 weight transfer would quantize the "
+                "LM-head weights to FP8 before vLLM's promote-to-fp32 path runs, "
+                "baking in the quantization noise that fp32 LM-head exists to "
+                "prevent (ScaleRL §3.2 / MiniMax-M1 §3.2). Either disable "
+                "fp32_lm_head or set quantize_in_weight_transfer=False."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_external_rollout_mode(self):
         if self.orchestrator.teacher_rollout_model is None:
             return self
