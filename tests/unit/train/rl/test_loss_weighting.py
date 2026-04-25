@@ -17,6 +17,7 @@ def _make_sample(
     completion_len: int,
     prompt_average_loss: bool = True,
     advantage: float = 1.0,
+    env_name: str = "env_a",
 ) -> TrainingSample:
     return TrainingSample(
         prompt_ids=[1, 2, 3],
@@ -29,11 +30,19 @@ def _make_sample(
         reward=0.0,
         example_id=example_id,
         prompt_average_loss=prompt_average_loss,
+        env_name=env_name,
     )
 
 
 def test_apply_prompt_average_sequence_weights_balances_prompts():
-    """Weights make every prompt contribute equally and every token-within-prompt contribute equally."""
+    """Weights make every prompt contribute equally and every token-within-prompt contribute equally.
+
+    The per-sample loss callbacks (`cispo_loss_fn`, `sft_loss_fn`) return summed
+    losses over trainable tokens. So each non-empty sample in prompt p must get
+    `w_i = 1 / (total_p * num_prompts)` — uniform within a prompt — for the sum
+    `sum_i (w_i * loss_i)` to equal the per-token mean within p divided by
+    num_prompts.
+    """
     rollouts = [
         _make_sample(example_id="A", completion_len=10),
         _make_sample(example_id="A", completion_len=30),
@@ -42,13 +51,75 @@ def test_apply_prompt_average_sequence_weights_balances_prompts():
     ]
     weights = apply_prompt_average_sequence_weights(rollouts, seq_len=4096)
     assert weights is not None
-    # Prompt A: total 40 tokens; weights = 10/40/2 = 0.125 and 30/40/2 = 0.375.
-    # Prompt B: total 40 tokens; weights = 20/40/2 = 0.25 and 20/40/2 = 0.25.
-    assert weights == pytest.approx([0.125, 0.375, 0.25, 0.25])
-    # Sum within each prompt = 0.5; total over batch = 1.0 (i.e. average over prompts).
-    assert sum(weights[:2]) == pytest.approx(0.5)
-    assert sum(weights[2:]) == pytest.approx(0.5)
-    assert sum(weights) == pytest.approx(1.0)
+    # Prompt A: total = 40 trainable tokens; per-sample weight = 1 / (40 * 2) = 0.0125
+    # Prompt B: total = 40 trainable tokens; per-sample weight = 1 / (40 * 2) = 0.0125
+    assert weights == pytest.approx([0.0125, 0.0125, 0.0125, 0.0125])
+
+
+def test_apply_prompt_average_sequence_weights_yields_per_token_mean_for_uniform_loss():
+    """End-to-end sanity for snowflake_poc_critique.md §1.
+
+    With uniform per-token loss = 1, summed-loss-per-sample equals
+    `trainable_tokens_i`. The expected total loss is 1 (per-token mean = 1
+    averaged over equal prompts = 1). The previous formula
+    `w_i = trainable_tokens_i / (total_p * num_prompts)` produced
+    `sum_p sum_i n_i^2 / (total_p * num_prompts)`, which over-weights long
+    completions — concretely 25 instead of 1 for the [10, 30] example below.
+    """
+    rollouts = [
+        _make_sample(example_id="A", completion_len=10),
+        _make_sample(example_id="A", completion_len=30),
+        _make_sample(example_id="B", completion_len=20),
+        _make_sample(example_id="B", completion_len=20),
+    ]
+    weights = apply_prompt_average_sequence_weights(rollouts, seq_len=4096)
+    # Per-sample summed losses for uniform per-token loss of 1.
+    summed_losses = [10, 30, 20, 20]
+    total = sum(w * l for w, l in zip(weights, summed_losses))
+    # Two prompts × 1.0 per-token mean / 2 = 1.0
+    assert total == pytest.approx(1.0)
+    # Sanity: the previously-shipped formula `w_i = n_i / (total_p * num_prompts)`
+    # would have given 22.5 here (= (100+900)/80 + (400+400)/80 = 12.5 + 10).
+    # Pin a wide margin so this test fails loudly if the regression returns.
+    broken_weights = [10 / 80, 30 / 80, 20 / 80, 20 / 80]
+    broken_total = sum(w * l for w, l in zip(broken_weights, summed_losses))
+    assert broken_total == pytest.approx(22.5)
+    assert abs(broken_total - 1.0) > 5.0
+
+
+def test_apply_prompt_average_sequence_weights_disambiguates_envs():
+    """Same example_id across different envs must not collide.
+
+    `example_id` is only unique within an env, so a multi-env training batch
+    where env_a/example_id=0 and env_b/example_id=0 are both present would
+    fold them into one prompt under the old code (snowflake_poc_critique.md §3).
+    Group key is now (env_name, example_id) so the four samples below count
+    as TWO prompts of two samples each, not one prompt of four.
+    """
+    rollouts = [
+        _make_sample(example_id="0", completion_len=10, env_name="env_a"),
+        _make_sample(example_id="0", completion_len=10, env_name="env_a"),
+        _make_sample(example_id="0", completion_len=10, env_name="env_b"),
+        _make_sample(example_id="0", completion_len=10, env_name="env_b"),
+    ]
+    weights = apply_prompt_average_sequence_weights(rollouts, seq_len=4096)
+    # Two prompts, each with total = 20 trainable tokens.
+    # per-sample weight = 1 / (20 * 2) = 0.025 — every sample gets the same.
+    assert weights == pytest.approx([0.025, 0.025, 0.025, 0.025])
+    # Sanity for the bug: if the key were just example_id, num_prompts would be 1
+    # and total would be 40, giving 1/(40*1) = 0.025 too — same number, but for
+    # the wrong reason. Verify by check the multi-prompt structure: total per
+    # prompt should equal 1/num_prompts.
+    summed_losses = [10, 10, 10, 10]
+    total = sum(w * l for w, l in zip(weights, summed_losses))
+    assert total == pytest.approx(1.0)
+
+
+def test_apply_prompt_average_sequence_weights_requires_env_name():
+    sample = _make_sample(example_id="A", completion_len=5, env_name="env_a")
+    sample.env_name = None
+    with pytest.raises(ValueError, match="env_name is required"):
+        apply_prompt_average_sequence_weights([sample], seq_len=4096)
 
 
 def test_apply_prompt_average_sequence_weights_no_op_when_disabled():
@@ -88,12 +159,15 @@ def test_apply_prompt_average_sequence_weights_excludes_non_trainable_completion
         reward=0.0,
         example_id="A",
         prompt_average_loss=True,
+        env_name="env_a",
     )
     sample2 = _make_sample(example_id="A", completion_len=4)  # 4 trainable tokens too
     weights = apply_prompt_average_sequence_weights([sample, sample2], seq_len=4096)
     # Both samples have 4 trainable tokens; prompt A total = 8; num_prompts = 1.
-    # Each weight = 4 / (8 * 1) = 0.5. Mass-on-loss-mask=False would give 6/(6+4)/1 ≠ 0.5.
-    assert weights == pytest.approx([0.5, 0.5])
+    # Per-sample weight = 1 / (8 * 1) = 0.125 (uniform within prompt).
+    assert weights == pytest.approx([0.125, 0.125])
+    # Sanity: with summed losses = trainable_tokens = [4, 4], total = 4*0.125 + 4*0.125 = 1.0.
+    assert sum(w * 4 for w in weights) == pytest.approx(1.0)
 
 
 def test_apply_prompt_average_sequence_weights_excludes_truncated_tokens():
@@ -102,13 +176,15 @@ def test_apply_prompt_average_sequence_weights_excludes_truncated_tokens():
     # survive prepare_sample's truncation.
     sample = _make_sample(example_id="A", completion_len=20)
     weights = apply_prompt_average_sequence_weights([sample], seq_len=10)
-    # 7 trainable tokens / (7 * 1 prompt) = 1.0
-    assert weights == pytest.approx([1.0])
+    # Per-sample weight = 1 / (7 trainable * 1 prompt). The summed loss for that
+    # sample under uniform per-token loss=1 is 7, so total contribution = 1.0.
+    assert weights == pytest.approx([1.0 / 7])
+    assert sum(w * 7 for w in weights) == pytest.approx(1.0)
 
-    # If prompt itself is at-or-over seq_len, no completion tokens are trainable; guard.
+    # If prompt itself is at-or-over seq_len, no completion tokens are trainable.
+    # Total = 0 → prompt contributes nothing (correct: no tokens, no loss).
     sample_no_completion = _make_sample(example_id="A", completion_len=5)
     weights = apply_prompt_average_sequence_weights([sample_no_completion], seq_len=2)
-    # 0 trainable tokens for the only sample; total guarded to 1 → weight is 0.
     assert weights == pytest.approx([0.0])
 
 

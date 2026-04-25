@@ -232,15 +232,28 @@ def apply_prompt_average_sequence_weights(
 ) -> list[float] | None:
     """Compute ScaleRL §3.3 prompt-level loss averaging weights.
 
-    Returns a list of per-rollout weights (parallel to `rollouts`) where
-        w_i = trainable_tokens_i / (total_trainable_tokens_in_prompt * num_prompts)
-    so that summing `w_i * loss_i` over the batch yields the average over prompts
-    of the within-prompt-token mean loss — every prompt contributes equally,
-    every token within a prompt contributes equally.
+    The per-sample loss callbacks in `trainer/rl/loss.py` already sum over
+    trainable tokens (CISPO `pg_per_token.sum()`, SFT `(-trainer_logprobs[loss_mask]).sum()`).
+    To turn that into "every prompt contributes equally, every token within a
+    prompt contributes equally," each non-empty sample in prompt p gets
+
+        w_i = 1 / (total_trainable_tokens_in_p * num_prompts)
+
+    so that
+        sum_i in p (w_i * loss_i) = sum_p_tokens / total_p / num_prompts
+                                  = (per-token mean loss within p) / num_prompts
+    and summing over prompts gives `mean_p (per-token mean within p)`.
 
     Token counts come from `_trainable_completion_tokens`, which excludes
     non-trainable completion tokens and tokens dropped by `prepare_sample`'s
-    seq_len truncation (snowflake_poc_critique.md §6).
+    seq_len truncation (snowflake_poc_critique.md §6). Group key is
+    (env_name, example_id) so multi-env batches don't collide on
+    `example_id` (which is only unique within an env — snowflake_poc_critique.md §3).
+
+    Empty samples (zero trainable tokens after truncation) get weight 0 — they
+    contribute nothing under any choice of weight, so this just makes that
+    explicit. Prompts whose every sample is empty also degenerate to 0 mass;
+    that's correct (no tokens, no loss) and avoids divide-by-zero.
 
     Returns None when no rollouts have prompt_average_loss set (caller leaves the
     default neutral 1.0 weight in place). Raises if the flag is set inconsistently
@@ -254,22 +267,31 @@ def apply_prompt_average_sequence_weights(
             "mixing prompt-avg and other reductions in the same step yields wrong gradients."
         )
 
-    by_example: dict[str, list[int]] = {}
+    by_prompt: dict[tuple[str, str], list[int]] = {}
     for i, rollout in enumerate(rollouts):
         if rollout.example_id is None:
             raise ValueError("example_id is required when prompt_average_loss is enabled")
-        by_example.setdefault(rollout.example_id, []).append(i)
+        env_name = getattr(rollout, "env_name", None)
+        if not env_name:
+            raise ValueError(
+                "env_name is required on every sample when prompt_average_loss is enabled "
+                "(needed to disambiguate example_id across envs)"
+            )
+        by_prompt.setdefault((str(env_name), str(rollout.example_id)), []).append(i)
 
-    num_prompts = len(by_example)
+    num_prompts = len(by_prompt)
     if num_prompts == 0:
         raise ValueError("prompt_average_loss requires at least one prompt in the batch")
 
     weights = [0.0] * len(rollouts)
-    for indices in by_example.values():
+    for indices in by_prompt.values():
         sample_tokens = [_trainable_completion_tokens(rollouts[i], seq_len) for i in indices]
-        total = sum(sample_tokens) or 1  # guard fully-empty prompts
+        total = sum(sample_tokens)
+        if total == 0:
+            continue
+        per_sample_weight = 1.0 / (total * num_prompts)
         for i, n in zip(indices, sample_tokens):
-            weights[i] = n / (total * num_prompts)
+            weights[i] = per_sample_weight if n > 0 else 0.0
     return weights
 
 

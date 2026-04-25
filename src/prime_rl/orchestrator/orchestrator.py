@@ -534,6 +534,7 @@ async def orchestrate(config: OrchestratorConfig):
                 # so a future config could selectively turn it on per-env, but today it's
                 # a single orchestrator-level switch.
                 sample.example_id = str(rollout["example_id"])
+                sample.env_name = str(rollout["env_name"])
                 sample.prompt_average_loss = config.prompt_average_loss
                 sample_decode_tokens = sum(sample.completion_mask)
                 sample_prefill_tokens = len(sample.prompt_ids) + len(sample.completion_mask) - sample_decode_tokens
