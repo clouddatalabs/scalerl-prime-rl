@@ -168,13 +168,27 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     # `selective_log_softmax` can return -inf when `labels` indexes a position
     # the masked-fill set to -inf), the unmasked product propagates NaN. Mask
     # before multiplying so `keep_mask=False` positions truly contribute zero.
+    #
+    # AND: gate non-finite ratios at *trainable* positions too. The DPPO
+    # `keep_mask` (probs_diff > eps) is a trust-region threshold, not a
+    # finiteness check. If a trainable position has `inference_logprobs = -inf`
+    # (an external generator emitting "impossible" tokens for a sampled
+    # position, or a teacher-rollout path with -inf logprobs), the position
+    # passes `keep_mask` whenever `probs_diff = trainer_probs ∈ (0, eps_high]`,
+    # then `importance_ratio = +inf` and `log_importance_ratio_sq = +inf`
+    # flow into the loss unbounded — `kl_tau * (+inf)² = +inf` corrupts the
+    # entire batch's gradient even at small `kl_tau`. Mirror the cispo path's
+    # belt-and-suspenders by AND-ing in `torch.isfinite(...)` on both ratio
+    # terms.
+    finite_ratio = torch.isfinite(importance_ratio)
+    finite_log_ratio = torch.isfinite(log_importance_ratio)
     safe_importance_ratio = torch.where(
-        keep_mask, importance_ratio, torch.zeros_like(importance_ratio)
+        keep_mask & finite_ratio, importance_ratio, torch.zeros_like(importance_ratio)
     )
     safe_advantages = torch.where(keep_mask, advantages, torch.zeros_like(advantages))
     pg_loss = keep_mask * safe_advantages * safe_importance_ratio
     safe_log_importance_ratio_sq = torch.where(
-        loss_mask, log_importance_ratio**2, torch.zeros_like(log_importance_ratio)
+        loss_mask & finite_log_ratio, log_importance_ratio**2, torch.zeros_like(log_importance_ratio)
     )
     kl_loss = loss_mask * safe_log_importance_ratio_sq
     loss = (-pg_loss + loss_config.kl_tau * kl_loss).sum()

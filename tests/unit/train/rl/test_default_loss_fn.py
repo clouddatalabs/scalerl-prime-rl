@@ -190,3 +190,39 @@ def test_default_loss_does_not_propagate_inf_inference_logprob_at_masked_positio
                             kl_tau=1.0, adv_tau=1.0)
     out = default_loss_fn(inputs, cfg)
     assert torch.isfinite(out.loss), f"loss leaked NaN/Inf via importance_ratio: {out.loss}"
+
+
+def test_default_loss_does_not_propagate_inf_inference_logprob_at_TRAINABLE_position():
+    """Belt-and-suspenders for the importance-ratio path at TRAINABLE positions.
+
+    The DPPO `keep_mask` (probs_diff > eps) is a trust-region threshold, not a
+    finiteness check. A trainable position with inference_logprobs = -inf
+    (which an external rollout service can emit for "impossible" tokens, or a
+    teacher-rollout path with -inf logprobs) yields:
+      probs_diff = trainer_probs - exp(-inf) = trainer_probs ∈ (0, 1]
+      |probs_diff| <= dppo_mask_high (low trainer_probs case) → keep_mask=True
+      log_importance_ratio = trainer_lp - (-inf) = +inf
+      importance_ratio = exp(+inf) = +inf
+      kl_loss = +inf**2 = +inf
+    With kl_tau > 0, that flows into `loss.sum()` unbounded — `kl_tau * (+inf)²`
+    = +inf — and corrupts every parameter's gradient on the next backward.
+    The fix mirrors cispo_loss_fn's torch.clamp(..., max=eps_max) belt-and-
+    suspenders: AND the keep_mask / loss_mask with `torch.isfinite(...)` so
+    non-finite ratios at trainable positions truly contribute zero.
+    """
+    # trainer_lp = log(0.05) so trainer_probs = 0.05 < dppo_mask_high=0.2
+    # and the high-mask does NOT fire (probs_diff = 0.05 - 0 = 0.05 < 0.2).
+    # keep_mask is True at this position pre-fix.
+    trainer_lp_low = math.log(0.05)
+    inputs = _inputs(
+        trainer_lp=[0.0, trainer_lp_low, 0.0],
+        inference_lp=[0.0, float("-inf"), 0.0],  # -inf at TRAINABLE position
+        advantages=[0.5, 0.5, 0.5],
+        loss_mask=[True, True, True],
+    )
+    cfg = DefaultLossConfig(dppo_mask_high=0.2, dppo_mask_low=0.2,
+                            kl_tau=1e-3, adv_tau=1.0)
+    out = default_loss_fn(inputs, cfg)
+    assert torch.isfinite(out.loss), (
+        f"loss leaked +inf at trainable position with inference_lp=-inf: {out.loss}"
+    )
