@@ -809,9 +809,17 @@ class RLConfig(BaseConfig):
         else:
             # No shared tokenizer: re-derive from (now-correct) model names,
             # since auto_setup_tokenizer on sub-configs already ran with defaults.
+            # Gate each field on `is None` so an explicit `[trainer.tokenizer]
+            # name = "alt/tokenizer"` (or `trust_remote_code`) survives.
+            # Without the gate the operator's deliberate per-component
+            # value is silently flipped back to `model.name`, contradicting
+            # the "explicitly-set per-component values always take
+            # precedence" contract every other auto_setup_* honors.
             for component in (self.trainer, self.orchestrator):
-                component.tokenizer.name = component.model.name
-                component.tokenizer.trust_remote_code = component.model.trust_remote_code
+                if component.tokenizer.name is None:
+                    component.tokenizer.name = component.model.name
+                if component.tokenizer.trust_remote_code is None:
+                    component.tokenizer.trust_remote_code = component.model.trust_remote_code
 
         # Propagate chat_template to inference (vLLM --chat-template)
         if self.inference is not None:
@@ -1064,16 +1072,33 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def auto_setup_weight_broadcast(self):
-        """Auto-setup shared weight broadcast config for trainer, orchestrator, and inference."""
+        """Auto-setup shared weight broadcast config for trainer, orchestrator, and inference.
+
+        Reassign-from-scratch was silently dropping per-component fields not
+        in `SharedWeightBroadcastConfig`'s field list — `host`,
+        `save_format`, `save_sharded`. An explicit `[trainer.weight_broadcast]
+        host = "10.0.0.5"` paired with a top-level `[weight_broadcast] type
+        = "nccl"` was reset to `host = "localhost"` because the new
+        `TrainerNCCLWeightBroadcastConfig(...)` constructor uses the schema
+        default. Same for filesystem variants. Preserve any pre-existing
+        per-component fields by reading them off the existing instance
+        before reconstruction.
+        """
         if self.weight_broadcast is not None:
             if self.weight_broadcast.type == "nccl":
                 inference_world_size = self.inference.parallel.dp * self.inference.parallel.tp if self.inference else 1
+                # Preserve `host` if the operator set one on
+                # `[trainer.weight_broadcast]` before the shorthand kicked in
+                # (the multi-node deployment branch resets host to 0.0.0.0
+                # later, so this only matters for single-node).
+                trainer_host = getattr(self.trainer.weight_broadcast, "host", None)
                 self.trainer.weight_broadcast = TrainerNCCLWeightBroadcastConfig(
                     type=self.weight_broadcast.type,
                     inference_world_size=inference_world_size,
                     port=self.weight_broadcast.port,
                     timeout=self.weight_broadcast.timeout,
                     quantize_in_weight_transfer=self.weight_broadcast.quantize_in_weight_transfer,
+                    **({"host": trainer_host} if trainer_host is not None else {}),
                 )
                 self.orchestrator.weight_broadcast = OrchestratorNCCLWeightBroadcastConfig(
                     type=self.weight_broadcast.type,
@@ -1083,7 +1108,16 @@ class RLConfig(BaseConfig):
                     quantize_in_weight_transfer=self.weight_broadcast.quantize_in_weight_transfer,
                 )
             elif self.weight_broadcast.type == "filesystem":
-                self.trainer.weight_broadcast = TrainerFileSystemWeightBroadcastConfig()
+                # Preserve operator-set save_format / save_sharded — the
+                # default-constructor reset would have silently flipped
+                # `save_format = "torch"` back to `"safetensors"`.
+                trainer_kwargs: dict = {}
+                if isinstance(self.trainer.weight_broadcast, TrainerFileSystemWeightBroadcastConfig):
+                    if "save_format" in self.trainer.weight_broadcast.model_fields_set:
+                        trainer_kwargs["save_format"] = self.trainer.weight_broadcast.save_format
+                    if "save_sharded" in self.trainer.weight_broadcast.model_fields_set:
+                        trainer_kwargs["save_sharded"] = self.trainer.weight_broadcast.save_sharded
+                self.trainer.weight_broadcast = TrainerFileSystemWeightBroadcastConfig(**trainer_kwargs)
                 self.orchestrator.weight_broadcast = OrchestratorFileSystemWeightBroadcastConfig()
             if self.inference is not None:
                 self.inference.weight_broadcast = InferenceWeightBroadcastConfig(type=self.weight_broadcast.type)
