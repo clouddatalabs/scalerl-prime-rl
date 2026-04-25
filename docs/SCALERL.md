@@ -67,20 +67,33 @@ tail -f /your/path/<jobid>.log
 - For Terminal-Bench: a Docker daemon reachable from the rollout process
   (host or `/var/run/docker.sock` bind-mounted into the container).
 
-**Resume.** Pass `--ckpt.resume_step=-1` to load the latest checkpoint from
-`outputs/run_default/checkpoints`:
+**Resume.** Pass `--ckpt.resume_step=-1` to load the latest checkpoint:
 ```bash
 .venv/bin/rl @ configs/scalerl_math/rl.toml --ckpt.resume_step=-1
 ```
-The shipped configs cap retention at `keep_last=3` plus every 500-step
-milestone (`keep_interval=500`); raise `keep_last` if your cluster has the
-storage and you want fast random-step resume.
+The shipped configs set `output_dir = "outputs/scalerl_math"` (and
+`outputs/scalerl_terminal_bench`) so resume is deterministic and concurrent
+submissions don't collide. Checkpoints land under
+`<output_dir>/checkpoints/` for the trainer and
+`<output_dir>/run_default/checkpoints/` for the orchestrator. Retention is
+capped at `keep_last = 3` plus every 500-step milestone (`keep_interval = 500`);
+raise `keep_last` if you want fast random-step resume and have the storage.
 
-**Multi-node.** The shipped configs target a single 8-GPU node. To scale
-horizontally, multiply `num_train_gpus` in `[deployment]` and add
-`#SBATCH --nodes=N`. Multi-node NCCL weight broadcast still requires the
-experimental override (already on); on hardware without EFA, switch
-`[weight_broadcast] type = "filesystem"` and drop the override.
+**Multi-node.** The shipped configs target a single 8-GPU node via
+`SingleNodeDeploymentConfig` (`num_train_gpus`/`num_infer_gpus`). To scale
+out, switch the `[deployment]` block to the multi-node schema:
+```toml
+[deployment]
+type = "multi_node"
+num_train_nodes = 4
+num_infer_nodes = 4
+gpus_per_node = 8
+```
+and submit with `#SBATCH --nodes=8` plus a `[slurm]` section if you use
+baker/torchrun rendezvous (see `prime-rl/docs/slurm.md`). Multi-node NCCL
+weight broadcast still requires the experimental override (already on); on
+hardware without EFA set `SCALERL_NO_EFA=1` in your `.env` and switch
+`[weight_broadcast] type = "filesystem"` (then drop the override).
 
 ## Configs
 

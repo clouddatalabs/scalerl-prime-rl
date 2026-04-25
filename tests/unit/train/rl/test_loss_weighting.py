@@ -240,6 +240,74 @@ def test_compute_loss_sequence_mode_uses_weights_no_token_divide():
     assert torch.isclose(loss, torch.tensor(2.25), atol=1e-6)
 
 
+def test_compute_loss_sequence_mode_scales_by_fsdp_world_size():
+    """Sequence-mode loss must be multiplied by fsdp_world_size so that FSDP's
+    gradient_divide_factor=dp_world_size cancels and the aggregate gradient
+    equals `sum_global(w_i * grad_i)`. Without this multiplier the effective
+    LR shrinks 1/dp_world_size silently in multi-rank DP."""
+    trainer_logprobs = [torch.tensor([-1.0, -2.0]), torch.tensor([-3.0])]
+    inference_logprobs = [torch.zeros(2), torch.zeros(1)]
+    advantages = [torch.zeros(2), torch.zeros(1)]
+    loss_mask = [torch.tensor([True, True]), torch.tensor([True])]
+
+    loss_fn = setup_loss_fn(SFTLossConfig(loss_scale_mode="sequence"))
+    loss_dp1, _ = compute_loss(
+        trainer_logprobs=trainer_logprobs,
+        inference_logprobs=inference_logprobs,
+        teacher_logprobs=None,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        loss_fn=loss_fn,
+        loss_scale=999,
+        sequence_loss_weights=[0.25, 0.5],
+        fsdp_world_size=1,
+    )
+    loss_dp4, _ = compute_loss(
+        trainer_logprobs=trainer_logprobs,
+        inference_logprobs=inference_logprobs,
+        teacher_logprobs=None,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        loss_fn=loss_fn,
+        loss_scale=999,
+        sequence_loss_weights=[0.25, 0.5],
+        fsdp_world_size=4,
+    )
+    assert torch.isclose(loss_dp4, loss_dp1 * 4.0, atol=1e-6)
+
+
+def test_compute_loss_token_mode_unaffected_by_fsdp_world_size():
+    """Token-mode divides by local trainable tokens; the FSDP factor cancels
+    naturally under balanced packing, so compute_loss must NOT apply it."""
+    trainer_logprobs = [torch.tensor([-1.0, -2.0]), torch.tensor([-3.0])]
+    inference_logprobs = [torch.zeros(2), torch.zeros(1)]
+    advantages = [torch.zeros(2), torch.zeros(1)]
+    loss_mask = [torch.tensor([True, True]), torch.tensor([True])]
+
+    loss_fn = setup_loss_fn(SFTLossConfig())
+    loss_dp1, _ = compute_loss(
+        trainer_logprobs=trainer_logprobs,
+        inference_logprobs=inference_logprobs,
+        teacher_logprobs=None,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        loss_fn=loss_fn,
+        loss_scale=3,
+        fsdp_world_size=1,
+    )
+    loss_dp4, _ = compute_loss(
+        trainer_logprobs=trainer_logprobs,
+        inference_logprobs=inference_logprobs,
+        teacher_logprobs=None,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        loss_fn=loss_fn,
+        loss_scale=3,
+        fsdp_world_size=4,
+    )
+    assert torch.isclose(loss_dp4, loss_dp1, atol=1e-6)
+
+
 def test_compute_loss_rejects_mismatched_weight_count():
     trainer_logprobs = [torch.tensor([-1.0]), torch.tensor([-2.0])]
     loss_fn = setup_loss_fn(SFTLossConfig(loss_scale_mode="sequence"))
@@ -271,19 +339,24 @@ def test_cispo_loss_matches_paper_formula_uniform_ratio():
 
 
 def test_cispo_loss_truncates_high_ratio():
-    """High ratios get clamped at eps_max — verify the truncation actually fires."""
+    """High ratios get clamped at eps_max — the loss must reflect the clamp.
+
+    Use trainer_logprobs=-1.0 (NOT 0.0) so the loss is non-zero and depends on
+    the truncated ratio: clamped loss = -(eps_max * adv * trainer_logprob)
+    = -(4 * 1.0 * -1.0) = 4. Without the clamp, ratio = exp(-1 - log(0.01))
+    = 100, giving loss = 100. Ensures the test fails if `torch.clamp(..., max=...)`
+    is removed.
+    """
     inputs = LossInputs(
-        # ratio = exp(0 - log(0.01)) = 1/0.01 = 100, way above eps_max=4
-        trainer_logprobs=torch.tensor([0.0]),
-        inference_logprobs=torch.tensor([math.log(0.01)]),
+        trainer_logprobs=torch.tensor([-1.0]),
+        inference_logprobs=torch.tensor([math.log(0.01) - 1.0]),  # ratio = 100
         teacher_logprobs=None,
         advantages=torch.tensor([1.0]),
         loss_mask=torch.tensor([True]),
     )
     out = cispo_loss_fn(inputs, CISPOLossConfig(eps_max=4.0, adv_tau=1.0))
-    # Truncated ratio = 4; loss = -sum(4 * 1.0 * 0.0) = 0.0 (because trainer_logprob is 0).
-    assert torch.isclose(out.loss, torch.tensor(0.0), atol=1e-6)
-    # The metric should report ratio_truncated = 1.0 (one of one tokens truncated).
+    # Truncated: -(4 * 1 * -1) = 4. Without truncation: -(100 * 1 * -1) = 100.
+    assert torch.isclose(out.loss, torch.tensor(4.0), atol=1e-6)
     assert torch.isclose(out.metrics["ratio_truncated"], torch.tensor(1.0), atol=1e-6)
 
 

@@ -14,16 +14,19 @@ Preconditions:
   either exist locally or be pullable; the first rollout of a task will
   trigger a pull which dominates time-to-first-step.
 
-28 usable Harbor-format tasks are checked in under
-``environments/terminal_bench/tasks/`` — no external dataset download required.
-Two task names (``fix-code-vulnerability``, ``sqlite-with-gcov``) are present
-as symlinks to a sibling ``opencode_harbor`` tree that is not vendored here;
-they are excluded from the runtime configs in ``configs/scalerl_terminal_bench``.
+Harbor-format tasks are checked in under ``environments/terminal_bench/tasks/``
+— no external dataset download required. Some entries in that directory are
+symlinks pointing outside the repo (e.g. to a sibling ``opencode_harbor``
+tree); ``configs/scalerl_terminal_bench/rl.toml`` enumerates only the
+runnable ones, so the runtime list is the source of truth, not ``ls tasks/``.
 
-Usage in an orchestrator config:
+Usage in an orchestrator config (``name`` is required when more than one
+env entry references this module — `validate_unique_env_names` rejects
+duplicates):
 
     [[orchestrator.train.env]]
     id = "environments.terminal_bench"
+    name = "terminal-bench-train"
     args = { tasks = ["analyze-access-logs"], task_root = "environments/terminal_bench/tasks" }
 """
 

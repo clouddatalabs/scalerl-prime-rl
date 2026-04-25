@@ -5,7 +5,7 @@ import time
 
 import tomli_w
 
-from prime_rl.orchestrator.advantage import compute_advantages
+from prime_rl.orchestrator.advantage import apply_batch_advantage_normalization, compute_advantages
 from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.inference_metrics import InferenceMetricsCollector
@@ -422,13 +422,20 @@ async def orchestrate(config: OrchestratorConfig):
             train_rollouts = await scheduler.generate_batch(step=progress.step)
             generate_completions_time += scheduler.last_batch_generation_time
 
-            # Compute advantages (in-place)
+            # Compute advantages (in-place). For DefaultAdvantageConfig with
+            # normalization="batch" this only does baseline subtraction;
+            # batch-std happens post-filter below.
             num_rollouts = len(train_rollouts)
             num_unique_examples = len({r["example_id"] for r in train_rollouts})
             compute_advantages(train_rollouts, config.rollouts_per_example, config.advantage)
 
             # Apply rollout filters — sets rollout["filters"] and rollout["is_filtered"]
             apply_filters(rollout_filters, train_rollouts)
+
+            # Faithful ScaleRL §3.4: batch-std normalization runs over the
+            # SURVIVING advantages only, not the pre-filter pool. No-op for
+            # other normalization modes / custom advantage configs.
+            apply_batch_advantage_normalization(train_rollouts, config.advantage)
 
             n_trainable = sum(1 for r in train_rollouts if not r["is_filtered"])
             if n_trainable > 0:

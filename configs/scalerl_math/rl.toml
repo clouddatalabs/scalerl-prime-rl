@@ -16,6 +16,10 @@
 
 max_steps = 500
 seq_len = 8192
+# Per-run output directory. Override via `--output-dir <path>` so multiple
+# concurrent submissions don't collide on `outputs/` (validate_output_dir
+# rejects re-using a populated dir).
+output_dir = "outputs/scalerl_math"
 
 # ScaleRL §3.1: how far the trainer is allowed to lead the generators. k = 8
 # matches the paper's PipelineRL-8 ablation winner. strict_async_level = false

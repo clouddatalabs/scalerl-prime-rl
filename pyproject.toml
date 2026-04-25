@@ -91,7 +91,11 @@ all = [
     "prime-rl[flash-attn]",
     "prime-rl[disagg]",
     "prime-rl[quack]",
-    "prime-rl[flash-attn-3]",
+    # Intentionally NOT including flash-attn-3 here: the FA3 wheel ships
+    # Hopper sm_90 kernels only and crashes on B200 with "no kernel image is
+    # available." The shipped POC configs use FA4 via flash-attn-cute.
+    # Opt back in via `pip install 'prime-rl[flash-attn-3]'` if you target
+    # Hopper.
     "prime-rl[flash-attn-cute]",
 ]
 

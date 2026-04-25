@@ -8,8 +8,14 @@
 #   REPO_ROOT       — clone path (default: $HOME/scalerl-prime-rl)
 #   OUTPUT_ROOT     — slurm log + run output dir (default: $REPO_ROOT/outputs/smoke)
 #   HF_HOME         — HuggingFace cache (default: $REPO_ROOT/hf-cache)
-#   PARTITION       — slurm partition (default: gpu); pass via `sbatch -p <name>` if you don't want to edit this file
+#
+# To run on a partition other than `gpu`, override at submit time:
+#     sbatch -p <partition> scripts/scalerl_smoke.sbatch
+# (#SBATCH directives are parsed before the script body, so an exported
+# PARTITION env var cannot drive --partition; use `sbatch -p` instead.)
+#
 #   SCALERL_FORCE_CLEAR_LD — set "1" to unset LD_LIBRARY_PATH/LD_PRELOAD even on non-AWS-DLAMI hosts
+#   SCALERL_NO_EFA  — set "1" to skip the EFA libfabric env vars when your cluster has no EFA
 #
 # Exercises:
 #   - canonical Minimax-CISPO loss (eps_max=4)
@@ -76,21 +82,35 @@ fi
 
 # Mirror baker's container-side runtime env (baker/cli/docker_runtime.py
 # EFA_RUNTIME_ENV). Baker runs prime-rl inside Docker and sets these on the
-# container; without Docker we set them on the slurm shell. CUDA_DEVICE_MAX_CONNECTIONS=1
-# in particular constrains kernel concurrency on B200 and is part of the working
-# baker recipe. Override any of these via .env in the repo root if your cluster
-# differs (e.g. NCCL_SOCKET_IFNAME for a different interface naming).
-export FI_PROVIDER="${FI_PROVIDER:-efa}"
-export FI_EFA_USE_DEVICE_RDMA="${FI_EFA_USE_DEVICE_RDMA:-1}"
-export FI_EFA_USE_HUGE_PAGE="${FI_EFA_USE_HUGE_PAGE:-0}"
+# container; without Docker we set them on the slurm shell. Each value is
+# only set when not already provided so .env can override per-cluster.
+#
+# EFA-only knobs are gated on a probe: setting FI_PROVIDER=efa on a cluster
+# without EFA makes libfabric fail provider lookup and NCCL hangs at init.
+# Set SCALERL_NO_EFA=1 to skip them explicitly.
+HAS_EFA=0
+if [ "${SCALERL_NO_EFA:-0}" != "1" ] && {
+    [ -d /sys/class/infiniband ] && ls /sys/class/infiniband/ 2>/dev/null | grep -q efa
+} ; then
+    HAS_EFA=1
+fi
+if [ "$HAS_EFA" = "1" ]; then
+    export FI_PROVIDER="${FI_PROVIDER:-efa}"
+    export FI_EFA_USE_DEVICE_RDMA="${FI_EFA_USE_DEVICE_RDMA:-1}"
+    export FI_EFA_USE_HUGE_PAGE="${FI_EFA_USE_HUGE_PAGE:-0}"
+fi
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-^lo,docker}"
 export NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-PHB}"
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-1800}"
+# CUDA_DEVICE_MAX_CONNECTIONS=1 constrains kernel concurrency on B200 and is
+# part of the working baker recipe.
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 
-# Many cluster shells set HF_HUB_OFFLINE=1; that breaks first-time downloads.
-# Override here for the smoke run; set to 1 once everything is cached.
-export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+# Many cluster shells set HF_HUB_OFFLINE=1 in .bashrc; that breaks first-time
+# downloads. Force online unless the operator explicitly opts back into offline
+# via .env (sourced above) — `${VAR:-0}` would NOT have overridden a parent
+# value of 1, only an unset one.
+export HF_HUB_OFFLINE=0
 export HF_HOME="${HF_HOME:-$REPO_ROOT/hf-cache}"
 
 # Use the venv we set up in this repo. The .venv was populated with `uv sync

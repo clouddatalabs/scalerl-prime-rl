@@ -697,11 +697,31 @@ class BufferConfig(BaseConfig):
     @model_validator(mode="after")
     def validate_thresholds(self):
         if self.easy_threshold is not None and self.hard_threshold is not None:
-            assert self.easy_threshold > self.hard_threshold, "easy_threshold must be greater than hard_threshold."
+            if self.easy_threshold <= self.hard_threshold:
+                raise ValueError(
+                    f"[orchestrator.buffer] easy_threshold ({self.easy_threshold}) must be > "
+                    f"hard_threshold ({self.hard_threshold}); otherwise every example "
+                    "would be classified as 'easy' (or both)."
+                )
         if self.no_positive_resampling and self.no_positive_resampling_threshold is None:
             raise ValueError(
-                "no_positive_resampling=True requires no_positive_resampling_threshold to be set "
-                "(ScaleRL paper uses 0.9)."
+                "[orchestrator.buffer] no_positive_resampling=True requires "
+                "no_positive_resampling_threshold to be set (ScaleRL paper uses 0.9)."
+            )
+        if (
+            self.no_positive_resampling
+            and self.no_positive_resampling_threshold is not None
+            and self.easy_threshold is not None
+            and self.easy_threshold <= self.no_positive_resampling_threshold
+        ):
+            raise ValueError(
+                f"[orchestrator.buffer] easy_threshold ({self.easy_threshold}) <= "
+                f"no_positive_resampling_threshold ({self.no_positive_resampling_threshold}) "
+                "shadows NPR: any example whose avg_reward crosses the NPR threshold also "
+                "crosses easy_threshold first, so update_pools evicts to the easy pool BEFORE "
+                "update_pass_rate runs and NPR never fires. Either raise easy_threshold above "
+                "no_positive_resampling_threshold or set easy_threshold = None to disable the "
+                "easy pool."
             )
         return self
 
@@ -729,13 +749,12 @@ class DefaultAdvantageConfig(BaseModel):
                 "How to scale advantages after per-group mean subtraction. "
                 "'none' (default, upstream behavior): no std scaling — Dr. GRPO style. "
                 "'group': divide each advantage by its per-group std (classic GRPO). "
-                "'batch': divide each advantage by the std over the whole batch — ScaleRL §3.4 / "
-                "Reinforce++ / Magistral. Removes the per-prompt-hardness reweighting that per-group "
-                "std would impose. KNOWN DEVIATION FROM PAPER: std is computed pre-filter "
-                "(before apply_filters drops zero-advantage groups via ZeroAdvantageFilter). "
-                "Practical effect is a per-step constant-factor scaling of surviving advantages "
-                "— absorbed into the LR — but the scale drifts step-to-step as the pre-filter "
-                "pool changes. Post-filter implementation is a follow-up."
+                "'batch': divide each advantage by the std computed over the post-filter "
+                "(surviving) rollouts — ScaleRL §3.4 / Reinforce++ / Magistral. The "
+                "orchestrator runs filters first (zero-advantage / NPR / etc.) and then "
+                "calls `apply_batch_advantage_normalization`, so the std reflects only "
+                "rollouts that actually train. Filtered rollouts keep their pre-norm "
+                "advantage value (they don't enter training, so it's irrelevant)."
             )
         ),
     ] = "none"

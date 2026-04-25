@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from prime_rl.configs.orchestrator import CustomAdvantageConfig, DefaultAdvantageConfig
@@ -6,6 +7,7 @@ from prime_rl.orchestrator.advantage import (
     AdvantageInputs,
     AdvantageOutputs,
     _efficiency_length_shaping,
+    apply_batch_advantage_normalization,
     compute_advantages,
     default_advantage_fn,
     setup_advantage_fn,
@@ -256,36 +258,66 @@ def test_default_advantage_normalization_group_divides_by_per_group_std():
     assert torch.allclose(out.advantages[1], torch.zeros(4), atol=1e-6)
 
 
-def test_default_advantage_normalization_batch_divides_by_batch_wide_std():
-    """normalization='batch' divides every advantage by the std over the entire batch.
-
-    ScaleRL §3.4 / Reinforce++: std is computed AFTER per-group mean subtraction but
-    ACROSS all groups, so easy and hard prompts get scaled by the same factor.
+def test_default_advantage_normalization_batch_emits_baseline_only():
+    """`normalization='batch'` is intentionally a no-op inside `default_advantage_fn`
+    — the batch-std step is deferred to `apply_batch_advantage_normalization`
+    after rollout filtering (snowflake_poc_critique.md §1; ScaleRL §3.4
+    requires the std to reflect surviving rollouts only). The function returns
+    baseline-subtracted advantages, identical to `normalization='none'` for the
+    pre-filter call.
     """
     rewards = torch.tensor([[1.0, 0.5, 0.8], [0.2, 0.9, 0.1]])
     inputs = AdvantageInputs(
         rewards=rewards, completion_lengths=torch.zeros_like(rewards, dtype=torch.long)
     )
-    out = default_advantage_fn(inputs, normalization="batch")
-
-    centered = rewards - rewards.mean(dim=1, keepdim=True)
-    expected = centered / (centered.std(unbiased=False) + _NORM_EPS)
-    assert torch.allclose(out.advantages, expected, atol=1e-6)
-    # Batch-level std uses a single scalar; verify we did NOT do per-row division.
-    per_group_normalized = centered / (centered.std(dim=1, keepdim=True, unbiased=False) + _NORM_EPS)
-    assert not torch.allclose(out.advantages, per_group_normalized)
+    out_batch = default_advantage_fn(inputs, normalization="batch")
+    out_none = default_advantage_fn(inputs, normalization="none")
+    assert torch.allclose(out_batch.advantages, out_none.advantages, atol=1e-12)
 
 
-def test_default_advantage_normalization_batch_composes_with_length_shaping():
-    """Order: length-shape -> per-group baseline -> batch-wide std (consistent fixed pipeline)."""
-    rewards = torch.tensor([[1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 1.0, 0.0]])
-    lengths = torch.tensor([[10, 30, 20, 20], [10, 12, 8, 14]])
-    inputs = AdvantageInputs(rewards=rewards, completion_lengths=lengths)
-    out = default_advantage_fn(inputs, length_shaping=True, normalization="batch")
+def test_apply_batch_advantage_normalization_uses_post_filter_std():
+    """Batch-std must be computed over UNFILTERED rollouts only. Filtered
+    rollouts retain their pre-norm advantage (irrelevant; they don't train).
+    """
+    rollouts = [
+        {"advantage": 1.0, "is_filtered": False},
+        {"advantage": -1.0, "is_filtered": False},
+        {"advantage": 100.0, "is_filtered": True},   # would dominate pre-filter std
+        {"advantage": -100.0, "is_filtered": True},
+    ]
+    config = DefaultAdvantageConfig(normalization="batch")
+    apply_batch_advantage_normalization(rollouts, config)
+    surviving = torch.tensor([1.0, -1.0])
+    expected_std = surviving.std(unbiased=False).item()
+    assert rollouts[0]["advantage"] == pytest.approx(1.0 / (expected_std + _NORM_EPS))
+    assert rollouts[1]["advantage"] == pytest.approx(-1.0 / (expected_std + _NORM_EPS))
+    # Filtered rollouts unchanged.
+    assert rollouts[2]["advantage"] == 100.0
+    assert rollouts[3]["advantage"] == -100.0
 
-    shaped = _efficiency_length_shaping(rewards, lengths.to(dtype=rewards.dtype))
-    expected = shaped / (shaped.std(unbiased=False) + _NORM_EPS)
-    assert torch.allclose(out.advantages, expected, atol=1e-6)
+
+def test_apply_batch_advantage_normalization_no_op_for_non_batch_modes():
+    rollouts = [
+        {"advantage": 1.0, "is_filtered": False},
+        {"advantage": -1.0, "is_filtered": False},
+    ]
+    apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="none"))
+    assert rollouts[0]["advantage"] == 1.0
+    apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="group"))
+    assert rollouts[0]["advantage"] == 1.0
+    apply_batch_advantage_normalization(rollouts, None)
+    assert rollouts[0]["advantage"] == 1.0
+
+
+def test_apply_batch_advantage_normalization_handles_few_surviving():
+    """Fewer than 2 surviving rollouts → std undefined; leave unchanged."""
+    rollouts = [
+        {"advantage": 1.0, "is_filtered": False},
+        {"advantage": -1.0, "is_filtered": True},
+    ]
+    apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
+    assert rollouts[0]["advantage"] == 1.0
+    assert rollouts[1]["advantage"] == -1.0
 
 
 def test_default_advantage_config_normalization_default_is_none():

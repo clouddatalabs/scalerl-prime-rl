@@ -114,15 +114,16 @@ def test_model_config_accepts_fa4_with_auto_impl():
 
 @pytest.mark.gpu
 def test_fa4_attention_forward_runs_on_gpu_with_packed_position_ids():
-    """Exercise the cute kernels through `_fa4_attention_forward` on real GPU.
+    """Exercise the cute kernels through `_fa4_attention_forward` on real GPU
+    and compare against an SDPA reference with the matching block-diagonal
+    causal mask. This test catches the three classes of regression that a
+    shape-only smoke test misses:
+      - Q/H axis swap (Q != H so transpose ordering matters)
+      - softmax_scale off by 1/sqrt(head_dim) (numerical magnitude check)
+      - causality flip (block-diagonal causal vs free attention)
 
-    Constructs a synthetic packed RL batch (two short "sequences" packed into
-    a single buffer with restart position_ids) and checks the bridge returns
-    a tensor with the right shape and no NaN. Runs only when CUDA is
-    available; the math smoke job 694 is the empirical backstop.
-
-    Marked with `@pytest.mark.gpu` so the default CPU `baker test` matrix
-    skips it (consistent with how the rest of the GPU tests are gated).
+    Use unequal num_heads, total_q, head_dim so axis swaps cannot coincidentally
+    pass shape checks; allclose against SDPA gives a real numeric pin.
     """
     if not torch.cuda.is_available():
         pytest.skip("CUDA required for FA4 forward path")
@@ -131,13 +132,77 @@ def test_fa4_attention_forward_runs_on_gpu_with_packed_position_ids():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    # Pretend two packed sequences of length 4 each, with 8 attention heads,
-    # 8 kv heads, head_dim 64. Positions restart at the boundary.
-    batch, total_q, num_heads, head_dim = 1, 8, 8, 64
+    # Three packed sequences of lengths 5, 3, 4 (total 12), with 4 attention
+    # heads and head_dim 64. num_heads != total_q != head_dim.
+    seq_lens = [5, 3, 4]
+    total_q = sum(seq_lens)
+    num_heads, head_dim = 4, 64
+    batch = 1
+    torch.manual_seed(0)
     query = torch.randn(batch, num_heads, total_q, head_dim, device=device, dtype=dtype)
     key = torch.randn(batch, num_heads, total_q, head_dim, device=device, dtype=dtype)
     value = torch.randn(batch, num_heads, total_q, head_dim, device=device, dtype=dtype)
-    position_ids = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]], device=device)
+    position_ids = torch.tensor(
+        [sum(([i for i in range(L)] for L in seq_lens), [])], device=device, dtype=torch.long
+    )
+
+    class _StubModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.is_causal = True
+            self.linear = torch.nn.Linear(head_dim, head_dim, dtype=dtype, device=device)
+            self.config = type("C", (), {})()
+
+    module = _StubModule()
+    scaling = 1.0 / (head_dim**0.5)
+    out_fa4, _ = _fa4_attention_forward(
+        module, query, key, value, attention_mask=None, scaling=scaling, position_ids=position_ids
+    )
+
+    # SDPA reference with explicit block-diagonal causal mask.
+    boundaries: list[int] = []
+    cursor = 0
+    for L in seq_lens:
+        boundaries.append(cursor)
+        cursor += L
+    block_mask = torch.zeros(total_q, total_q, dtype=torch.bool, device=device)
+    for start, L in zip(boundaries, seq_lens):
+        for i in range(L):
+            block_mask[start + i, start : start + i + 1] = True
+    out_ref = torch.nn.functional.scaled_dot_product_attention(
+        query, key, value, attn_mask=block_mask, scale=scaling
+    )
+    out_fa4_flat = out_fa4.reshape(batch, total_q, num_heads, head_dim).permute(0, 2, 1, 3).contiguous()
+    assert torch.allclose(out_fa4_flat.float(), out_ref.float(), atol=5e-2, rtol=5e-2), (
+        f"FA4 packed-positions output diverges from SDPA reference. "
+        f"max abs diff = {(out_fa4_flat.float() - out_ref.float()).abs().max().item():.4f}"
+    )
+
+
+@pytest.mark.gpu
+def test_fa4_attention_forward_backward_yields_finite_grads():
+    """Backward through `_fa4_attention_forward` must produce finite gradients
+    on Q, K, V. snowflake_poc_critique.md flagged that the GPU forward test
+    didn't cover the autograd path the trainer actually exercises.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for FA4 backward path")
+
+    _register_fa4_attention_interface()
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+
+    seq_lens = [4, 4]
+    total_q = sum(seq_lens)
+    num_heads, head_dim = 4, 64
+    batch = 1
+    torch.manual_seed(0)
+    query = torch.randn(batch, num_heads, total_q, head_dim, device=device, dtype=dtype, requires_grad=True)
+    key = torch.randn(batch, num_heads, total_q, head_dim, device=device, dtype=dtype, requires_grad=True)
+    value = torch.randn(batch, num_heads, total_q, head_dim, device=device, dtype=dtype, requires_grad=True)
+    position_ids = torch.tensor(
+        [sum(([i for i in range(L)] for L in seq_lens), [])], device=device, dtype=torch.long
+    )
 
     class _StubModule(torch.nn.Module):
         def __init__(self):
@@ -148,17 +213,15 @@ def test_fa4_attention_forward_runs_on_gpu_with_packed_position_ids():
 
     module = _StubModule()
     out, _ = _fa4_attention_forward(
-        module,
-        query,
-        key,
-        value,
-        attention_mask=None,
-        scaling=1.0 / (head_dim**0.5),
+        module, query, key, value, attention_mask=None, scaling=1.0 / (head_dim**0.5),
         position_ids=position_ids,
     )
-    assert out.shape[0] == batch
-    assert out.shape[-1] == head_dim
-    assert not torch.isnan(out).any(), "FA4 produced NaN — kernel/dtype mismatch on this GPU"
+    loss = out.float().sum()
+    loss.backward()
+    for name, t in [("query", query), ("key", key), ("value", value)]:
+        assert t.grad is not None, f"{name}.grad must not be None after backward through FA4"
+        assert torch.isfinite(t.grad).all(), f"{name}.grad has NaN/Inf entries"
+        assert t.grad.abs().sum() > 0, f"{name}.grad is identically zero — backward never reached it"
 
 
 def test_model_config_rejects_fa4_with_invalid_impl():

@@ -50,9 +50,14 @@ def default_advantage_fn(
         raw rewards
         -> [length-shape if enabled]
         -> per-group baseline subtraction
-        -> [std normalization: none | per-group | batch-wide]
+        -> [std normalization: none | per-group]
 
-    See ScaleRL §3.4 / Reinforce++ for the batch-wide std formulation.
+    Note: `normalization == "batch"` is INTENTIONALLY not handled here. ScaleRL
+    §3.4 / Reinforce++ describes batch-std normalization, but it must be computed
+    over the SURVIVING rollouts (after `apply_filters` drops zero-advantage
+    groups), otherwise the std drifts step-to-step with the filter rate and
+    silently rescales the LR. The orchestrator applies the batch-std step via
+    `apply_batch_advantage_normalization` after filtering.
     """
     rewards = inputs.rewards
 
@@ -63,19 +68,52 @@ def default_advantage_fn(
         baseline = rewards.mean(dim=1, keepdim=True)
         advantages = rewards - baseline
 
-    if normalization == "none":
+    if normalization == "none" or normalization == "batch":
+        # "batch" deferred to post-filter step. Emit the baseline-subtracted
+        # tensor unchanged; the orchestrator finishes the job.
         pass
     elif normalization == "group":
         std = advantages.std(dim=1, keepdim=True, unbiased=False)
-        advantages = advantages / (std + _NORM_EPS)
-    elif normalization == "batch":
-        std = advantages.std(unbiased=False)
         advantages = advantages / (std + _NORM_EPS)
     else:
         # Pydantic Literal validates at config load; this guards direct callers.
         raise ValueError(f"Unknown normalization mode: {normalization!r}")
 
     return AdvantageOutputs(advantages=advantages)
+
+
+def apply_batch_advantage_normalization(
+    rollouts: list[vf.RolloutOutput],
+    advantage_config: AdvantageConfig | None,
+) -> None:
+    """Post-filter step for `DefaultAdvantageConfig.normalization == "batch"`.
+
+    Computes the std over the advantages of UNFILTERED rollouts only, divides
+    every UNFILTERED rollout's advantage by that std + eps. Filtered rollouts
+    are left untouched (they don't enter training; their advantage value is
+    irrelevant). No-op for non-default advantage configs and for
+    `normalization in {"none", "group"}` — those are already finalized in
+    `default_advantage_fn`.
+
+    Faithful to ScaleRL §3.4: the surviving gradients are scaled by their own
+    cohort, not by an artifact of how many groups got filtered.
+    """
+    if advantage_config is None:
+        return
+    if not hasattr(advantage_config, "normalization"):
+        return  # CustomAdvantageConfig — caller is on their own.
+    if advantage_config.normalization != "batch":
+        return
+
+    surviving = [r for r in rollouts if not r.get("is_filtered", False)]
+    if len(surviving) < 2:
+        return  # std undefined / unstable; leave advantages as-is.
+
+    advs = torch.tensor([float(r["advantage"]) for r in surviving])
+    std = advs.std(unbiased=False).item()
+    scale = 1.0 / (std + _NORM_EPS)
+    for r in surviving:
+        r["advantage"] = float(r["advantage"]) * scale
 
 
 def _efficiency_length_shaping(

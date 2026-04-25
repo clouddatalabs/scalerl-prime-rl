@@ -389,3 +389,38 @@ def test_buffer_no_positive_resampling_threshold_required():
     """no_positive_resampling=True without threshold raises at config validation."""
     with pytest.raises(ValueError, match="no_positive_resampling_threshold"):
         BufferConfig(no_positive_resampling=True)
+
+
+def test_buffer_config_rejects_easy_threshold_shadowing_npr():
+    """`easy_threshold <= no_positive_resampling_threshold` makes NPR unreachable
+    because update_pools (easy/hard) runs BEFORE update_pass_rate, so any example
+    that would cross NPR is evicted to the easy pool first. Reject at config load.
+    """
+    with pytest.raises(ValueError, match="shadows NPR"):
+        BufferConfig(
+            easy_threshold=0.5,
+            no_positive_resampling=True,
+            no_positive_resampling_threshold=0.9,
+        )
+
+
+def test_buffer_no_positive_resampling_skipped_for_easy_promoted(dummy_envs, make_rollouts):
+    """Sanity for the `easy <= NPR` shadowing case: with the schema ordering
+    above (easy_threshold > NPR_threshold), an example whose avg_reward exceeds
+    easy_threshold takes the easy path and never gets an NPR stats update.
+    """
+    buffer = Buffer(
+        dummy_envs,
+        BufferConfig(
+            easy_threshold=1.0,
+            no_positive_resampling=True,
+            no_positive_resampling_threshold=0.9,
+        ),
+    )
+    eb = buffer.env_buffers["env_a"]
+    # avg_reward=1.0 hits easy_threshold first — promoted to easy pool, NPR skipped.
+    buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[1.0]))
+    assert 0 not in eb.examples
+    assert 0 not in eb.excluded_examples
+    assert eb.easy_examples and eb.easy_examples[0]["example_id"] == 0
+    assert not eb.pass_rate_stats, "NPR stats must NOT update when update_pools already evicted."

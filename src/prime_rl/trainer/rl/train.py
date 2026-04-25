@@ -449,6 +449,11 @@ def train(config: TrainerConfig):
                 # prompt-level averaging). When loss_scale_mode is "token" (the upstream
                 # default) the weights are ignored — see prime_rl.trainer.rl.loss.compute_loss.
                 sequence_loss_weights=micro_batch.get("sequence_loss_weights") or None,
+                # FSDP averages gradients across DP ranks (gradient_divide_factor =
+                # dp_replicate*dp_shard*cp). For sequence/none loss_scale_mode the
+                # packer's weights are global, so compute_loss multiplies the rank
+                # loss by this factor to cancel the FSDP divisor.
+                fsdp_world_size=parallel_dims.fsdp_gradient_divide_factor,
             )
 
             # Backward pass

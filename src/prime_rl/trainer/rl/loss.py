@@ -257,6 +257,7 @@ def compute_loss(
     loss_scale: int,
     sequence_loss_weights: list[float] | None = None,
     loss_scale_mode: LossScaleMode | None = None,
+    fsdp_world_size: int = 1,
 ) -> tuple[Float[Tensor, ""], dict[str, Any]]:
     """
     Compute loss for packed sequences (batch size = 1, multiple sequences packed along sequence dimension).
@@ -277,6 +278,10 @@ def compute_loss(
         loss_scale_mode: How to combine per-sequence losses. Defaults to
             `getattr(loss_fn, "loss_scale_mode", "token")` so call sites that
             don't pass it inherit the loss-fn's preference.
+        fsdp_world_size: data-parallel world size used by FSDP gradient
+            averaging (`dp_replicate * dp_shard * cp` from `parallel_dims`).
+            Only consulted in `sequence`/`none` mode; defaults to 1 so
+            single-process tests stay simple.
 
     Returns:
         Tuple of (scaled_loss, aggregated_metrics)
@@ -324,9 +329,21 @@ def compute_loss(
     if loss_scale_mode == "token":
         scaled_loss = total_loss / loss_scale
     else:
-        # "sequence" / "none": weights already encode normalization. Avoid the
-        # token-count divisor — the packer chose the scale.
-        scaled_loss = total_loss
+        # "sequence" / "none": weights already encode normalization. The packer
+        # set them globally (e.g. 1/(total_p * num_prompts_global) for ScaleRL
+        # prompt-level averaging), so each rank's `total_loss` is its slice of
+        # the global weighted sum.
+        #
+        # FSDP all-reduces gradients with `gradient_divide_factor = dp_world_size`
+        # (PyTorch default), turning the rank's gradient into the average across
+        # ranks. With locally-summed losses that would silently produce
+        # `aggregate = global_sum / dp_world_size` — i.e. effective LR shrinks
+        # 1/dp_world_size in multi-rank DP. Multiplying by dp_world_size here
+        # cancels the FSDP divisor so `aggregate_grad == sum_global(w_i * grad_i)`.
+        # Token-mode is unaffected: it divides by local trainable tokens, which
+        # roughly equals `global_tokens / dp_world_size` under balanced packing,
+        # so the dp factor cancels naturally there.
+        scaled_loss = total_loss * float(fsdp_world_size)
 
     aggregated: dict[str, Any] = {}
     for k, v in all_metrics.items():

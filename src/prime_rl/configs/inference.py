@@ -60,7 +60,11 @@ class ModelConfig(BaseModelConfig):
     enforce_eager: Annotated[
         bool,
         Field(
-            description="Whether to enforce eager mode. If False, will use PyTorch eager and cuda graphs in hybrid for maximal performance. Passed to vLLM as `--enforce-eager`",
+            description=(
+                "If True, force eager mode and disable CUDA graph capture / inductor "
+                "compilation. If False (default), vLLM uses cuda graphs + inductor for "
+                "maximal performance. Passed to vLLM as `--enforce-eager`."
+            ),
         ),
     ] = False
 

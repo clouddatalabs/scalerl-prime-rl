@@ -10,6 +10,27 @@
 
 set -e
 
+# Activate the repo's venv so `python` and `uv pip` operate on it. Without this,
+# running the script before activation resolves to system Python (which doesn't
+# have flash_attn at all) and fails with a misleading "0 lines" error.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ -z "${VIRTUAL_ENV:-}" ]; then
+    if [ ! -f "$REPO_ROOT/.venv/bin/activate" ]; then
+        echo "Error: $REPO_ROOT/.venv missing; run 'uv sync --all-extras' on the login node first." >&2
+        exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$REPO_ROOT/.venv/bin/activate"
+fi
+
+# Serialize concurrent invocations against the same venv so two parallel slurm
+# submits don't fight over the wheel install.
+LOCK_FD=9
+LOCK_FILE="$REPO_ROOT/.venv/.fix-flash-attn-cute.lock"
+exec {LOCK_FD}> "$LOCK_FILE"
+flock -x "$LOCK_FD"
+
 echo "Reinstalling flash-attn-cute to fix namespace conflict with flash-attn..."
 # Match the pin in pyproject.toml so this script and `uv sync --all-extras` agree.
 uv pip install --reinstall --no-deps "flash-attn-4 @ git+https://github.com/Dao-AILab/flash-attention.git@abd9943b#subdirectory=flash_attn/cute"

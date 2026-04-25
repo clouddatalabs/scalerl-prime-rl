@@ -57,10 +57,33 @@ def promote_parallel_lm_head_to_fp32(model) -> int:
 
 
 def transformers_v5_compat():
-    """vLLM general plugin: patch transformers v5 config attrs that vLLM 0.16 still expects.
+    """Umbrella ``vllm.general_plugins`` entry point — registers every prime-rl
+    monkey-patch with the vLLM process at import time.
 
-    Registered as a ``vllm.general_plugins`` entry-point so it runs automatically
-    in every vLLM process, including spawned workers.
+    Despite the historical name (the original purpose was a transformers-v5
+    config compat shim), this function is the SINGLE place pyproject.toml's
+    ``[project.entry-points."vllm.general_plugins"]`` plugs into vLLM. Removing
+    it disables every patch listed below, not just the v5 compat one. The patches
+    are independent of one another; each early-returns when its trigger condition
+    is unmet so the umbrella stays cheap on cold start.
+
+    Patches dispatched:
+      - transformers v5 / vLLM 0.16 config-attribute compat (in this function body)
+      - ``monkey_patch_vllm_fp32_lm_head``: gated on ``PRIME_RL_VLLM_FP32_LM_HEAD``
+        env var (set by ``prime_rl.inference.server`` from
+        ``InferenceConfig.model.fp32_lm_head``); promotes ParallelLMHead to fp32
+        for ScaleRL §3.2 train/inference logprob parity. Set the env var
+        manually if you launch ``vllm serve`` directly.
+      - ``_patch_qwen35_lora``: Qwen3.5 LoRA config-key fix.
+      - ``_patch_lora_key_prefix``: LoRA state-dict key prefix fix.
+      - ``monkey_patch_deep_gemm_ep_scatter``: deep-gemm ep_scatter compat.
+      - ``monkey_patch_dp_engine_core_pause_resume_deadlock``: DP pause/resume deadlock fix.
+      - ``monkey_patch_offloading_connector_cpu_block_count``: FP8 offloading-connector fix.
+
+    The other ``monkey_patch_*`` helpers in this module (LoRA-adapter, LRUCache,
+    tokenize-params, minimax-m2, harmony-stop, fused-moe-lora-dp, no-moe-lora)
+    are NOT wired through this umbrella; callers that need them must import and
+    invoke explicitly.
     """
     from transformers import Qwen3VLMoeTextConfig
 
