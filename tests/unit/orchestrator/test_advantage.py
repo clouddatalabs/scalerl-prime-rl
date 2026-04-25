@@ -2,8 +2,10 @@ import torch
 
 from prime_rl.configs.orchestrator import CustomAdvantageConfig, DefaultAdvantageConfig
 from prime_rl.orchestrator.advantage import (
+    _NORM_EPS,
     AdvantageInputs,
     AdvantageOutputs,
+    _efficiency_length_shaping,
     compute_advantages,
     default_advantage_fn,
     setup_advantage_fn,
@@ -226,3 +228,67 @@ def test_setup_advantage_fn_with_custom_config():
 def _dummy_custom_advantage(inputs: AdvantageInputs, scale: float = 1.0) -> AdvantageOutputs:
     """A simple custom advantage for testing."""
     return AdvantageOutputs(advantages=inputs.rewards * scale)
+
+
+def test_default_advantage_normalization_none_matches_upstream():
+    """normalization='none' (default) leaves the upstream center-only behavior intact."""
+    inputs = AdvantageInputs(
+        rewards=torch.tensor([[1.0, 0.5, 0.8], [0.2, 0.9, 0.1]]),
+        completion_lengths=torch.tensor([[10, 12, 8], [15, 11, 9]]),
+    )
+    out_default = default_advantage_fn(inputs)
+    out_none = default_advantage_fn(inputs, normalization="none")
+    assert torch.allclose(out_default.advantages, out_none.advantages)
+
+
+def test_default_advantage_normalization_group_divides_by_per_group_std():
+    """normalization='group' divides by per-group std (classic GRPO)."""
+    rewards = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.5, 0.5]])
+    inputs = AdvantageInputs(
+        rewards=rewards, completion_lengths=torch.zeros_like(rewards, dtype=torch.long)
+    )
+    out = default_advantage_fn(inputs, normalization="group")
+
+    # First group has nonzero std; verify per-group division matches the explicit formula.
+    expected_g0 = (rewards[0] - rewards[0].mean()) / (rewards[0].std(unbiased=False) + _NORM_EPS)
+    assert torch.allclose(out.advantages[0], expected_g0, atol=1e-6)
+    # Second group is degenerate (all 0.5 → centered all-zero, std 0); epsilon keeps it bounded.
+    assert torch.allclose(out.advantages[1], torch.zeros(4), atol=1e-6)
+
+
+def test_default_advantage_normalization_batch_divides_by_batch_wide_std():
+    """normalization='batch' divides every advantage by the std over the entire batch.
+
+    ScaleRL §3.4 / Reinforce++: std is computed AFTER per-group mean subtraction but
+    ACROSS all groups, so easy and hard prompts get scaled by the same factor.
+    """
+    rewards = torch.tensor([[1.0, 0.5, 0.8], [0.2, 0.9, 0.1]])
+    inputs = AdvantageInputs(
+        rewards=rewards, completion_lengths=torch.zeros_like(rewards, dtype=torch.long)
+    )
+    out = default_advantage_fn(inputs, normalization="batch")
+
+    centered = rewards - rewards.mean(dim=1, keepdim=True)
+    expected = centered / (centered.std(unbiased=False) + _NORM_EPS)
+    assert torch.allclose(out.advantages, expected, atol=1e-6)
+    # Batch-level std uses a single scalar; verify we did NOT do per-row division.
+    per_group_normalized = centered / (centered.std(dim=1, keepdim=True, unbiased=False) + _NORM_EPS)
+    assert not torch.allclose(out.advantages, per_group_normalized)
+
+
+def test_default_advantage_normalization_batch_composes_with_length_shaping():
+    """Order: length-shape -> per-group baseline -> batch-wide std (consistent fixed pipeline)."""
+    rewards = torch.tensor([[1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 1.0, 0.0]])
+    lengths = torch.tensor([[10, 30, 20, 20], [10, 12, 8, 14]])
+    inputs = AdvantageInputs(rewards=rewards, completion_lengths=lengths)
+    out = default_advantage_fn(inputs, length_shaping=True, normalization="batch")
+
+    shaped = _efficiency_length_shaping(rewards, lengths.to(dtype=rewards.dtype))
+    expected = shaped / (shaped.std(unbiased=False) + _NORM_EPS)
+    assert torch.allclose(out.advantages, expected, atol=1e-6)
+
+
+def test_default_advantage_config_normalization_default_is_none():
+    """Config-level default for `normalization` is `'none'` — preserves upstream behavior."""
+    config = DefaultAdvantageConfig()
+    assert config.normalization == "none"

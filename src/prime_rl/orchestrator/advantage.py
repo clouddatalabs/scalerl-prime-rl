@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 
 import torch
 import verifiers as vf
@@ -9,6 +9,10 @@ from torch import Tensor
 from prime_rl.configs.orchestrator import AdvantageConfig, CustomAdvantageConfig
 from prime_rl.orchestrator.vf_utils import get_model_completion_len
 from prime_rl.utils.utils import import_object
+
+# Std epsilon for advantage normalization. Small enough to vanish on any non-degenerate
+# batch but large enough to keep the per-group "all rewards identical" path bounded.
+_NORM_EPS = 1e-8
 
 
 @dataclass
@@ -38,16 +42,40 @@ Expected signature:
 def default_advantage_fn(
     inputs: AdvantageInputs,
     length_shaping: bool = False,
+    normalization: Literal["none", "group", "batch"] = "none",
 ) -> AdvantageOutputs:
-    """Default GRPO advantage: reward minus per-problem baseline."""
+    """Default GRPO advantage: reward minus per-group baseline, with optional std scaling.
+
+    Order of operations is fixed so callers don't accidentally compose them backwards:
+        raw rewards
+        -> [length-shape if enabled]
+        -> per-group baseline subtraction
+        -> [std normalization: none | per-group | batch-wide]
+
+    See ScaleRL §3.4 / Reinforce++ for the batch-wide std formulation.
+    """
     rewards = inputs.rewards
 
     if length_shaping:
         completion_lengths = inputs.completion_lengths.to(dtype=rewards.dtype)
-        return AdvantageOutputs(advantages=_efficiency_length_shaping(rewards, completion_lengths))
+        advantages = _efficiency_length_shaping(rewards, completion_lengths)
+    else:
+        baseline = rewards.mean(dim=1, keepdim=True)
+        advantages = rewards - baseline
 
-    baseline = rewards.mean(dim=1, keepdim=True)
-    return AdvantageOutputs(advantages=rewards - baseline)
+    if normalization == "none":
+        pass
+    elif normalization == "group":
+        std = advantages.std(dim=1, keepdim=True, unbiased=False)
+        advantages = advantages / (std + _NORM_EPS)
+    elif normalization == "batch":
+        std = advantages.std(unbiased=False)
+        advantages = advantages / (std + _NORM_EPS)
+    else:
+        # Pydantic Literal validates at config load; this guards direct callers.
+        raise ValueError(f"Unknown normalization mode: {normalization!r}")
+
+    return AdvantageOutputs(advantages=advantages)
 
 
 def _efficiency_length_shaping(
@@ -100,6 +128,7 @@ def setup_advantage_fn(config: AdvantageConfig) -> AdvantageFn:
         return default_advantage_fn(
             inputs,
             length_shaping=config.length_shaping,
+            normalization=config.normalization,
         )
 
     return advantage_fn

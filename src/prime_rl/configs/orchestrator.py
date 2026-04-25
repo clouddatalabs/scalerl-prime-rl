@@ -686,6 +686,21 @@ class DefaultAdvantageConfig(BaseModel):
             )
         ),
     ] = False
+    normalization: Annotated[
+        Literal["none", "group", "batch"],
+        Field(
+            description=(
+                "How to scale advantages after per-group mean subtraction. "
+                "'none' (default, upstream behavior): no std scaling — Dr. GRPO style. "
+                "'group': divide each advantage by its per-group std (classic GRPO). "
+                "'batch': divide each advantage by the std over the whole batch — ScaleRL §3.4 / "
+                "Reinforce++ / Magistral. Removes the per-prompt-hardness reweighting that per-group "
+                "std would impose. Std is computed pre-filter (before apply_filters drops "
+                "zero-advantage groups); a post-filter alternative would couple ZeroAdvantageFilter "
+                "into advantage computation, which we avoid for separation-of-concerns."
+            )
+        ),
+    ] = "none"
 
 
 class CustomAdvantageConfig(BaseModel):
