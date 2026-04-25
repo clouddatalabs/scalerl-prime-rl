@@ -1,0 +1,144 @@
+# ScaleRL recipe smoke config — Qwen3-8B on Hendrycks Math
+#
+# Mirrors the seven ScaleRL ingredients (arxiv 2510.13786) we ship in this
+# fork, on the upstream `math-env`. Used internally to smoke-test the recipe
+# end-to-end before handing the public POC to Snowflake.
+#
+# Features active here:
+#   1. Async Pipeline-RL (max_async_level = 8, strict_async_level = false)
+#   2. CISPO loss (canonical Minimax form, eps_max = 4)
+#   3. Prompt-level loss averaging (prompt_average_loss = true,
+#      loss_scale_mode = "sequence")
+#   4. Batch-level advantage normalization (advantage.normalization = "batch")
+#   5. FP32 LM-head on both trainer and inference
+#   6. Zero-variance filtering (upstream ZeroAdvantageFilter, default)
+#   7. No-Positive-Resampling (threshold = 0.9 per Polaris)
+
+max_steps = 500
+seq_len = 8192
+
+# ScaleRL §3.1: how far the trainer is allowed to lead the generators. k = 8
+# matches the paper's PipelineRL-8 ablation winner. strict_async_level = false
+# uses "freshest stable checkpoint up to k" rather than pinning at exactly k.
+max_async_level = 8
+
+[deployment]
+# Tuned for our 4xB200 cluster (8 GPUs/node). Override for other layouts.
+num_train_gpus = 4
+num_infer_gpus = 4
+
+[model]
+name = "Qwen/Qwen3-8B"
+
+[wandb]
+project = "scalerl-prime-rl"
+name = "scalerl-math-smoke-qwen3-8b"
+
+[ckpt]
+interval = 100
+
+# NCCL broadcast at max_async_level=8 requires the experimental opt-in flag
+# (validated on B200/EFA per ScaleRL Pipeline-RL §3.1).
+[weight_broadcast]
+type = "nccl"
+
+[orchestrator]
+# ScaleRL paper uses 48 prompts × 16 rollouts = 768 completions/step. We use
+# slightly smaller for the smoke run; bump for real training.
+batch_size = 256
+rollouts_per_example = 16
+strict_async_level = false
+
+[orchestrator.experimental]
+# Required when weight_broadcast.type = "nccl" and max_async_level != 1.
+# Validated on B200/EFA per ScaleRL Pipeline-RL §3.1; other hardware may need
+# `weight_broadcast.type = "filesystem"` instead.
+allow_nccl_async_level_override = true
+# Paper Pipeline-RL semantics: in-flight rollouts continue under fresh weights
+# rather than being cancelled past k updates. Upstream default is 8 (cancels);
+# 1e9 = "never cancel."
+max_off_policy_steps = 1000000000
+# ScaleRL §3.3: every prompt contributes equally to the loss step.
+prompt_average_loss = true
+
+[orchestrator.train.sampling]
+temperature = 1.0
+# ScaleRL §2 budget: 12,288 thinking tokens (paper says 12k thinking + 2k solution
+# + 2k prompt = 16,384). We use seq_len=8192 here for smoke speed; bump for paper-faithful.
+max_completion_tokens = 6144
+
+[[orchestrator.train.env]]
+id = "math-env"
+name = "hendrycks-math"
+args = { dataset_name = "PrimeIntellect/Hendrycks-Math", dataset_subset = "default", math_verify_max_workers = 128, math_verify_timeout = 60 }
+
+[orchestrator.advantage]
+type = "default"
+# ScaleRL §3.4: per-group center, divide by batch-wide std.
+normalization = "batch"
+
+[orchestrator.buffer]
+easy_threshold = 1.0
+hard_threshold = 0.0
+# ScaleRL §3.6: permanently exclude prompts whose Welford-cumulative pass rate
+# crosses 0.9 (Polaris convention).
+no_positive_resampling = true
+no_positive_resampling_threshold = 0.9
+
+# ZeroAdvantageFilter is in upstream's default filter list — no need to specify.
+# Verify with `prime_rl.configs.orchestrator.OrchestratorConfig().filters`.
+
+[orchestrator.eval]
+interval = 50
+
+[orchestrator.eval.sampling]
+temperature = 0.6
+top_p = 0.95
+max_completion_tokens = 6144
+
+[[orchestrator.eval.env]]
+id = "math500"
+num_examples = 100
+rollouts_per_example = 4
+
+[trainer]
+
+[trainer.model]
+attn = "flash_attention_3"
+# ScaleRL §3.2 / MiniMax-M1 §3.2: LM-head matmul + grad accumulator in fp32.
+# Reduces train/inference logprob mismatch from ~0.9 to >0.99 correlation.
+fp32_lm_head = true
+# Chunk the LM head to fit Qwen3-8B's 152k vocab on B200 without OOM.
+fused_lm_head_token_chunk_size = 8192
+
+[trainer.model.ac]
+freq = 6
+
+[trainer.optim]
+# ScaleRL paper: AdamW eps=1e-15 (Wortsman et al. 2023; default 1e-8 underflows
+# at MiniMax-M1's reported gradient magnitudes) + constant lr 5e-7 + wd 0.01.
+lr = 5e-7
+eps = 1e-15
+weight_decay = 0.01
+
+[trainer.scheduler]
+type = "constant"
+
+[trainer.loss]
+# Canonical Minimax-CISPO (ScaleRL §3.2). eps_max ablation says insensitive
+# in {4, 5, 8}; pick 4.
+type = "cispo"
+eps_max = 4.0
+adv_tau = 1.0
+# Pair with prompt_average_loss — sequence weights pre-encode the per-prompt
+# normalization, so compute_loss does sum_i w_i * loss_i without an extra
+# token-count divide.
+loss_scale_mode = "sequence"
+
+[inference]
+
+[inference.parallel]
+dp = 4
+
+[inference.model]
+fp32_lm_head = true
