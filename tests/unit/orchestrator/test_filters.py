@@ -172,6 +172,112 @@ def test_repetition_varied_probs_no_trigger():
     assert result.detected is False
 
 
+# --- _logprobs_synthesized handling ---
+#
+# `pretokenize_rollout_trajectory` reconstructs token data with
+# `completion_logprobs = [0.0]*N` for the chat-template / string-client
+# / external-rollout-service path, and marks the step's tokens with
+# `_logprobs_synthesized=True`. Both filters must honor that flag and
+# refuse to emit signal — otherwise:
+#   - GibberishFilter reports false NEGATIVE on every synthesized rollout
+#     (0.0 is never < log(1/vocab_size) ≈ -11.93), letting actual
+#     gibberish through under enforce=False *and* enforce=True.
+#   - RepetitionFilter reports false POSITIVE on every long synthesized
+#     rollout (0.0 > log(0.99) ≈ -0.01 for every token), tripping after
+#     `window` consecutive tokens — under enforce=True, this drops every
+#     legitimate long synthesized rollout from training.
+
+
+def _make_synth_rollout(n_tokens: int, multi_step: bool = False):
+    """A rollout whose tokens dict carries the synthesized flag."""
+    if multi_step:
+        mid = n_tokens // 2
+        trajectory = [
+            {
+                "tokens": {
+                    "completion_ids": list(range(mid)),
+                    "completion_logprobs": [0.0] * mid,
+                    "completion_mask": [1] * mid,
+                    "_logprobs_synthesized": True,
+                }
+            },
+            {
+                "tokens": {
+                    "completion_ids": list(range(mid, n_tokens)),
+                    "completion_logprobs": [0.0] * (n_tokens - mid),
+                    "completion_mask": [1] * (n_tokens - mid),
+                    "_logprobs_synthesized": True,
+                }
+            },
+        ]
+    else:
+        trajectory = [
+            {
+                "tokens": {
+                    "completion_ids": list(range(n_tokens)),
+                    "completion_logprobs": [0.0] * n_tokens,
+                    "completion_mask": [1] * n_tokens,
+                    "_logprobs_synthesized": True,
+                }
+            }
+        ]
+    return {"trajectory": trajectory, "reward": 1.0, "stop_condition": None, "metrics": {}}
+
+
+def test_repetition_does_not_fire_on_synthesized_logprobs():
+    """0.0 > log(0.99) ≈ -0.01 for every token, so the un-skipped path
+    would trip after `window` tokens. The skip MUST suppress the trip."""
+    repetition_filter = _make_repetition_filter(window=3)
+    result = repetition_filter.check(_make_synth_rollout(n_tokens=10))
+    assert result.detected is False
+
+
+def test_repetition_resets_streak_at_synthesized_step():
+    """Mixed trajectory: real step that builds a streak, then a synthesized
+    step that must reset the streak (rather than continue counting on
+    bogus 0.0 values).
+    """
+    repetition_filter = _make_repetition_filter(window=3)
+    rollout = {
+        "trajectory": [
+            # Real step: 2 high-prob tokens (streak = 2, below window=3)
+            {
+                "tokens": {
+                    "completion_ids": [0, 1],
+                    "completion_logprobs": [-0.001, -0.001],
+                    "completion_mask": [1, 1],
+                }
+            },
+            # Synthesized step: would extend streak past window if not skipped
+            {
+                "tokens": {
+                    "completion_ids": [2, 3, 4],
+                    "completion_logprobs": [0.0, 0.0, 0.0],
+                    "completion_mask": [1, 1, 1],
+                    "_logprobs_synthesized": True,
+                }
+            },
+        ],
+        "reward": 1.0,
+        "stop_condition": None,
+        "metrics": {},
+    }
+    result = repetition_filter.check(rollout)
+    assert result.detected is False, "synthesized step must reset the streak rather than extend it"
+
+
+def test_gibberish_does_not_fire_on_synthesized_logprobs():
+    """The gibberish check `logprob < threshold` is `0.0 < ~-11.93` (False)
+    on synthesized logprobs — the underlying filter is a no-op rather than
+    a false-negative — but skipping is the right contract: the filter has
+    no real signal to report on a synthesized step, and reporting "not
+    detected" would be misleading-by-omission. Pin the contract.
+    """
+    gibberish_filter = _make_gibberish_filter()
+    result = gibberish_filter.check(_make_synth_rollout(n_tokens=10))
+    assert result.detected is False
+
+
 # --- setup_filter / setup_filters tests ---
 
 

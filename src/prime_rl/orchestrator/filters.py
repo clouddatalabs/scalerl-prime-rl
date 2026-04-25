@@ -52,6 +52,18 @@ class GibberishFilter:
             tokens = step["tokens"]
             if tokens is None:
                 continue
+            # Skip steps whose logprobs were synthesized to a placeholder
+            # (string-client / chat-template-reconstruct path,
+            # `pretokenize_rollout_trajectory` fills `[0.0]*N`). Those zeros
+            # never satisfy `logprob < log(1/vocab_size)` (≈ -11.93 for a
+            # 152K vocab), so the gibberish check would silently report
+            # "not detected" on every synthesized rollout — a false negative
+            # that lets actual gibberish into training. Honor the
+            # `_logprobs_synthesized` flag the trajectory pipeline already
+            # propagates instead of reporting bogus signal.
+            if tokens.get("_logprobs_synthesized", False):
+                global_idx += len(tokens["completion_ids"])
+                continue
             for token_id, logprob in zip(tokens["completion_ids"], tokens["completion_logprobs"]):
                 if token_id > self.token_id_threshold and logprob < self.logprob_threshold:
                     return FilterResult(detected=True, detection_index=global_idx)
@@ -82,6 +94,19 @@ class RepetitionFilter:
         for step in rollout["trajectory"]:
             tokens = step["tokens"]
             if tokens is None:
+                continue
+            # Skip steps whose logprobs were synthesized to a placeholder.
+            # The default `prob_threshold=0.99` ⇒ `logprob_threshold ≈ -0.01`,
+            # and synthesized logprobs are uniformly `0.0 > -0.01` for every
+            # token. After `window` (default 3000) consecutive tokens, every
+            # long synthesized rollout would be flagged as a repetition
+            # loop — silent false-positive, with `enforce=True` dropping
+            # legitimate long rollouts under SFT distillation paths. Honor
+            # the synthesized flag and reset the streak rather than emit
+            # bogus signal.
+            if tokens.get("_logprobs_synthesized", False):
+                consecutive = 0
+                global_idx += len(tokens["completion_logprobs"])
                 continue
             for logprob in tokens["completion_logprobs"]:
                 if logprob > self.logprob_threshold:
