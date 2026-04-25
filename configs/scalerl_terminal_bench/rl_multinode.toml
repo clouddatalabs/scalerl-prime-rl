@@ -93,8 +93,15 @@ weight_decay = 0.01
 eps = 1e-15
 
 [trainer.scheduler]
+# Mirror the single-node `rl.toml`: `decay_steps = 0` produces a
+# warmup→constant LR profile (LinearLR caps at end_factor once total_iters
+# is reached). Without this explicit zero, `LinearSchedulerConfig.decay_steps`
+# defaults to 10 — which means with `max_steps=500` the last 10 steps
+# (490-499) ramp from 5e-7 to ~5e-15. Bounded but a real recipe drift
+# the single-node config explicitly avoids.
 type = "linear"
 warmup_steps = 100
+decay_steps = 0
 
 [trainer.loss]
 type = "cispo"

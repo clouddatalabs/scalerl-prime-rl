@@ -1376,7 +1376,18 @@ class RLConfig(BaseConfig):
                         f"({inferred_dp_local}) when inference.enable_expert_parallel is enabled in multi-node deployment."
                     )
 
-                if not self.inference.enable_lora and self.inference.api_server_count == self.inference.parallel.dp:
+                # Mirror the non-EP branch's `model_fields_set` gate: silent
+                # overwrite of an explicitly-set `api_server_count` is a
+                # foot-gun. The previous heuristic
+                # (`api_server_count == self.inference.parallel.dp`) over-fires
+                # whenever an operator writes a value that happens to equal
+                # `dp` — which is the common case for non-EP layouts that
+                # operators copy-paste from. Auto-derive only on missing
+                # fields.
+                if (
+                    not self.inference.enable_lora
+                    and "api_server_count" not in self.inference.model_fields_set
+                ):
                     self.inference.api_server_count = inferred_dp_local
 
             # Auto-infer DP and api_server_count for standard multi-node inference.

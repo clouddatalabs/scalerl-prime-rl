@@ -186,19 +186,27 @@ class MultiCheckpointManager:
                 saved_ok = True
             except FileNotFoundError:
                 self.logger.warning(f"Run {idx} deleted during checkpoint, skipping")
-            except OSError as e:
-                # Narrow the catch to documented runtime failures — `OSError`
-                # covers ENOSPC mid-`torch.save`, EACCES on a read-only mount,
-                # NFS hiccups, FileExistsError on a re-save. Logical bugs
-                # (None-deref in `run_state` construction, a schema regression
-                # that makes a value non-picklable, a `KeyError`) used to be
-                # silently swallowed by the previous `except Exception` —
-                # `saved_ok=False` flowed through the all-reduce-MIN, master
-                # skipped `mark_stable`, and the run produced no checkpoints
-                # across many intervals while continuing to burn compute. Now
-                # such bugs raise loudly so they show up in the run log on the
-                # first occurrence.
-                self.logger.error(f"Error checkpointing run {idx}: {type(e).__name__}: {e}")
+            except Exception as e:
+                # Catch ALL exceptions — narrowing to `OSError` previously left
+                # logical bugs (None-deref in `run_state`, schema regression
+                # that makes a value non-picklable, KeyError, RuntimeError
+                # from torch.save) to escape the per-`idx` block, skipping
+                # the rank's `dist.barrier()` (line below) and
+                # `all_reduce(saved_ok)` collectives. Peers blocked on those
+                # collectives until NCCL watchdog fired (~10 min). Catching
+                # broad-Exception ensures every rank reaches the barrier,
+                # but log with full type+traceback so operators see logical
+                # bugs in the run log on the first occurrence — and the
+                # all-reduce-MIN converts "any rank failed" to a global
+                # `saved_ok=False` so `mark_stable` is skipped consistently
+                # rather than silently writing a STABLE marker over a torn
+                # save.
+                import traceback as _tb
+
+                self.logger.error(
+                    f"Error checkpointing run {idx}: {type(e).__name__}: {e}\n"
+                    f"{_tb.format_exc()}"
+                )
 
             # Single sync point — every rank reaches this regardless of
             # try-except outcome. Replaces the prior pair of barriers (one
