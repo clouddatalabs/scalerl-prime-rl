@@ -244,3 +244,36 @@ def test_rl_config_accepts_matched_fp32_lm_head():
     )
     assert config.trainer.model.fp32_lm_head is True
     assert config.inference.model.fp32_lm_head is True
+
+
+def test_rl_config_skips_fp32_lm_head_check_when_inference_omitted():
+    """RLConfig.inference may legitimately be None (externally managed inference pools or
+    num_infer_nodes=0 fake-data runs). The fp32 consistency check must skip rather than
+    AttributeError. See snowflake_poc_critique.md §2.
+    """
+    config = RLConfig.model_validate(
+        {
+            "trainer": {"model": {"fp32_lm_head": True}},
+            "orchestrator": {},
+            "inference": None,
+        }
+    )
+    assert config.inference is None
+    assert config.trainer.model.fp32_lm_head is True
+
+
+def test_rl_config_root_rejects_nccl_async_without_override():
+    """Setting NCCL + max_async_level > 1 at the RL root with no override on either
+    sub-config must still be rejected. The auto_setup_weight_broadcast validator
+    reassigns trainer/orchestrator weight_broadcast after their validators have run,
+    so without an explicit root-level guardrail this combo would slip through.
+    See snowflake_poc_critique.md §5.
+    """
+    with pytest.raises(ValidationError, match="NCCL weight broadcast with max_async_level"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "max_async_level": 8,
+                "weight_broadcast": {"type": "nccl"},
+            }
+        )
