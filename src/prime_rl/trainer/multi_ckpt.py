@@ -122,6 +122,18 @@ class MultiCheckpointManager:
 
             manager = self.managers[idx]
 
+            # Per-rank `saved_ok` flag — `mark_stable` (master-only STABLE
+            # touch) and `ckpt_steps.append` (per-rank list) must only run
+            # on ranks that actually finished their save. The barrier below
+            # is OUTSIDE the try-except so every rank reaches it regardless
+            # of success/failure: if it were inside the try (the original
+            # structure), a per-rank exception (ENOSPC, FS race, run-dir
+            # deleted mid-save) would skip the barrier on the failing rank
+            # while peers blocked at it forever — a hard NCCL deadlock that
+            # `clean_exit` cannot rescue because the exception is swallowed
+            # internally.
+            saved_ok = False
+
             # We have a very wide try-except because we dont want to crash the trainer over one run having issues
             try:
                 model_state_dict = {
@@ -152,14 +164,19 @@ class MultiCheckpointManager:
                         self.logger.error(
                             f"Broadcast folder not found for run {idx} at step {step}. Looking for it in {broadcast_src}"
                         )
-                dist.barrier()
-                manager.mark_stable(step)
-                manager.ckpt_steps.append(step)
+                saved_ok = True
             except FileNotFoundError:
                 self.logger.warning(f"Run {idx} deleted during checkpoint, skipping")
             except Exception as e:
                 self.logger.error(f"Error checkpointing run {idx}: {e}")
+
+            # Single sync point — every rank reaches this regardless of
+            # try-except outcome. Replaces the prior pair of barriers (one
+            # inside the try, one after) which deadlocked on per-rank failure.
             dist.barrier()
+            if saved_ok:
+                manager.mark_stable(step)
+                manager.ckpt_steps.append(step)
             # If the run is deleted, remove the run directory
             # This is avoid the creation of zombie runs when the directory is deleted while we are checkpointing which recreates the directory
             # Ideally we move this to discover but lets have here for now
