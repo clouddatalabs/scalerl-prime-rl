@@ -29,7 +29,7 @@ Namespaces are one honking great idea -- let's do more of those!
 
 ## Running code
 
-- **Always use uv**: run code with `uv run` or `uv run <command>`, never raw `python`.
+- **Always use uv**: run code with `uv run` or `uv run <command>`, never raw `python`. Exception: `scripts/scalerl_smoke.sbatch` deliberately invokes `.venv/bin/python` and `.venv/bin/rl` directly — `source .venv/bin/activate` doesn't always rewrite PATH cleanly under SLURM, so the sbatch hard-codes the venv binaries to keep node-local exec deterministic. Don't "fix" the sbatch to use `uv run`.
 - **Adding dependencies**: add to `pyproject.toml` and run `uv sync --extra all` to install and lock them. Do NOT use `uv sync --all-extras` on this fork: that enumerates every extra and pulls in `flash-attn-3`, whose wheel ships Hopper sm_90 kernels only and crashes on B200. The aggregate `[all]` extra in `pyproject.toml` deliberately excludes FA3.
 - **Git dependency pins**: when pinning git dependencies in `pyproject.toml`, always use a small (7-char) commit hash for the `rev` field.
 

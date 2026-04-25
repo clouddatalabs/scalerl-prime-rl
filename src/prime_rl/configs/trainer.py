@@ -773,7 +773,14 @@ class CISPOLossConfig(BaseModel):
     # gradient is 0, and training silently runs without any signal. CISPO has
     # no teacher / KL fallback path, so unlike DefaultLossConfig there's no
     # legitimate use of adv_tau=0.
-    adv_tau: Annotated[float, Field(gt=0, description="Advantage scale factor (matches DefaultLossConfig.adv_tau).")] = 1.0
+    # `le=10` cap mirrors `eps_max`'s 64 ceiling: above ~5 the gradient is
+    # dominated by `adv_tau * adv` rather than the IS clamp, which collapses
+    # CISPO toward a vanilla policy gradient with a constant scale and breaks
+    # the §3.2 ablation regime ScaleRL operates in.
+    adv_tau: Annotated[
+        float,
+        Field(gt=0, le=10.0, description="Advantage scale factor (matches DefaultLossConfig.adv_tau)."),
+    ] = 1.0
     loss_scale_mode: Annotated[
         LossScaleMode,
         Field(description="Use 'sequence' or 'none' with prompt-level averaging; 'token' for batch-token mean."),

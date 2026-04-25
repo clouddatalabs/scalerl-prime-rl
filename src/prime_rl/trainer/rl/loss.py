@@ -305,6 +305,21 @@ def compute_loss(
             f"sequence_loss_weights length {len(weights)} does not match "
             f"number of packed sequences {len(trainer_logprobs)}"
         )
+    # Reject non-trivial weights under token mode: the loop below would
+    # silently ignore them (only `sequence`/`none` consume the weights),
+    # producing a token-mean reduction the caller didn't ask for. The
+    # config-level cross-validator catches the canonical
+    # `prompt_average_loss=True + loss_scale_mode='token'` case at load
+    # time; this guard protects direct callers (custom losses, tests).
+    # Trivial weights `[1.0]*N` change nothing, so allow them through —
+    # that's the packer's neutral default for token-mode runs.
+    if weights is not None and loss_scale_mode == "token" and any(w != 1.0 for w in weights):
+        raise ValueError(
+            "compute_loss: non-trivial `sequence_loss_weights` were provided "
+            "with `loss_scale_mode='token'`. Token mode reduces by trainable "
+            "tokens and ignores per-sequence weights — they would be silently "
+            "dropped. Use loss_scale_mode='sequence' or 'none', or omit weights."
+        )
 
     for idx, (t_logp, i_logp, teach_logp, adv, mask) in enumerate(
         zip(trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask)

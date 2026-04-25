@@ -51,6 +51,16 @@ exec > >(tee "$OUTPUT_ROOT/${SLURM_JOB_ID:-local}.log") 2>&1
 
 cd "$REPO_ROOT"
 
+# Make `environments.terminal_bench` (and any future repo-local env package)
+# importable from the orchestrator's console-script entrypoint. The
+# `.venv/bin/orchestrator` shim is a Python script whose `sys.path[0]` is its
+# parent dir (`.venv/bin/`), NOT `$REPO_ROOT` — `cd "$REPO_ROOT"` does not
+# change that. Without this PYTHONPATH prepend, `vf.load_environment("environments.terminal_bench")`
+# fails with `ModuleNotFoundError: No module named 'environments'` on a fresh
+# clone. (Math smoke is unaffected because `math-env` resolves via the
+# `prime-rl[envs]` extra, which IS installed into site-packages.)
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
 # Force HF online before sourcing .env so a parent shell's HF_HUB_OFFLINE=1
 # can't suppress the override silently — but let .env opt back in if the
 # operator explicitly wants offline (HF_HUB_OFFLINE=1 in .env wins because we

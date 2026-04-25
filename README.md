@@ -90,9 +90,14 @@ Currently, you **need at least one NVIDIA GPU to use PRIME-RL**. If you don't al
 
 ### Quick Setup
 
-Set up PRIME-RL in a single command.
+> ⚠️ **DO NOT run the upstream Quick Setup command shown below on this fork.**
+> It clones plain upstream `PrimeIntellect-ai/prime-rl` (skipping every
+> ScaleRL ingredient added in this fork). Use `docs/SCALERL.md` Quickstart
+> step 1 (`git clone https://github.com/clouddatalabs/scalerl-prime-rl.git`)
+> instead. The block is preserved for reference / upstream parity only.
 
 ```bash
+# UPSTREAM-ONLY: do not use on this fork. See docs/SCALERL.md instead.
 curl -sSL https://raw.githubusercontent.com/PrimeIntellect-ai/prime-rl/main/scripts/install.sh | bash
 ```
 

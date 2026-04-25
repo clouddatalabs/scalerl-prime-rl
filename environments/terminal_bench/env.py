@@ -716,15 +716,16 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         if not state.get("tb_reward_computed"):
             try:
                 state["tb_reward"] = await self._compute_reward(state)
-            except (RuntimeError, ValueError, OSError) as e:
-                # Narrow the catch: docker exec, parse failures, and FS errors
-                # are the documented reachable failures of `_compute_reward`.
-                # A broader `except Exception` would silently turn a real bug
-                # in the rubric into reward=0, biasing the policy against
-                # tasks whose plumbing is flaky rather than tasks the model
-                # actually fails. Mark the state so downstream rubric/judge
-                # code can attach a setup-error tag (rather than feeding the
-                # 0.0 to training as a real all-failed group).
+            except (RuntimeError, ValueError, OSError, LookupError) as e:
+                # Narrow the catch: docker exec, parse failures, FS errors,
+                # and missing reward keys are the documented reachable
+                # failures of `_compute_reward`. A broader `except Exception`
+                # would silently turn a real bug in the rubric into reward=0,
+                # biasing the policy against tasks whose plumbing is flaky
+                # rather than tasks the model actually fails. Mark the
+                # state so downstream rubric/judge code can attach a
+                # setup-error tag (rather than feeding the 0.0 to training
+                # as a real all-failed group).
                 _logger.warning(
                     "terminal_bench_local: reward computation failed for container=%s: %s",
                     container,
@@ -798,16 +799,25 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         try:
             return float(raw)
         except ValueError:
+            # Strict access on the JSON path: a malformed reward.json
+            # without a `reward` key is a rubric bug, not a "model failed"
+            # signal. Returning 0.0 silently was biasing the policy
+            # against tasks with flaky rubric plumbing rather than tasks
+            # the model actually fails. Caller (`finalize_rollout`) sees
+            # the LookupError and tags `tb_reward_setup_error`.
             try:
-                return float(json.loads(raw).get("reward", 0.0))
-            except Exception as e:
+                payload = json.loads(raw)
+            except json.JSONDecodeError as e:
                 _logger.warning(
-                    "terminal_bench_local: could not parse reward %r in %s: %s",
+                    "terminal_bench_local: reward payload is neither float nor JSON: %r in %s: %s",
                     raw[:200],
                     container,
                     e,
                 )
-                return 0.0
+                raise ValueError(f"reward payload not parseable: {raw[:200]!r}") from e
+            if "reward" not in payload:
+                raise KeyError(f"reward.json missing 'reward' key in {container}: {raw[:200]!r}")
+            return float(payload["reward"])
 
 
 def _format_shell_result(exit_code: int, stdout: str, stderr: str) -> str:

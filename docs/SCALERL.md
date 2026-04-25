@@ -60,9 +60,9 @@ bash scripts/fix-flash-attn-cute.sh
 # 4. Pre-download the model so the first sbatch doesn't block on a multi-GB
 #    pull through whatever NAT your compute nodes have. Uses HF_HOME set above.
 #    The CLI is `hf` in modern huggingface_hub; older `huggingface-cli` was
-#    removed.
-source .venv/bin/activate  # `hf` ships in the venv
-hf download Qwen/Qwen3-8B
+#    removed. Invoke the venv binary directly so we don't clobber any
+#    pre-existing conda/pyenv activation in your shell.
+.venv/bin/hf download Qwen/Qwen3-8B
 
 # 5. Submit. Override the partition / log dir / config-to-launch if your
 #    cluster differs. OUTPUT_ROOT controls where the slurm stdout/stderr go;
@@ -70,10 +70,16 @@ hf download Qwen/Qwen3-8B
 #    (default: outputs/scalerl_math or outputs/scalerl_terminal_bench).
 #    SCALERL_CONFIG selects which config to launch — defaults to the math
 #    smoke; switch to the Snowflake-handoff TB config explicitly.
-sbatch -p <partition> --export=ALL,REPO_ROOT="$PWD",OUTPUT_ROOT="$PWD/slurm-logs",\
-SCALERL_CONFIG=configs/scalerl_terminal_bench/rl.toml \
-       scripts/scalerl_smoke.sbatch
-# (For the math smoke, omit SCALERL_CONFIG — it defaults to scalerl_math.)
+#
+#    NOTE: `export VAR=...; sbatch --export=ALL` is the safe pattern.
+#    `sbatch --export=ALL,KEY=VAL,KEY2=VAL2` with embedded commas inside
+#    a backslash-newline continuation tends to be miscopied or parsed
+#    differently by various shells.
+export REPO_ROOT="$PWD"
+export OUTPUT_ROOT="$PWD/slurm-logs"
+export SCALERL_CONFIG=configs/scalerl_terminal_bench/rl.toml
+sbatch -p <partition> --export=ALL scripts/scalerl_smoke.sbatch
+# (For the math smoke, unset SCALERL_CONFIG — sbatch defaults to scalerl_math.)
 
 # 6. Tail the log. Smoke configs train for 500 steps; first step is ~3 min
 #    cold, steady-state ~30-60s/step on 4xB200 with FA4 + compiled vLLM.
@@ -89,11 +95,13 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
 - For Terminal-Bench: a Docker daemon reachable from the rollout process
   (host or `/var/run/docker.sock` bind-mounted into the container).
 
-**Resume.** Resubmit the same sbatch with `--export=...,SCALERL_RESUME=1`:
+**Resume.** Resubmit the same sbatch with `SCALERL_RESUME=1`:
 ```bash
-sbatch -p <partition> --export=ALL,REPO_ROOT="$PWD",OUTPUT_ROOT="$PWD/slurm-logs",\
-SCALERL_CONFIG=configs/scalerl_math/rl.toml,SCALERL_RESUME=1 \
-       scripts/scalerl_smoke.sbatch
+export REPO_ROOT="$PWD"
+export OUTPUT_ROOT="$PWD/slurm-logs"
+export SCALERL_CONFIG=configs/scalerl_math/rl.toml
+export SCALERL_RESUME=1
+sbatch -p <partition> --export=ALL scripts/scalerl_smoke.sbatch
 ```
 Caveat: a run that crashes BEFORE the first checkpoint at `[ckpt] interval`
 (default 100 steps) leaves no checkpoint to resume from — the resume run
@@ -132,18 +140,31 @@ slurm log file (path printed by the sbatch). Uncomment `[wandb]` and set
 
 **Multi-node.** The shipped configs target a single 8-GPU node via
 `SingleNodeDeploymentConfig` (`num_train_gpus`/`num_infer_gpus`). To scale
-out, switch the `[deployment]` block to the multi-node schema:
+out, switch `[deployment]` to the multi-node schema AND add a `[slurm]`
+block — the validator (`src/prime_rl/configs/rl.py: validate_deployment`)
+hard-rejects multi-node without `[slurm]`:
 ```toml
 [deployment]
 type = "multi_node"
 num_train_nodes = 4
 num_infer_nodes = 4
 gpus_per_node = 8
+
+[slurm]
+partition = "<your-gpu-partition>"
+account = "<your-slurm-account>"   # omit if your cluster doesn't require it
+time_limit = "24:00:00"
 ```
-and submit with `#SBATCH --nodes=8` plus a `[slurm]` section configured for
-torchrun rendezvous (see `docs/slurm.md`). Multi-node NCCL weight broadcast
-still requires the experimental override (already on); on hardware without
-EFA set `SCALERL_NO_EFA=1` in your `.env` and switch
+For multi-node runs you do NOT use `sbatch scripts/scalerl_smoke.sbatch`
+(it's a single-node `--nodes=1` template). The multi-node entrypoint
+submits its own sbatch internally — invoke it directly as:
+```bash
+uv run rl @ configs/scalerl_terminal_bench/rl.toml
+```
+See `docs/slurm.md` for the full `[slurm]` knob list (rendezvous host/port,
+`exclude_nodes`, `qos`, etc.). Multi-node NCCL weight broadcast still
+requires the experimental override (already on in the shipped configs);
+on hardware without EFA set `SCALERL_NO_EFA=1` in your `.env` and switch
 `[weight_broadcast] type = "filesystem"` (then drop the override).
 
 ## Configs

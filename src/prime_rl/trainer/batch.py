@@ -10,6 +10,24 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
     """
     input_ids = training_example.prompt_ids + training_example.completion_ids
     loss_mask = training_example.prompt_mask + training_example.completion_mask
+    # Latent-bug guard: `inference_logprobs` for prompt tokens is hard-zeroed
+    # below. CISPO's importance ratio rho = exp(trainer_lp - inference_lp);
+    # if `prompt_mask` ever turns trainable on a prompt token, that token's
+    # IS ratio collapses (trainer_lp is real, inference_lp is 0 → rho ≈ 0)
+    # and the gradient on prompt-trainable tokens silently dies. Verifiers'
+    # bundled clients hard-code `prompt_mask = [0]*len(prompt_ids)`, but a
+    # custom client that flips this would silently corrupt training. Fail
+    # loudly here instead. If you legitimately need prompt-trainable
+    # tokens, plumb real prompt-side inference logprobs through and remove
+    # the guard.
+    if any(training_example.prompt_mask):
+        raise ValueError(
+            "prepare_sample: prompt-side trainable tokens (prompt_mask=True) "
+            "are not supported — `inference_logprobs` for prompt positions is "
+            "hard-zeroed below, which would silently zero CISPO's importance "
+            "ratio and kill the gradient on those tokens. Plumb real prompt "
+            "logprobs through and lift this guard before re-enabling."
+        )
     inference_logprobs = [0.0] * len(training_example.prompt_ids) + training_example.completion_logprobs
     advantages = [training_example.advantage] * len(input_ids)
     position_ids = list(range(len(input_ids)))

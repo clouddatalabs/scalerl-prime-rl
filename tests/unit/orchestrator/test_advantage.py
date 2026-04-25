@@ -349,14 +349,16 @@ def test_apply_batch_advantage_normalization_zeros_constant_advantages():
         assert r["filters"]["batch_norm_zero_std"] is True
 
 
-def test_apply_batch_advantage_normalization_no_filters_key_falls_back_safely():
-    """Direct callers (unit tests) may not pre-run `apply_filters`. The
-    function must still mark the rollout filtered without crashing."""
-    rollouts = [{"advantage": 1.0, "is_filtered": False}]
-    apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
-    assert rollouts[0]["is_filtered"] is True
-    assert isinstance(rollouts[0]["filters"], dict)
-    assert rollouts[0]["filters"]["batch_norm_too_few_survivors"] is True
+def test_apply_batch_advantage_normalization_requires_filters_key():
+    """`apply_filters` runs before this function in the orchestrator and
+    unconditionally sets `r["filters"]` on every rollout. Strict access:
+    a missing key signals the ordering invariant is broken — fail loudly
+    rather than silently materializing a dict the surrounding code didn't
+    intend to write.
+    """
+    rollouts = [{"advantage": 1.0, "is_filtered": False}]  # no `filters` key
+    with pytest.raises(KeyError, match="filters"):
+        apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
 
 
 def test_apply_batch_advantage_normalization_raises_on_nonfinite():

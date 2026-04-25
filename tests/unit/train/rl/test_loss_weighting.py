@@ -416,6 +416,42 @@ def test_compute_loss_rejects_mismatched_weight_count():
         )
 
 
+def test_compute_loss_rejects_nontrivial_weights_in_token_mode():
+    """Direct callers passing real weights with token-mode would silently
+    drop them. The orchestrator-level cross-validator catches the canonical
+    `prompt_average_loss=True + loss_scale_mode='token'` case at config
+    load; this guard pins the same contract for the public function.
+    """
+    trainer_logprobs = [torch.tensor([-1.0]), torch.tensor([-2.0])]
+    loss_fn = setup_loss_fn(SFTLossConfig(loss_scale_mode="token"))
+
+    # Trivial weights `[1.0]*N` are allowed (the packer's default neutral case).
+    loss, _ = compute_loss(
+        trainer_logprobs=trainer_logprobs,
+        inference_logprobs=[torch.zeros(1), torch.zeros(1)],
+        teacher_logprobs=None,
+        advantages=[torch.zeros(1), torch.zeros(1)],
+        loss_mask=[torch.tensor([True]), torch.tensor([True])],
+        loss_fn=loss_fn,
+        loss_scale=2,
+        sequence_loss_weights=[1.0, 1.0],
+    )
+    assert torch.is_tensor(loss)
+
+    # Non-trivial weights with token mode must raise.
+    with pytest.raises(ValueError, match="non-trivial"):
+        compute_loss(
+            trainer_logprobs=trainer_logprobs,
+            inference_logprobs=[torch.zeros(1), torch.zeros(1)],
+            teacher_logprobs=None,
+            advantages=[torch.zeros(1), torch.zeros(1)],
+            loss_mask=[torch.tensor([True]), torch.tensor([True])],
+            loss_fn=loss_fn,
+            loss_scale=2,
+            sequence_loss_weights=[0.5, 0.5],
+        )
+
+
 def test_cispo_loss_matches_paper_formula_uniform_ratio():
     """When ratio == 1 everywhere, CISPO reduces to -sum(adv * log pi) — clean reference case."""
     inputs = LossInputs(

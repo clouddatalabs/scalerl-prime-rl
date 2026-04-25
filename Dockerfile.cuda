@@ -52,13 +52,20 @@ COPY configs /app/configs
 COPY examples /app/examples
 COPY benchmarks/scripts /app/benchmarks/scripts
 
-COPY scripts/fix-flash-attn-cute.sh /app/scripts/fix-flash-attn-cute.sh
+COPY scripts/ /app/scripts/
+COPY environments/ /app/environments/
 
 RUN --mount=type=cache,target=/app/.cache/uv \
-    # Intentionally NOT including --extra flash-attn-3: the FA3 wheel ships
-    # Hopper sm_90 kernels only and crashes on B200 with "no kernel image is
-    # available." Matches the `[all]` extra in pyproject.toml.
-    uv sync --extra flash-attn --extra flash-attn-cute --extra envs --extra gpt-oss --group mamba-ssm --locked --no-dev \
+    # `--extra all` matches the host-install path documented in
+    # `docs/SCALERL.md` Quickstart step 1, so a user running the recipe
+    # inside the container gets the same package set as a user running
+    # via `uv sync --extra all` on the host. The aggregate `[all]` extra
+    # in pyproject.toml deliberately excludes flash-attn-3 (Hopper-only,
+    # crashes on B200) and includes flash-attn, flash-attn-cute, disagg,
+    # quack, and envs. Add `gpt-oss` separately because it's not in `[all]`
+    # — it's a dependency of the gpt-oss model family that some upstream
+    # configs reference.
+    uv sync --extra all --extra gpt-oss --group mamba-ssm --locked --no-dev \
     # FA2 (`flash-attn`) and FA4 (`flash-attn-cute`) both ship a `flash_attn/cute/`
     # sub-package. uv sync ordering is non-deterministic, so the FA2 stub can
     # silently shadow the real FA4 module. Run the repair inside the build so

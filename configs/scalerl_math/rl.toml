@@ -110,6 +110,12 @@ normalization = "batch"
 #     deviation from the paper's per-step variance filter.
 no_positive_resampling = true
 no_positive_resampling_threshold = 0.9
+# Math config has thousands of prompts, so single-group lucky-shot eviction
+# is a small fraction of the pool — but it's still a single observation
+# permanently removing a prompt. Default 1 (preserves upstream behavior)
+# would inflate variance on the early-step pass-rate; 4 mirrors the TB
+# config and matches "history of pass rates" in ScaleRL §3.6.
+no_positive_resampling_min_groups = 4
 
 # ZeroAdvantageFilter is in upstream's default filter list — no need to specify.
 # Verify with `prime_rl.configs.orchestrator.OrchestratorConfig().filters`.

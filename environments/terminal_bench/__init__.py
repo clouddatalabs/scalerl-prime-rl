@@ -6,6 +6,10 @@ the cloud-sandbox + frpc tunnel pipeline with plain ``docker run`` /
 ``docker exec`` against the host Docker daemon. That keeps training
 self-contained on a single node.
 
+Imported task fixtures under ``tasks/`` retain their upstream Apache-2.0
+license; see ``THIRD_PARTY_NOTICES.md`` in this directory for sources
+and per-task attribution.
+
 Preconditions:
 - A Docker daemon reachable from the rollout process. Typically that means
   ``/var/run/docker.sock`` is bind-mounted into the prime-rl container, or

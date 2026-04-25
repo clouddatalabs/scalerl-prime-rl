@@ -141,13 +141,14 @@ def apply_batch_advantage_normalization(
         non-degenerate rollouts and `mean()` reports the rate over
         affected rollouts only — silently double-counting in the wandb
         column.
+
+        Strict access on `r["filters"]`: `apply_filters` runs before this
+        function (orchestrator.py: filter → advantage normalize ordering)
+        and unconditionally sets the dict on every rollout. A missing key
+        means the ordering invariant is broken; fail loudly.
         """
         for r in rollouts:
-            existing = r.get("filters")
-            if not isinstance(existing, dict):
-                existing = {}
-                r["filters"] = existing
-            existing.setdefault(reason, False)
+            r["filters"].setdefault(reason, False)
         for r in rollouts_to_skip:
             r["is_filtered"] = True
             r["advantage"] = 0.0
