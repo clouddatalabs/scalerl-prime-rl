@@ -25,7 +25,6 @@ from prime_rl.configs.shared import (
 )
 from prime_rl.configs.trainer import (
     BenchConfig,
-    CustomLossConfig,
     FakeDataLoaderConfig,
     TokenizerConfig,
     TrainerConfig,
@@ -708,23 +707,20 @@ class RLConfig(BaseConfig):
                 "[trainer.loss] loss_scale_mode = \"sequence\" "
                 "(the CISPO default), or disable prompt_average_loss."
             )
-        if (
-            scale_mode in ("sequence", "none")
-            and not self.orchestrator.prompt_average_loss
-            and not isinstance(self.trainer.loss, CustomLossConfig)
-        ):
+        if scale_mode in ("sequence", "none") and not self.orchestrator.prompt_average_loss:
             raise ValueError(
                 f"trainer.loss.loss_scale_mode={scale_mode!r} relies on the "
                 "packer to encode per-sequence normalization in "
                 "`sequence_loss_weights`. With `[orchestrator] "
                 "prompt_average_loss = false` the weights stay at the neutral "
-                "1.0 default and the loss reduces to a raw global sum, scaling "
-                "the effective LR linearly with batch size — almost certainly "
-                "not what you want. Either set "
+                "1.0 default and the loss reduces to a raw global sum scaled "
+                "by dp_world_size — effective LR scales with batch size and "
+                "DP size, almost certainly not what you want. Either set "
                 "[orchestrator] prompt_average_loss = true (the ScaleRL "
                 "default), or set [trainer.loss] loss_scale_mode = \"token\" "
-                "(token-mean reduction). For CustomLossConfig that fills the "
-                "weights itself, this validator is intentionally relaxed."
+                "(token-mean reduction). CustomLossConfig that supplies its "
+                "own normalization is no exception — the trainer cannot tell "
+                "whether your custom loss does — so make the choice explicit."
             )
         return self
 

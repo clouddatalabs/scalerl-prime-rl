@@ -126,13 +126,24 @@ def apply_batch_advantage_normalization(
         is_filtered=True the trainer would still see them as trainable in
         `n_trainable > 0`, run a forward+backward with zero advantages
         (wasted compute), and pollute monitoring with the resulting
-        zero-grad / nonzero-importance-ratio step."""
+        zero-grad / nonzero-importance-ratio step.
+
+        `r["filters"]` is the per-filter detection dict that
+        `apply_filters` populates ({filter_name: bool}). We add a SEPARATE
+        key (`r["filters"][reason] = True`) — DO NOT replace the dict with a
+        list, which would silently break the downstream pandas DataFrame
+        construction in orchestrator.py that turns per-filter rows into
+        wandb columns.
+        """
         for r in rollouts_to_skip:
             r["is_filtered"] = True
             r["advantage"] = 0.0
-            existing = list(r.get("filters") or [])
-            if reason not in existing:
-                existing.append(reason)
+            existing = r.get("filters")
+            if not isinstance(existing, dict):
+                # Backward-compat for direct unit-test callers that don't
+                # pre-run apply_filters; production always sets a dict.
+                existing = {}
+            existing[reason] = True
             r["filters"] = existing
 
     if len(surviving) < 2:

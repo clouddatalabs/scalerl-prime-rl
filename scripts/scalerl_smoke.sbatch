@@ -166,9 +166,14 @@ fi
 
 # Config path. Set SCALERL_CONFIG to launch a different config (e.g. the
 # Snowflake handoff): `sbatch --export=ALL,SCALERL_CONFIG=configs/scalerl_terminal_bench/rl.toml ...`
+# Accepts both absolute paths and paths relative to $REPO_ROOT.
 SCALERL_CONFIG="${SCALERL_CONFIG:-configs/scalerl_math/rl.toml}"
-if [ ! -f "$REPO_ROOT/$SCALERL_CONFIG" ]; then
-    echo "ERROR: SCALERL_CONFIG=$SCALERL_CONFIG not found under $REPO_ROOT" >&2
+if [ -f "$SCALERL_CONFIG" ]; then
+    : # absolute or already-resolved path
+elif [ -f "$REPO_ROOT/$SCALERL_CONFIG" ]; then
+    SCALERL_CONFIG="$REPO_ROOT/$SCALERL_CONFIG"
+else
+    echo "ERROR: SCALERL_CONFIG=$SCALERL_CONFIG not found (tried as-is and under \$REPO_ROOT=$REPO_ROOT)" >&2
     exit 1
 fi
 

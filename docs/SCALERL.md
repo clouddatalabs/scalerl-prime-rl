@@ -59,7 +59,10 @@ bash scripts/fix-flash-attn-cute.sh
 
 # 4. Pre-download the model so the first sbatch doesn't block on a multi-GB
 #    pull through whatever NAT your compute nodes have. Uses HF_HOME set above.
-huggingface-cli download Qwen/Qwen3-8B
+#    The CLI is `hf` in modern huggingface_hub; older `huggingface-cli` was
+#    removed.
+source .venv/bin/activate  # `hf` ships in the venv
+hf download Qwen/Qwen3-8B
 
 # 5. Submit. Override the partition / log dir / config-to-launch if your
 #    cluster differs. OUTPUT_ROOT controls where the slurm stdout/stderr go;

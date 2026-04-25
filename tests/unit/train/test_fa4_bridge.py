@@ -18,6 +18,30 @@ from prime_rl.trainer.model import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _restore_fa4_registration():
+    """`_register_fa4_attention_interface` mutates
+    `transformers.AttentionInterface._global_mapping`. Snapshot the entry
+    before each test and restore on teardown so the registration doesn't
+    leak across tests in the same pytest worker (especially relevant for any
+    later test that asserts the registry is in its default state).
+    """
+    from transformers import AttentionInterface
+
+    mapping = getattr(AttentionInterface, "_global_mapping", None)
+    if mapping is None:
+        yield
+        return
+    prev = mapping.get("fa4", _MISSING := object())
+    try:
+        yield
+    finally:
+        if prev is _MISSING:
+            mapping.pop("fa4", None)
+        else:
+            mapping["fa4"] = prev
+
+
 def test_register_fa4_attention_interface_actually_registers_the_bridge():
     """Confirm `_register_fa4_attention_interface` makes "fa4" callable through
     the transformers registry — not the previous no-op stub."""

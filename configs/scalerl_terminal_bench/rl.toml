@@ -54,6 +54,12 @@ prompt_average_loss = true
 allow_nccl_async_level_override = true
 
 [orchestrator.train.sampling]
+# ScaleRL §A.3 pins the math run at 14k generation budget (12k thinking + 2k
+# solution) with seq_len=16384. Terminal-Bench tasks are typically much
+# shorter than chain-of-thought math (single shell session, instruction +
+# tool output), so 6144 is a deliberate choice that fits the env not a
+# smoke compromise. seq_len=8192 (top of file) covers prompt + completion
+# headroom. Bump both knobs if you switch this config to a math/CoT env.
 temperature = 1.0
 max_completion_tokens = 6144
 
@@ -105,9 +111,13 @@ top_p = 0.95
 max_completion_tokens = 6144
 
 # 10 held-out test tasks for eval — must be committed Harbor task dirs.
+# rollouts_per_example=16 matches ScaleRL §2.1 ("16 generations per prompt on
+# the held-out set"). The default of 1 would silently undercount task
+# variance.
 [[orchestrator.eval.env]]
 id = "environments.terminal_bench"
 name = "terminal-bench-test"
+rollouts_per_example = 16
 args = { tasks = [
   "log-summary",
   "npm-conflict-resolution",

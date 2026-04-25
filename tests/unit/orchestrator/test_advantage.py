@@ -311,17 +311,19 @@ def test_apply_batch_advantage_normalization_no_op_for_non_batch_modes():
 
 def test_apply_batch_advantage_normalization_handles_few_surviving():
     """Fewer than 2 surviving rollouts → std undefined; mark as filtered AND
-    zero advantage so the orchestrator's empty-batch retry kicks in instead
-    of the trainer running a wasted zero-gradient step (which also pollutes
-    monitoring metrics with non-zero IR / zero grad-norm readings)."""
+    zero advantage. Filters key is a dict (matches `apply_filters` schema)."""
     rollouts = [
-        {"advantage": 1.0, "is_filtered": False},
-        {"advantage": -1.0, "is_filtered": True},
+        {"advantage": 1.0, "is_filtered": False, "filters": {"gibberish": False, "zero_advantage": False}},
+        {"advantage": -1.0, "is_filtered": True, "filters": {"gibberish": False, "zero_advantage": True}},
     ]
     apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
     assert rollouts[0]["advantage"] == 0.0
     assert rollouts[0]["is_filtered"] is True
-    assert "batch_norm_too_few_survivors" in rollouts[0]["filters"]
+    # CRITICAL: filters must remain a DICT (apply_filters sets it as one;
+    # downstream pandas DataFrame in orchestrator.py reads dict keys as columns).
+    assert isinstance(rollouts[0]["filters"], dict)
+    assert rollouts[0]["filters"]["batch_norm_too_few_survivors"] is True
+    assert rollouts[0]["filters"]["gibberish"] is False  # pre-existing keys preserved
     assert rollouts[1]["advantage"] == -1.0  # already-filtered rollouts untouched
 
 
@@ -329,15 +331,26 @@ def test_apply_batch_advantage_normalization_zeros_constant_advantages():
     """All surviving advantages identical (std == 0) → mark filtered and zero
     out so the orchestrator retries instead of running 1/eps explosions."""
     rollouts = [
-        {"advantage": 0.5, "is_filtered": False},
-        {"advantage": 0.5, "is_filtered": False},
-        {"advantage": 0.5, "is_filtered": False},
+        {"advantage": 0.5, "is_filtered": False, "filters": {"zero_advantage": False}},
+        {"advantage": 0.5, "is_filtered": False, "filters": {"zero_advantage": False}},
+        {"advantage": 0.5, "is_filtered": False, "filters": {"zero_advantage": False}},
     ]
     apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
     for r in rollouts:
         assert r["advantage"] == 0.0
         assert r["is_filtered"] is True
-        assert "batch_norm_zero_std" in r["filters"]
+        assert isinstance(r["filters"], dict)
+        assert r["filters"]["batch_norm_zero_std"] is True
+
+
+def test_apply_batch_advantage_normalization_no_filters_key_falls_back_safely():
+    """Direct callers (unit tests) may not pre-run `apply_filters`. The
+    function must still mark the rollout filtered without crashing."""
+    rollouts = [{"advantage": 1.0, "is_filtered": False}]
+    apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
+    assert rollouts[0]["is_filtered"] is True
+    assert isinstance(rollouts[0]["filters"], dict)
+    assert rollouts[0]["filters"]["batch_norm_too_few_survivors"] is True
 
 
 def test_apply_batch_advantage_normalization_raises_on_nonfinite():

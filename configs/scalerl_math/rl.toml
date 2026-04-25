@@ -54,8 +54,11 @@ keep_interval = 500
 type = "nccl"
 
 [orchestrator]
-# ScaleRL paper uses 48 prompts × 16 rollouts = 768 completions/step. We use
-# slightly smaller for the smoke run; bump for real training.
+# ScaleRL paper uses 48 prompts × 16 rollouts = 768 completions/step. The math
+# config is the SMOKE run — deliberately smaller (256/16 = 16 prompts/step,
+# 1/3 of the paper) so a single 8-GPU node finishes a step in tens of seconds.
+# For paper-faithful runs use configs/scalerl_terminal_bench/rl.toml or bump
+# to 768 here.
 batch_size = 256
 rollouts_per_example = 16
 strict_async_level = false

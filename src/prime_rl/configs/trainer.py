@@ -549,7 +549,7 @@ class AdamWConfig(BaseOptimizerConfig):
     # ScaleRL §3.1 / Wortsman et al. 2023 / MiniMax-M1: lower epsilon avoids
     # gradient underflow at the gradient magnitudes typical of large models.
     # Default torch is 1e-8; the ScaleRL paper sets 1e-15.
-    eps: Annotated[float, Field(ge=0, description="Adam epsilon (denominator stability). ScaleRL uses 1e-15.")] = 1e-8
+    eps: Annotated[float, Field(gt=0, description="Adam epsilon (denominator stability). ScaleRL uses 1e-15.")] = 1e-8
 
 
 class MuonConfig(BaseOptimizerConfig):
