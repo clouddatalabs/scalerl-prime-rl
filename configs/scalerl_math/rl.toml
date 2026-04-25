@@ -30,9 +30,11 @@ num_infer_gpus = 4
 [model]
 name = "Qwen/Qwen3-8B"
 
-[wandb]
-project = "scalerl-prime-rl"
-name = "scalerl-math-smoke-qwen3-8b"
+# Wandb disabled for the smoke run — enable by uncommenting below and
+# running `wandb login` / setting WANDB_API_KEY in .env first.
+# [wandb]
+# project = "scalerl-prime-rl"
+# name = "scalerl-math-smoke-qwen3-8b"
 
 [ckpt]
 interval = 100
