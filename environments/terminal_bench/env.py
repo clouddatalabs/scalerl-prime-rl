@@ -70,7 +70,7 @@ _logger = logging.getLogger(__name__)
 
 # Hard cap on shell / test output fed back to the model. Qwen3-8B tokenizes
 # ~3-4 chars per token; 8KiB keeps a single tool response under ~2.5k tokens
-# which fits inside seq_len=10240 with plenty of headroom for reasoning.
+# which fits inside the shipped seq_len=8192 with headroom for prompt + reasoning.
 _MAX_OUTPUT_CHARS = 8192
 
 # Default timeout for each shell tool call. hello-world's commands are
