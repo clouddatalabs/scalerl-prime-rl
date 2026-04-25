@@ -140,10 +140,10 @@ num_train_nodes = 4
 num_infer_nodes = 4
 gpus_per_node = 8
 ```
-and submit with `#SBATCH --nodes=8` plus a `[slurm]` section if you use
-baker/torchrun rendezvous (see `docs/slurm.md`). Multi-node NCCL
-weight broadcast still requires the experimental override (already on); on
-hardware without EFA set `SCALERL_NO_EFA=1` in your `.env` and switch
+and submit with `#SBATCH --nodes=8` plus a `[slurm]` section configured for
+torchrun rendezvous (see `docs/slurm.md`). Multi-node NCCL weight broadcast
+still requires the experimental override (already on); on hardware without
+EFA set `SCALERL_NO_EFA=1` in your `.env` and switch
 `[weight_broadcast] type = "filesystem"` (then drop the override).
 
 ## Configs

@@ -260,8 +260,8 @@ def test_default_advantage_normalization_group_divides_by_per_group_std():
 def test_default_advantage_normalization_batch_emits_baseline_only():
     """`normalization='batch'` is intentionally a no-op inside `default_advantage_fn`
     — the batch-std step is deferred to `apply_batch_advantage_normalization`
-    after rollout filtering (snowflake_poc_critique.md §1; ScaleRL §3.4
-    requires the std to reflect surviving rollouts only). The function returns
+    after rollout filtering (ScaleRL §3.4 requires the std to reflect surviving
+    rollouts only). The function returns
     baseline-subtracted advantages, identical to `normalization='none'` for the
     pre-filter call.
     """

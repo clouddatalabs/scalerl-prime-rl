@@ -106,10 +106,12 @@ class ZeroAdvantageFilter:
     enforce: bool = True
 
     def check(self, rollout: vf.RolloutOutput) -> FilterResult:
-        advantage = rollout.get("advantage")
-        if advantage is not None and advantage == 0.0:
-            return FilterResult(detected=True)
-        return FilterResult(detected=False)
+        # Strict access: `compute_advantages` runs before filters and is required
+        # to set this field on every rollout. A missing key here means the
+        # ordering invariant is broken — fail loudly instead of silently keeping
+        # a no-advantage rollout in training.
+        advantage = rollout["advantage"]
+        return FilterResult(detected=advantage == 0.0)
 
 
 def setup_filter(config: FilterConfig, vocab_size: int) -> RolloutFilter:

@@ -1,9 +1,12 @@
 import math
 
+import pytest
+
 from prime_rl.configs.orchestrator import GibberishFilterConfig, RepetitionFilterConfig
 from prime_rl.orchestrator.filters import (
     GibberishFilter,
     RepetitionFilter,
+    ZeroAdvantageFilter,
     apply_filters,
     setup_filter,
     setup_filters,
@@ -425,3 +428,38 @@ def test_apply_filters_monitor_only_mixed_batch():
     assert dirty["reward"] == 1.0
     assert clean["is_filtered"] is False
     assert dirty["is_filtered"] is False
+
+
+# ZeroAdvantageFilter — pin the contract that `compute_advantages` runs first
+# and every rollout has the `advantage` field set before filters see it.
+
+
+def test_zero_advantage_filter_flags_zero():
+    f = ZeroAdvantageFilter(name="zero_advantage", enforce=True)
+    assert f.check({"advantage": 0.0}).detected is True
+
+
+def test_zero_advantage_filter_does_not_flag_nonzero():
+    f = ZeroAdvantageFilter(name="zero_advantage", enforce=True)
+    assert f.check({"advantage": 1.0}).detected is False
+    assert f.check({"advantage": -1.0}).detected is False
+    assert f.check({"advantage": 1e-12}).detected is False
+
+
+def test_zero_advantage_filter_raises_on_missing_advantage():
+    """Strict access: a missing `advantage` key means the orchestrator's
+    {compute_advantages → filter} ordering is broken. Fail loudly rather
+    than silently keeping a no-advantage rollout in training.
+    """
+    f = ZeroAdvantageFilter(name="zero_advantage", enforce=True)
+    with pytest.raises(KeyError):
+        f.check({})
+
+
+def test_zero_advantage_filter_propagates_nan():
+    """NaN advantages compare unequal to 0.0 and pass the zero-check, but
+    a NaN-tainted rollout is a separate (harder) class of bug — pin
+    behavior to surface a regression.
+    """
+    f = ZeroAdvantageFilter(name="zero_advantage", enforce=True)
+    assert f.check({"advantage": math.nan}).detected is False

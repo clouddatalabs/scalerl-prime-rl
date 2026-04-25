@@ -201,7 +201,7 @@ def test_rl_config_propagates_nccl_async_override_from_orchestrator_to_trainer()
     """Setting the override on the orchestrator side at the RL level propagates to the trainer.
 
     Without this propagation, the RLConfig-level max_async_level=8 + NCCL combo would still
-    be rejected by TrainerConfig's own validator. See snowflake_poc_critique.md §1.
+    be rejected by TrainerConfig's own validator.
     """
     config = RLConfig.model_validate(
         {
@@ -221,7 +221,7 @@ def test_rl_config_rejects_mismatched_fp32_lm_head():
     """Trainer fp32=True + inference fp32=False raises at config load.
 
     Mismatch defeats the train/inference logprob parity that fp32_lm_head exists for
-    (ScaleRL §3.2). See snowflake_poc_critique.md §3.
+    (ScaleRL §3.2).
     """
     with pytest.raises(ValidationError, match="fp32_lm_head must match"):
         RLConfig.model_validate(
@@ -249,17 +249,44 @@ def test_rl_config_accepts_matched_fp32_lm_head():
 def test_rl_config_skips_fp32_lm_head_check_when_inference_omitted():
     """RLConfig.inference may legitimately be None (externally managed inference pools or
     num_infer_nodes=0 fake-data runs). The fp32 consistency check must skip rather than
-    AttributeError. See snowflake_poc_critique.md §2.
+    AttributeError, but it MUST also warn loudly when fp32_lm_head=True since
+    setup_vllm_env does not run on an externally launched vLLM.
     """
-    config = RLConfig.model_validate(
-        {
-            "trainer": {"model": {"fp32_lm_head": True}},
-            "orchestrator": {},
-            "inference": None,
-        }
-    )
-    assert config.inference is None
-    assert config.trainer.model.fp32_lm_head is True
+    import warnings
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        config = RLConfig.model_validate(
+            {
+                "trainer": {"model": {"fp32_lm_head": True}},
+                "orchestrator": {},
+                "inference": None,
+            }
+        )
+        assert config.inference is None
+        assert config.trainer.model.fp32_lm_head is True
+        # Warn loudly: external vLLM won't pick up fp32_lm_head from the trainer config.
+        msgs = [str(w.message) for w in captured]
+        assert any("PRIME_RL_VLLM_FP32_LM_HEAD" in m for m in msgs), msgs
+
+
+def test_rl_config_no_warning_when_inference_omitted_and_fp32_off():
+    """The mismatch warning must not fire when trainer.fp32_lm_head=False — there
+    is no parity hazard if neither side wants the fp32 path.
+    """
+    import warnings
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        RLConfig.model_validate(
+            {
+                "trainer": {"model": {"fp32_lm_head": False}},
+                "orchestrator": {},
+                "inference": None,
+            }
+        )
+        msgs = [str(w.message) for w in captured]
+        assert not any("PRIME_RL_VLLM_FP32_LM_HEAD" in m for m in msgs), msgs
 
 
 def test_rl_config_rejects_prompt_average_loss_with_token_scale_mode():
@@ -380,6 +407,49 @@ def test_sgd_config_rejects_eps_typo():
         SGDConfig(eps=1e-15)  # SGD has no eps field
     with pytest.raises(ValidationError):
         SGDConfig(nestrov=True)  # typo of `nesterov`
+
+
+# `extra=forbid` on every ScaleRL-relevant Pydantic schema. A typo in any of
+# these silently kept the default before; for the canonical paper knobs
+# (`eps_max`, `adv_tau`, `loss_scale_mode`, scheduler `warmup_steps`) that
+# was a paper-fidelity regression invisible to the test suite.
+
+
+@pytest.mark.parametrize(
+    "config_cls_path,base_payload,typo_field",
+    [
+        ("prime_rl.configs.trainer:CISPOLossConfig", dict(type="cispo"), "epsmax"),
+        ("prime_rl.configs.trainer:CISPOLossConfig", dict(type="cispo"), "adv_taul"),
+        ("prime_rl.configs.trainer:DefaultLossConfig", dict(type="default"), "klau"),
+        ("prime_rl.configs.trainer:SFTLossConfig", dict(type="sft"), "looscale"),
+        ("prime_rl.configs.trainer:CustomLossConfig", dict(type="custom", import_path="x.y"), "imp_path"),
+        ("prime_rl.configs.trainer:ConstantSchedulerConfig", dict(type="constant"), "warmup"),
+        ("prime_rl.configs.trainer:LinearSchedulerConfig", dict(type="linear"), "warmpu_steps"),
+        ("prime_rl.configs.trainer:CosineSchedulerConfig", dict(type="cosine"), "warm_steps"),
+        ("prime_rl.configs.trainer:FileSystemWeightBroadcastConfig", dict(type="filesystem"), "savesharded"),
+        ("prime_rl.configs.trainer:NCCLWeightBroadcastConfig", dict(type="nccl"), "hosts"),
+        ("prime_rl.configs.orchestrator:CustomAdvantageConfig", dict(type="custom", import_path="x.y"), "imp_path"),
+        ("prime_rl.configs.orchestrator:FileSystemWeightBroadcastConfig", dict(type="filesystem"), "savesharded"),
+        ("prime_rl.configs.orchestrator:NCCLWeightBroadcastConfig", dict(type="nccl"), "hosts"),
+    ],
+    ids=lambda x: str(x) if not isinstance(x, dict) else "",
+)
+def test_scalerl_schemas_reject_unknown_fields(config_cls_path, base_payload, typo_field):
+    """Each ScaleRL-relevant schema must reject unknown fields via `extra="forbid"`.
+
+    A silent default for `epsmax`/`adv_tau`/`loss_scale_mode`/`warmup_steps` is
+    a paper-fidelity regression invisible to functional tests — pin the
+    typo-rejection contract here.
+    """
+    import importlib
+
+    module_name, class_name = config_cls_path.split(":")
+    module = importlib.import_module(module_name)
+    cls = getattr(module, class_name)
+
+    cls.model_validate(base_payload)
+    with pytest.raises(ValidationError):
+        cls.model_validate({**base_payload, typo_field: 99.0})
 
 
 def test_adamw_eps_round_trips_into_torch_optim():

@@ -1,5 +1,11 @@
 name: GPU Tests
 
+# Upstream-only: requires the `vm` and `4xa6000` self-hosted runners which
+# don't exist in clouddatalabs/scalerl-prime-rl. Both jobs are gated on the
+# upstream repo slug; on this fork they're skipped (would otherwise queue
+# forever or fail-fast with "no runners available"). To re-enable for a
+# different fork, change the `if:` line below to your repo slug.
+
 on:
   push:
     branches: [main]
@@ -13,12 +19,12 @@ concurrency:
 jobs:
   unit-tests:
     name: Unit tests
+    if: github.repository == 'PrimeIntellect-ai/prime-rl' && (github.event_name == 'push' || github.event.pull_request.draft == false)
     runs-on: vm
     container:
       image: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
       options: --gpus all
     timeout-minutes: 45
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - name: Install Git
         run: |
@@ -53,12 +59,12 @@ jobs:
 
   integration-tests:
     name: Integration tests (${{ matrix.test }})
+    if: github.repository == 'PrimeIntellect-ai/prime-rl' && (github.event_name == 'push' || github.event.pull_request.draft == false)
     runs-on: ${{ matrix.runner }}
     container:
       image: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
       options: --gpus all
     timeout-minutes: 60
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:

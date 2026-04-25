@@ -118,7 +118,14 @@ class _EnvBuffer:
         stats["num_groups"] = n
         stats["pass_rate"] = p
 
-        if p >= self.config.no_positive_resampling_threshold:
+        # Require enough confirming groups before permanent eviction. With
+        # `min_groups=1` (default) this preserves upstream behavior; with a
+        # higher floor (recommended for small pools) one lucky high-reward
+        # group can't permanently evict an otherwise-trainable prompt.
+        if (
+            n >= self.config.no_positive_resampling_min_groups
+            and p >= self.config.no_positive_resampling_threshold
+        ):
             self.excluded_examples[example_id] = self.examples.pop(example_id)
             self.num_excluded_per_step += 1
             return True

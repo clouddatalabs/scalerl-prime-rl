@@ -107,6 +107,11 @@ normalization = "batch"
 # See configs/scalerl_math/rl.toml for the full rationale.
 no_positive_resampling = true
 no_positive_resampling_threshold = 0.9
+# 18 train prompts; require 4 confirming rollout groups before permanent
+# eviction so a single lucky 14/16-correct group on first visit can't take
+# 5.6% of the pool out at once. Default of 1 would preserve prior behavior
+# but is too aggressive for this small a pool.
+no_positive_resampling_min_groups = 4
 
 [orchestrator.eval]
 interval = 50

@@ -28,9 +28,9 @@ class TrainingSample(msgspec.Struct, array_like=True, gc=False, omit_defaults=Tr
 
     # Stable per-prompt id used by the trainer to compute prompt-level loss weights when
     # OrchestratorConfig.prompt_average_loss is True. `example_id` is only unique within
-    # an env, so the trainer pairs it with `env_name` to disambiguate cross-env batches
-    # (snowflake_poc_critique.md §3). Fields appended at the END so msgspec
-    # array_like=True backward-compat with old serialized batches survives.
+    # an env, so the trainer pairs it with `env_name` to disambiguate cross-env batches.
+    # Fields appended at the END so msgspec array_like=True backward-compat with old
+    # serialized batches survives.
     example_id: str | None = None
     prompt_average_loss: bool = False
     env_name: str | None = None

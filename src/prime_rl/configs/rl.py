@@ -655,10 +655,25 @@ class RLConfig(BaseConfig):
         correlation > 0.99. Setting it on one side without the other defeats the purpose
         AND injects silent bias into any IS-based loss. Fail loud at config load.
 
-        Skipped when [inference] is omitted (e.g. externally managed inference pools or
-        num_infer_nodes=0 fake-data runs); there is nothing to make consistent with.
+        When [inference] is omitted (externally managed inference pools or
+        num_infer_nodes=0 fake-data runs) we cannot validate the inference side.
+        If the trainer wants fp32 LM-head, warn loudly: `setup_vllm_env` does not
+        run on an externally launched vLLM, so the operator must export
+        `PRIME_RL_VLLM_FP32_LM_HEAD=1` themselves before starting the server,
+        or vLLM will silently run the LM-head matmul in bf16 and break IS parity.
         """
         if self.inference is None:
+            if self.trainer.model.fp32_lm_head:
+                import warnings
+
+                warnings.warn(
+                    "trainer.model.fp32_lm_head=True with [inference] omitted: "
+                    "the FP32 LM-head env-var bridge in prime_rl.inference.server "
+                    "does NOT run on externally launched vLLM. Export "
+                    "PRIME_RL_VLLM_FP32_LM_HEAD=1 in the vLLM environment yourself, "
+                    "or train/inference logprob parity will break (ScaleRL §3.2).",
+                    stacklevel=2,
+                )
             return self
         trainer_fp32 = self.trainer.model.fp32_lm_head
         inference_fp32 = self.inference.model.fp32_lm_head

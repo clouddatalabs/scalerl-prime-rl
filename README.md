@@ -119,13 +119,18 @@ source $HOME/.local/bin/env
 3. Install dependencies from the lock file
 
 ```bash
-uv sync --all-extras
+uv sync --extra all
 ```
+
+> ⚠️ Use `--extra all` (the aggregate `[all]` extra in `pyproject.toml`), NOT
+> `--all-extras`. The latter enumerates every extra by name and pulls in
+> `flash-attn-3`, whose published wheel ships Hopper sm_90 kernels only and
+> crashes on B200. The fork's `[all]` extra deliberately excludes FA3.
 
 3.1. Optional: Install Flash Attention 3 (on Hopper GPUs only, for flash_attention_3 attention backend)
 
 > *NOTE*: This step will take a while, as it builds the Flash Attention 3 extension from source, as it has no wheels prebuilt.
-> *NOTE*: After this step, you can't run `uv sync --all-extras` or `uv run` as it will uninstall the package, you can avoid it by running `uv sync --inexact` or `uv run --no-sync`
+> *NOTE*: After this step, you can't run `uv sync --extra all` or `uv run` as it will uninstall the package, you can avoid it by running `uv sync --inexact` or `uv run --no-sync`
 
 ```bash
 uv pip install "flash-attn-3 @ git+https://github.com/Dao-AILab/flash-attention.git@main#subdirectory=hopper" --no-build-isolation
@@ -175,12 +180,6 @@ uv run inference @ configs/debug/infer.toml
 
 ```bash
 uv run orchestrator @ configs/debug/orch.toml
-```
-
-5.2. Check that you can run evals against the inference server
-
-```bash
-uv run eval @ configs/debug/eval.toml
 ```
 
 </details>

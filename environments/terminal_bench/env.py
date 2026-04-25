@@ -139,19 +139,32 @@ class _DockerClient:
         # open ``/var/run/docker.sock`` (either because it's root, or
         # because the launcher passed ``--group-add <docker-gid>``
         # so the container user inherits host docker-group
-        # membership). Fall back to ``sudo -n`` only for dev hosts
-        # where the user is unprivileged and sudo is passwordless --
-        # the prime-rl image doesn't ship ``sudo``, so getting this
-        # wrong there would crash every rollout. We check the socket
-        # directly rather than probing with ``docker info`` to avoid
-        # ``asyncio.run`` nesting issues (this __init__ is called
-        # from inside the verifiers event loop).
+        # membership). Fall back to ``sudo -n`` only on dev hosts
+        # where the user is unprivileged AND ``sudo`` is actually on
+        # PATH and passwordless. The prime-rl image doesn't ship
+        # ``sudo``, so falling through to a ``["sudo", "-n", "docker", ...]``
+        # invocation there would crash every rollout with an opaque
+        # ``FileNotFoundError: 'sudo'`` instead of a clear "mount
+        # /var/run/docker.sock with --group-add docker" message.
+        # We check the socket directly rather than probing with
+        # ``docker info`` to avoid ``asyncio.run`` nesting issues
+        # (this __init__ is called from inside the verifiers loop).
         if sudo is None:
             sock = "/var/run/docker.sock"
             if os.access(sock, os.R_OK | os.W_OK):
                 sudo = False
-            else:
+            elif shutil.which("sudo") is not None:
                 sudo = True
+            else:
+                # Socket unreachable AND no sudo binary — surface the
+                # actionable error here, not on every rollout.
+                raise RuntimeError(
+                    "_DockerClient cannot reach /var/run/docker.sock and 'sudo' "
+                    "is not on PATH (this is the prime-rl container's default). "
+                    "Either bind-mount /var/run/docker.sock with '--group-add "
+                    "<host-docker-gid>' on the launcher, or run from a host shell "
+                    "where the user has docker-group membership."
+                )
         self._use_sudo = sudo
 
     def _prefix(self) -> list[str]:
@@ -703,13 +716,22 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         if not state.get("tb_reward_computed"):
             try:
                 state["tb_reward"] = await self._compute_reward(state)
-            except Exception as e:
+            except (RuntimeError, ValueError, OSError) as e:
+                # Narrow the catch: docker exec, parse failures, and FS errors
+                # are the documented reachable failures of `_compute_reward`.
+                # A broader `except Exception` would silently turn a real bug
+                # in the rubric into reward=0, biasing the policy against
+                # tasks whose plumbing is flaky rather than tasks the model
+                # actually fails. Mark the state so downstream rubric/judge
+                # code can attach a setup-error tag (rather than feeding the
+                # 0.0 to training as a real all-failed group).
                 _logger.warning(
                     "terminal_bench_local: reward computation failed for container=%s: %s",
                     container,
                     e,
                 )
                 state["tb_reward"] = 0.0
+                state["tb_reward_setup_error"] = repr(e)
             finally:
                 state["tb_reward_computed"] = True
         await self._docker.remove_force(container)
@@ -898,9 +920,16 @@ def load_environment(
     """
     root = Path(task_root)
     if not root.is_absolute():
-        # Resolve relative to the prime-rl repo root so the config file
-        # can stay portable across CPU/GPU/local launchers.
-        repo_root = Path(os.environ.get("RESEARCH_ROOT", Path.cwd())).resolve()
+        # Anchor relative paths to this env module's repo root, NOT the
+        # caller's cwd. Prior code fell back to `Path.cwd()` if RESEARCH_ROOT
+        # was unset (it never is) — that worked only because the smoke
+        # sbatch happens to `cd $REPO_ROOT` first. A caller from another
+        # directory (e.g. baker eval --rescore, ad-hoc unit invocation,
+        # resume from a different cwd) would otherwise silently pick up a
+        # sibling repo's tasks/ dir or FileNotFoundError on cwd.
+        # `Path(__file__).parent` is `environments/terminal_bench/`; two
+        # parents up is the repo root.
+        repo_root = Path(__file__).resolve().parent.parent.parent
         root = (repo_root / root).resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"Harbor task root not found: {root}")

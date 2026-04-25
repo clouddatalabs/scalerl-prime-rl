@@ -209,8 +209,8 @@ def test_fa4_attention_forward_runs_on_gpu_with_packed_position_ids():
 @pytest.mark.gpu
 def test_fa4_attention_forward_backward_yields_finite_grads():
     """Backward through `_fa4_attention_forward` must produce finite gradients
-    on Q, K, V. snowflake_poc_critique.md flagged that the GPU forward test
-    didn't cover the autograd path the trainer actually exercises.
+    on Q, K, V. The GPU forward test alone does not cover the autograd path
+    the trainer actually exercises.
     """
     if not torch.cuda.is_available():
         pytest.skip("CUDA required for FA4 backward path")

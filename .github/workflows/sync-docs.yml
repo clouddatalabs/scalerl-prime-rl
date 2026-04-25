@@ -10,6 +10,10 @@ on:
 
 jobs:
   trigger-docs-sync:
+    # Upstream-only: dispatches to PrimeIntellect-ai/public-docs and requires
+    # the DOCS_SYNC_PAT secret. Skip on forks; re-enable by changing the `if:`
+    # line below to your repo slug.
+    if: github.repository == 'PrimeIntellect-ai/prime-rl'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

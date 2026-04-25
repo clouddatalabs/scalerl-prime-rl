@@ -255,9 +255,8 @@ def apply_prompt_average_sequence_weights(
 
     Token counts come from `_trainable_completion_tokens`, which excludes
     non-trainable completion tokens and tokens dropped by `prepare_sample`'s
-    seq_len truncation (snowflake_poc_critique.md §6). Group key is
-    (env_name, example_id) so multi-env batches don't collide on
-    `example_id` (which is only unique within an env — snowflake_poc_critique.md §3).
+    seq_len truncation. Group key is (env_name, example_id) so multi-env
+    batches don't collide on `example_id` (which is only unique within an env).
 
     Empty samples (zero trainable tokens after truncation) get weight 0 — they
     contribute nothing under any choice of weight, so this just makes that

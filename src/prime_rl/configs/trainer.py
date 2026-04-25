@@ -468,11 +468,15 @@ class TokenizerConfig(BaseConfig):
 class ConstantSchedulerConfig(BaseModel):
     """Configuration for constant learning rate scheduler."""
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["constant"] = "constant"
 
 
 class LinearSchedulerConfig(BaseModel):
     """Configuration for linear learning rate scheduler."""
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["linear"] = "linear"
 
@@ -508,6 +512,8 @@ class LinearSchedulerConfig(BaseModel):
 class CosineSchedulerConfig(BaseModel):
     """Configuration for cosine learning rate scheduler."""
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["cosine"] = "cosine"
 
     warmup_steps: Annotated[int, Field(ge=0, description="Number of warmup steps for the learning rate scheduler.")] = (
@@ -525,7 +531,7 @@ SchedulerConfig: TypeAlias = Annotated[
 class BaseOptimizerConfig(BaseModel):
     # `extra="forbid"` so a typo in any optimizer field (`betas1` → `beta1`,
     # `eps` on a non-AdamW optimizer, etc.) crashes at config load instead of
-    # silently using the default — see snowflake_poc_critique pass.
+    # silently using the default.
     model_config = ConfigDict(extra="forbid")
 
     lr: Annotated[float, Field(ge=0)] = 1e-6
@@ -715,6 +721,8 @@ LossScaleMode: TypeAlias = Literal["token", "sequence", "none"]
 class DefaultLossConfig(BaseModel):
     """Config for the default loss."""
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["default"] = "default"
 
     dppo_mask_low: Annotated[float, Field(ge=0, description="The low threshold for masking tokens.")] = 0.2
@@ -740,6 +748,8 @@ class CISPOLossConfig(BaseModel):
     Pair with `loss_scale_mode = "sequence"` (or `"none"` if the packer
     pre-encodes prompt-level averaging in sequence_loss_weights).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["cispo"] = "cispo"
 
@@ -773,6 +783,8 @@ class CISPOLossConfig(BaseModel):
 class SFTLossConfig(BaseModel):
     """Config for SFT-style masked negative log-likelihood loss."""
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["sft"] = "sft"
     loss_scale_mode: Annotated[
         LossScaleMode,
@@ -782,6 +794,8 @@ class SFTLossConfig(BaseModel):
 
 class CustomLossConfig(BaseModel):
     """Config for a custom external loss function."""
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["custom"] = "custom"
 
@@ -817,7 +831,7 @@ class DataLoaderConfig(BaseConfig):
 class BaseWeightBroadcastConfig(BaseModel):
     """Configures the base weight broadcast."""
 
-    pass
+    model_config = ConfigDict(extra="forbid")
 
 
 class FileSystemWeightBroadcastConfig(BaseWeightBroadcastConfig):

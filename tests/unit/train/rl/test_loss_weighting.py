@@ -61,7 +61,7 @@ def test_apply_prompt_average_sequence_weights_balances_prompts():
 
 
 def test_apply_prompt_average_sequence_weights_yields_per_token_mean_for_uniform_loss():
-    """End-to-end sanity for snowflake_poc_critique.md §1.
+    """End-to-end sanity for prompt-average loss weights.
 
     With uniform per-token loss = 1, summed-loss-per-sample equals
     `trainable_tokens_i`. The expected total loss is 1 (per-token mean = 1
@@ -96,9 +96,8 @@ def test_apply_prompt_average_sequence_weights_disambiguates_envs():
 
     `example_id` is only unique within an env, so a multi-env training batch
     where env_a/example_id=0 and env_b/example_id=0 are both present would
-    fold them into one prompt under the old code (snowflake_poc_critique.md §3).
-    Group key is now (env_name, example_id) so the samples below count as
-    TWO prompts.
+    fold them into one prompt if the key were `example_id` alone. Group key
+    is (env_name, example_id) so the samples below count as TWO prompts.
 
     Use UNEQUAL completion lengths across envs (env_a samples 10 tokens each,
     env_b samples 20 tokens each) so the correct and broken behaviors yield

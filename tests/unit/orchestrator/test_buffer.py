@@ -251,6 +251,38 @@ def test_buffer_no_positive_resampling_excludes_after_threshold(dummy_envs, make
     assert eb.num_excluded_per_step == 1
 
 
+def test_buffer_no_positive_resampling_min_groups_blocks_single_group_eviction(dummy_envs, make_rollouts):
+    """`min_groups_for_exclusion` floor blocks single-group lucky-shot eviction.
+
+    With Welford starting at n=0, a 14/16-correct first group on a small
+    pool (Terminal-Bench: 18 train prompts, 14/16 ≈ 0.875 not even reached
+    here, but 1.0 trivially crosses) would otherwise permanently evict the
+    prompt before any confirming observation. With min_groups=4 the prompt
+    must accumulate four groups all averaging ≥ 0.9 before exclusion.
+    """
+    buffer = Buffer(
+        dummy_envs,
+        BufferConfig(
+            no_positive_resampling=True,
+            no_positive_resampling_threshold=0.9,
+            no_positive_resampling_min_groups=4,
+        ),
+    )
+    eb = buffer.env_buffers["env_a"]
+    initial_normal = eb.num_normal
+
+    # First group at avg_reward=1.0 must NOT evict (n=1 < min_groups=4).
+    buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[1.0]))
+    assert 0 in eb.examples, "Single high-reward group must not evict under min_groups=4."
+    assert eb.num_normal == initial_normal
+
+    # Three more groups at 1.0 (n becomes 4, mean still 1.0 ≥ 0.9): now evicts.
+    for _ in range(3):
+        buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[1.0]))
+    assert 0 not in eb.examples, "After 4 confirming groups, prompt must evict."
+    assert 0 in eb.excluded_examples
+
+
 def test_buffer_no_positive_resampling_keeps_below_threshold(dummy_envs, make_rollouts):
     """A prompt with avg_reward below threshold stays in the pool, stats accumulate."""
     buffer = Buffer(

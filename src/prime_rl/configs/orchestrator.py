@@ -694,6 +694,21 @@ class BufferConfig(BaseConfig):
         ),
     ] = None
 
+    no_positive_resampling_min_groups: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Minimum number of rollout groups a prompt must accumulate before NPR can "
+                "permanently exclude it. Guards against single-group lucky-shot eviction: "
+                "with rollouts_per_example=16, a 14/16-correct group on first visit otherwise "
+                "evicts the prompt forever from a Welford mean of n=1. Particularly bites small "
+                "training pools (Terminal-Bench has 18 prompts; one early lucky group eats "
+                "5.6% of the pool). Default 1 preserves prior behavior; set to 4-8 for small pools."
+            ),
+        ),
+    ] = 1
+
     @model_validator(mode="after")
     def validate_thresholds(self):
         if self.easy_threshold is not None and self.hard_threshold is not None:
@@ -762,6 +777,8 @@ class DefaultAdvantageConfig(BaseModel):
 
 class CustomAdvantageConfig(BaseModel):
     """Config for a custom external advantage function."""
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["custom"] = "custom"
     import_path: Annotated[
@@ -851,11 +868,15 @@ FilterConfig: TypeAlias = Annotated[
 class FileSystemWeightBroadcastConfig(BaseModel):
     """Configures the filesystem weight broadcast."""
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["filesystem"] = "filesystem"
 
 
 class NCCLWeightBroadcastConfig(BaseModel):
     """Configures the NCCL weight broadcast."""
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["nccl"] = "nccl"
 
