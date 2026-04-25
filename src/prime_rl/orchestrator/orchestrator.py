@@ -20,12 +20,36 @@ from prime_rl.transport import TrainingBatch, TrainingSample, setup_training_bat
 from prime_rl.utils.pathing import get_log_dir, get_rollout_dir, get_step_path
 from prime_rl.utils.usage_reporter import UsageReporter
 
-# This monkey patch is necessary to avoid Pydantic validating fields using typing.Iterable (e.g. in multimodal or tool call messages) lazily which leads to tokenization errors, for more info see https://github.com/PrimeIntellect-ai/prime-rl/pull/1249
-monkey_patch_oai_iterable_types()
+# Both patches reach into deep `openai.types.chat.*` Pydantic internals.
+# Wrap each in try/except so an OpenAI SDK release that reorganizes any of
+# the chat_completion message-param symbols does NOT crash every test or
+# production process that imports `prime_rl.orchestrator.orchestrator` on
+# import. Mirrors the per-patch isolation pattern in
+# `prime_rl.inference.patches.transformers_v5_compat` and
+# `prime_rl.inference.vllm.server`.
+import logging as _orch_patch_logging
 
-
-# This monkey patch is necessary to avoid heavy CPU overhead from constructing the OAI ChatCompletion Pydantic model with logprobs, for more info see https://github.com/PrimeIntellect-ai/prime-rl/pull/1189
-monkey_patch_chat_completion_logprobs()
+for _patch_name, _patch_fn in [
+    # Avoid Pydantic validating fields using typing.Iterable (e.g. in
+    # multimodal or tool call messages) lazily which leads to tokenization
+    # errors. https://github.com/PrimeIntellect-ai/prime-rl/pull/1249
+    ("monkey_patch_oai_iterable_types", monkey_patch_oai_iterable_types),
+    # Avoid heavy CPU overhead from constructing the OAI ChatCompletion
+    # Pydantic model with logprobs.
+    # https://github.com/PrimeIntellect-ai/prime-rl/pull/1189
+    ("monkey_patch_chat_completion_logprobs", monkey_patch_chat_completion_logprobs),
+]:
+    try:
+        _patch_fn()
+    except Exception as _e:
+        _orch_patch_logging.getLogger(__name__).warning(
+            "prime-rl: orchestrator-side patch %s failed (%s: %s); "
+            "the orchestrator continues. If your config relies on this patch, "
+            "fix the underlying error.",
+            _patch_name,
+            type(_e).__name__,
+            _e,
+        )
 
 # Import environment before any other imports
 

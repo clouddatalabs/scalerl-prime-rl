@@ -323,9 +323,31 @@ def custom_run_api_server_worker_proc(listen_address, sock, args, client_config=
     _original_run_api_server_worker_proc(listen_address, sock, args, client_config, **uvicorn_kwargs)
 
 
-vllm.entrypoints.openai.api_server.init_app_state = custom_init_app_state
-vllm.entrypoints.openai.api_server.build_app = custom_build_app
-vllm.v1.utils.run_api_server_worker_proc = custom_run_api_server_worker_proc
+# Wrap each attribute assignment in try/except. These reach into the same
+# `vllm.entrypoints.openai.api_server` and `vllm.v1.utils` namespaces that
+# the per-patch isolation block above defends against, but were left as bare
+# attribute assignments. A vLLM minor bump that renames or moves any of
+# `init_app_state`, `build_app`, or `run_api_server_worker_proc` would
+# raise `AttributeError` at module top — `import prime_rl.inference.vllm.server`
+# fails, and the API server doesn't start with no log indicating which
+# patch broke. Match the in-loop isolation pattern.
+for _attr_path, _attr_name, _custom in [
+    (vllm.entrypoints.openai.api_server, "init_app_state", custom_init_app_state),
+    (vllm.entrypoints.openai.api_server, "build_app", custom_build_app),
+    (vllm.v1.utils, "run_api_server_worker_proc", custom_run_api_server_worker_proc),
+]:
+    try:
+        setattr(_attr_path, _attr_name, _custom)
+    except Exception as _e:
+        _server_patch_logging.getLogger(__name__).warning(
+            "prime-rl: failed to install patch on %s.%s (%s: %s); the "
+            "API server continues. If your model relies on this patch, "
+            "fix the underlying error.",
+            _attr_path.__name__,
+            _attr_name,
+            type(_e).__name__,
+            _e,
+        )
 
 
 # Adapted from vllm/entrypoints/cli/serve.py
