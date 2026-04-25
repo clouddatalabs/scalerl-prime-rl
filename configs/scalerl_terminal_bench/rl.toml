@@ -68,9 +68,10 @@ allow_nccl_async_level_override = true
 temperature = 1.0
 max_completion_tokens = 6144
 
-# 18 training tasks (the rest are held out for eval). The list is illustrative —
-# update once Xuchao's "learnable subset" is finalized. All entries must be
-# Harbor task directories committed under environments/terminal_bench/tasks/.
+# 18 training tasks (the rest are held out for eval). The list is illustrative;
+# tune to taste once you have a learnable-subset signal for the model. All
+# entries must be Harbor task directories committed under
+# environments/terminal_bench/tasks/.
 [[orchestrator.train.env]]
 id = "environments.terminal_bench"
 name = "terminal-bench-train"

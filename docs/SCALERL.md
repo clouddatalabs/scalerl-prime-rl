@@ -103,20 +103,48 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
 - 8 GPUs visible to one node (config splits 4 train / 4 inference).
 - SLURM with a partition you pass via `sbatch -p <name>` (the sbatch defaults
   to `gpu`). Run `sinfo` on the login node first to find the right name.
+- **NVIDIA Blackwell (B200) GPUs.** The configs are pinned to flash-attn-cute
+  (FA4) which builds Blackwell sm_100 kernels; FA3 is deliberately excluded
+  by the `[all]` extra (FA3 wheels ship Hopper sm_90 only and crash on B200
+  with "no kernel image available"). For H100/Hopper or older, you must
+  swap `attn = "fa4"` to `attn = "sdpa"` (or wire FA2/FA3 yourself) in the
+  `[trainer.model]` block of the config you submit; the recipe is otherwise
+  hardware-agnostic.
 - **Build toolchain on the login node** (where `uv sync --extra all` runs):
-  `build-essential` (gcc/g++), `git`, `curl`. CUTLASS + flash-attn-cute build
-  from source on first sync. On a minimal/distroless image, install via
+  `build-essential` (gcc/g++), `git`, `curl`, **plus the CUDA toolkit**
+  (`nvcc` matching torch's CUDA 12.8 — the `cuda-toolkit-12-8` package or
+  equivalent). CUTLASS + flash-attn-cute build from source on first sync.
+  On a minimal/distroless image, install via
   `INSTALL_BASE_PACKAGES=1 bash scripts/install.sh` or your cluster's
   package manager — `uv sync` will otherwise fail with an opaque CUTLASS
-  error halfway through.
+  or "nvcc not found" error halfway through.
 - **Network from the COMPUTE node, OR pre-stage on the login node.** Many
-  managed clusters firewall compute nodes off github.com / huggingface.co.
-  If yours does, `hf download Qwen/Qwen3-8B` and
-  `bash scripts/fix-flash-attn-cute.sh` from step 4 above are MANDATORY on
-  the login node — otherwise the sbatch will spend 3 minutes booting and
-  then fail with a vLLM model-load timeout or a CUTLASS git-clone error.
-- For Terminal-Bench: a Docker daemon reachable from the rollout process
-  (host or `/var/run/docker.sock` bind-mounted into the container).
+  managed clusters firewall compute nodes off the package mirrors. The
+  `uv sync` step needs egress to:
+  - `github.com` (CUTLASS, FA4 sources)
+  - `huggingface.co` (Qwen3-8B and dataset weights)
+  - `hub.primeintellect.ai` (the `[envs]` extra resolves verifiers
+    environments through Prime Intellect's index)
+  - For Terminal-Bench only: `ghcr.io/laude-institute/...` (TB task base
+    images pulled on first rollout per task).
+
+  If your compute nodes can't reach any of these, pre-stage on the login
+  node: `hf download Qwen/Qwen3-8B`, `bash scripts/fix-flash-attn-cute.sh`,
+  and `docker pull` the TB base images you'll need.
+- **Non-AWS clusters with `LD_PRELOAD` shimming `libcublas`.** Set
+  `SCALERL_FORCE_CLEAR_LD=1` in `.env` (or before `sbatch`). The smoke
+  script auto-clears `LD_LIBRARY_PATH` and `LD_PRELOAD` when it sees the
+  AWS DLAMI marker (`/etc/dlami/dlami_version`). Other clusters with a
+  pre-loaded system cuBLAS hit the same `CUBLAS_STATUS_INVALID_VALUE`
+  failure in vLLM's compiled QKV path on B200 — `SCALERL_FORCE_CLEAR_LD=1`
+  is the manual override.
+- **For Terminal-Bench:** the rollout process must reach a Docker daemon.
+  `scripts/scalerl_smoke.sbatch` runs `.venv/bin/rl` on the SLURM host
+  (NOT inside a container), so the `prime-rl` user needs **either** read
+  access to `/var/run/docker.sock` (typically via `docker` group
+  membership) **or** passwordless `sudo docker` configured. If neither
+  applies, the rollouts crash early with a clear "Docker daemon
+  unreachable" error from `environments/terminal_bench/env.py`.
 
 **Resume.** Resubmit the same sbatch with `SCALERL_RESUME=1`:
 ```bash

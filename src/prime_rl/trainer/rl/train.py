@@ -68,6 +68,27 @@ from ring_flash_attn import substitute_hf_flash_attn
 from torchtitan.distributed.utils import clip_grad_norm_
 
 
+# Loss types that do NOT consume `inference_logprobs` and are therefore safe
+# under synthesized (zero-fill) inference_logprobs. Encoded as a safelist
+# rather than a denylist so future losses (DAPO, GSPO, etc.) are denied by
+# default; forgetting to add a new IS-ratio loss to the guard would otherwise
+# silently regress the corruption mode this guard exists to prevent.
+_LOSS_TYPES_SAFE_UNDER_SYNTHESIZED_LOGPROBS: frozenset[str] = frozenset({"sft"})
+
+
+def _loss_consumes_importance_ratio(config) -> bool:
+    """True iff the configured loss reads `inference_logprobs` to compute an IS ratio.
+
+    Custom losses opt out via `CustomLossConfig.consumes_importance_ratio = False`
+    (default True keeps the safe bias). All built-in losses are safelist-keyed
+    by `type`.
+    """
+    loss_type = config.loss.type
+    if loss_type == "custom":
+        return bool(config.loss.consumes_importance_ratio)
+    return loss_type not in _LOSS_TYPES_SAFE_UNDER_SYNTHESIZED_LOGPROBS
+
+
 def _assert_synthesized_logprobs_compatible_with_loss(*, loss_type: str, synthesized: bool) -> None:
     """Refuse importance-ratio losses against zero-fill inference_logprobs.
 
@@ -75,23 +96,33 @@ def _assert_synthesized_logprobs_compatible_with_loss(*, loss_type: str, synthes
     reject the canonical `teacher_rollout_model` + CISPO combination at
     config load, but a user pointing `[orchestrator.client] base_url` at an
     external service WITHOUT setting `teacher_rollout_model` bypasses them.
-    This runtime check is the load-bearing second line of defense; CISPO /
-    DefaultLoss compute `rho = exp(trainer_lp - inference_lp)` and a
+    This runtime check is the load-bearing second line of defense; an
+    IS-ratio loss computes `rho = exp(trainer_lp - inference_lp)` and a
     zero-fill `inference_lp` collapses that to `exp(trainer_lp)`, which is
-    not the IS ratio the recipe needs. SFT does not consume
-    `inference_logprobs` and is exempt.
+    not the IS ratio the recipe needs. Only losses in the SFT-shape
+    safelist (do not consume `inference_logprobs`) are exempt — encoded as
+    a safelist so any future loss type is denied by default.
+
+    For `loss_type="custom"`, callers should resolve the gating via
+    `_loss_consumes_importance_ratio(config)` and pass `synthesized` only
+    when the custom loss reads `inference_logprobs`. The `train()` loop
+    does this before invoking this helper.
 
     Hot-path: called once per micro-batch, before the forward pass, so a
     misconfigured run fails fast instead of burning compute.
     """
-    if loss_type in {"cispo", "default"} and synthesized:
+    if loss_type in _LOSS_TYPES_SAFE_UNDER_SYNTHESIZED_LOGPROBS:
+        return
+    if synthesized:
         raise RuntimeError(
             f"trainer.rl.train: micro-batch contains synthesized (zero-fill) "
             f"inference_logprobs but loss.type={loss_type!r} consumes "
             "importance ratios. `rho = exp(trainer_lp - 0)` is not the IS ratio "
             "the recipe needs. Either switch to use_token_client=True (TITO "
             "client preserves real logprobs), use loss.type='sft', or fix the "
-            "rollout-path config so completion_logprobs come from the generator."
+            "rollout-path config so completion_logprobs come from the generator. "
+            "(Custom losses can opt out via "
+            "`[trainer.loss] consumes_importance_ratio = false`.)"
         )
 
 
@@ -356,11 +387,17 @@ def train(config: TrainerConfig):
         cp_group = parallel_dims.world_mesh["cp"].get_group() if cp_enabled else None
         cp_size = parallel_dims.cp
 
+        # Custom-loss opt-out: skip the synth guard when the user explicitly
+        # declared the loss does not consume importance ratios. Built-in
+        # losses are gated by the safelist inside the helper.
+        consumes_is_ratio = _loss_consumes_importance_ratio(config)
+
         for micro_step, micro_batch in enumerate(micro_batches):
-            _assert_synthesized_logprobs_compatible_with_loss(
-                loss_type=config.loss.type,
-                synthesized=micro_batch["inference_logprobs_synthesized"],
-            )
+            if consumes_is_ratio:
+                _assert_synthesized_logprobs_compatible_with_loss(
+                    loss_type=config.loss.type,
+                    synthesized=micro_batch["inference_logprobs_synthesized"],
+                )
 
             input_ids = micro_batch["input_ids"].to("cuda")
             position_ids = micro_batch["position_ids"].to("cuda")

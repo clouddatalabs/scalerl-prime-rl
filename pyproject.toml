@@ -19,7 +19,14 @@ dependencies = [
     "torch>=2.9.0",
     "torchdata>=0.11.0",
     "transformers",
-    "vllm>=0.19.0",
+    # Upper bound: ~12 monkey-patches in src/prime_rl/inference/patches.py reach
+    # into private vLLM internals (UnquantizedEmbeddingMethod.apply,
+    # DPEngineCoreProc.{add_request,_handle_client_request,resume_scheduler,
+    # _has_global_unfinished_reqs}, CPUOffloadingSpec.__init__,
+    # LoRAModel.from_local_checkpoint, FusedMoEWithLoRA._inject_lora_into_fused_moe,
+    # FusedMoEConfig.__post_init__, …). vLLM rearranges these freely on minor
+    # bumps, so cap at the validated minor and re-bump after manual review.
+    "vllm>=0.19.0,<0.20",
     "wandb>=0.24.2",
     "ring-flash-attn>=0.1.8",
     "prime>=0.5.63",

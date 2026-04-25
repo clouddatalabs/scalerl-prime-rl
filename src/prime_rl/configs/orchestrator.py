@@ -1315,7 +1315,19 @@ class OrchestratorConfig(BaseConfig):
 
     @model_validator(mode="after")
     def resolve_env_config(self):
-        """Populate extra_env_kwargs and vLLM sampling defaults from top-level fields."""
+        """Populate extra_env_kwargs and vLLM sampling defaults from top-level fields.
+
+        `return_token_ids=True` is the load-bearing knob that lets verifiers'
+        OpenAI chat client preserve real per-token generator logprobs when
+        `use_token_client=False`. Without it `pretokenize_rollout_trajectory`
+        falls back to chat-template reconstruction with synthetic
+        `completion_logprobs=[0.0]*N`; the synth-flag carries through and
+        the train-loop runtime guard refuses CISPO/Default before forward.
+        That's a loud crash, but it fires after every rollout in the first
+        batch has already generated. A user who explicitly sets
+        `extra_body = { return_token_ids = false }` here is asking for that
+        crash; the `setdefault` only protects unset configs.
+        """
         is_vllm = self.teacher_rollout_model is None
         for env in self.train.env:
             env.extra_env_kwargs.update(max_seq_len=self.seq_len)

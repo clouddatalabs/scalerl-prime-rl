@@ -88,9 +88,6 @@ main() {
         source $HOME/.local/bin/env
     fi
 
-    log_info "Installing prime..."
-    uv tool install prime
-
     log_info "Syncing virtual environment..."
     # `--extra all` (the aggregate extra defined in pyproject.toml) excludes
     # `flash-attn-3` because its wheels ship Hopper sm_90 kernels only and

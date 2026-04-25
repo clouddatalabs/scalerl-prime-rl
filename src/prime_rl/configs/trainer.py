@@ -814,6 +814,19 @@ class CustomLossConfig(BaseModel):
         LossScaleMode,
         Field(description="Forwarded to compute_loss; defaults to 'token'."),
     ] = "token"
+    consumes_importance_ratio: Annotated[
+        bool,
+        Field(
+            description=(
+                "Whether the custom loss reads `inference_logprobs` to compute an "
+                "importance ratio. The synth-logprobs runtime guard refuses to run "
+                "any IS-ratio loss against zero-fill `inference_logprobs` "
+                "(`rho = exp(trainer_lp - 0)` is not the IS ratio). Default True is "
+                "the safe bias — set False only if your loss truly does not consume "
+                "`inference_logprobs` (e.g. a pure NLL/SFT-shape custom loss)."
+            ),
+        ),
+    ] = True
 
 
 LossConfig: TypeAlias = Annotated[
