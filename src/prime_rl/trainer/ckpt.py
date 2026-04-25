@@ -330,14 +330,29 @@ class WeightCheckpointManager:
             (step_path / "STABLE").touch()
 
     def get_run_adapter_state_dict(self) -> dict[str, Tensor]:
-        lora_state_dict = {
-            f"base_model.model.{key}": (value.full_tensor() if isinstance(value, DTensor) else value).to(
-                "cpu", non_blocking=False
-            )
-            for key, value in get_multi_run_manager().get_state_dict_for_run(0).items()
-        }
+        # `value.full_tensor()` is a collective on the FSDP mesh — every
+        # rank must call it. Pair the master-only `.to("cpu")` (which can
+        # raise on host-OOM, ENOSPC, etc.) inside a per-iteration capture
+        # so master's exception doesn't unwind past the next iteration's
+        # `full_tensor()` collective and deadlock peers (~10 min NCCL
+        # watchdog). Same shape as the fix already applied to
+        # `gather_weights_on_master` (weights.py) and
+        # `NCCLWeightBroadcastSender.broadcast_weights` (broadcast/nccl.py).
+        master_error: Exception | None = None
+        lora_state_dict: dict[str, Tensor] = {}
+        is_master = self.world.is_master
+        for key, value in get_multi_run_manager().get_state_dict_for_run(0).items():
+            full = value.full_tensor() if isinstance(value, DTensor) else value
+            if is_master and master_error is None:
+                try:
+                    lora_state_dict[f"base_model.model.{key}"] = full.to("cpu", non_blocking=False)
+                except Exception as e:
+                    master_error = e
 
-        if not lora_state_dict:
+        if master_error is not None:
+            raise master_error
+
+        if is_master and not lora_state_dict:
             raise ValueError("The LoRA state dict is empty. Something went wrong.")
 
         return lora_state_dict

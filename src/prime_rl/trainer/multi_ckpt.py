@@ -284,8 +284,24 @@ class MultiCheckpointManager:
 
             self.logger.info(f"Resumed run {self.multi_run_manager.idx_2_id[idx]} from step {step}")
             load_ok = True
+        except FileNotFoundError as e:
+            self.logger.warning(f"Checkpoint missing for run {idx}: {e}")
+        except OSError as e:
+            self.logger.error(f"FS error loading checkpoint for run {idx}: {type(e).__name__}: {e}")
         except Exception as e:
-            self.logger.error(f"Error loading checkpoint for run {idx}: {e}")
+            # Symmetric to the save path: catch-all so every rank reaches
+            # the all-reduce below (asymmetric raise here would leave peers
+            # blocked on `all_reduce(load_ok_tensor)`). Log full traceback
+            # so logical bugs (RunState schema regression, KeyError on
+            # state_dict load) surface in the run log even though the
+            # bool-only return signal would otherwise conflate them with
+            # OSError.
+            import traceback as _tb
+
+            self.logger.error(
+                f"Error loading checkpoint for run {idx}: {type(e).__name__}: {e}\n"
+                f"{_tb.format_exc()}"
+            )
 
         # Reduce per-rank `load_ok` to a global "every rank loaded
         # successfully" — mirrors the `save()` MIN-reduce pattern. Without
@@ -296,7 +312,23 @@ class MultiCheckpointManager:
         # them silently, corrupting that adapter for the rest of the run.
         load_ok_tensor = torch.tensor(int(load_ok), device="cuda")
         dist.all_reduce(load_ok_tensor, op=dist.ReduceOp.MIN)
-        return bool(load_ok_tensor.item())
+        global_ok = bool(load_ok_tensor.item())
+        if not global_ok:
+            # Caller previously dropped the bool on the floor (`-> None`),
+            # so a SYMMETRIC failure (logical bug that raises on every
+            # rank) reduced to False on every rank → caller continued as
+            # if resume succeeded. `model_state_dict` was filled with the
+            # freshly-constructed adapter weights from
+            # `get_named_parameters_for_run(idx)` and `optimizer.optimizers[idx]`
+            # was empty, but training proceeded claiming to be at
+            # `resume_step`. Raise loudly so the caller can fail fast
+            # instead of silent-corrupt-resume.
+            raise RuntimeError(
+                f"Multi-run checkpoint load failed for run {idx} on at least one rank. "
+                "Check the per-rank logs for the underlying error. Refusing to "
+                "continue with partially-loaded state."
+            )
+        return True
 
     def maybe_clean(self) -> None:
         if not self.world.is_master:
