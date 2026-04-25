@@ -36,8 +36,10 @@ export PATH="/usr/local/bin:$PATH"
 # --all-extras` outside slurm; we don't re-sync here to avoid network races
 # between concurrent jobs.
 source .venv/bin/activate
-# `source activate` doesn't always rewrite PATH cleanly under slurm; use the
-# venv python explicitly to be safe.
+# `source activate` doesn't always rewrite PATH cleanly under slurm; export
+# the venv bin path explicitly so child processes (e.g. spawned `inference`)
+# resolve from it.
+export PATH="$REPO_ROOT/.venv/bin:$PATH"
 PYBIN="$REPO_ROOT/.venv/bin/python"
 
 # Print effective config (helpful for postmortem) before launching.
