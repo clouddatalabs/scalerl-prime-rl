@@ -87,24 +87,22 @@ fi
 # /etc/profile.d/dlami.sh) — torch (cu128) bundles its own libcublas built
 # against CUDA 12.8, and the dynamic linker resolves the wrong libcublas, which
 # triggers CUBLAS_STATUS_INVALID_VALUE on B200 in vLLM's compiled QKV path.
-# Same shell also sets LD_PRELOAD pointing at a venv that may not exist on the
-# compute node. Strip both ONLY when we detect the DLAMI marker (or when the
-# user opts in via SCALERL_FORCE_CLEAR_LD=1) so we don't break clusters that
-# legitimately rely on LD_LIBRARY_PATH for AWS-OFI-NCCL, system cuDNN, etc.
-DLAMI_MARKER="dlami"
-if [ "${SCALERL_FORCE_CLEAR_LD:-0}" = "1" ] \
-    || [ -f /etc/dlami/dlami_version ] \
-    || { [ -n "${LD_LIBRARY_PATH:-}" ] && [[ "$LD_LIBRARY_PATH" == *"/usr/local/cuda-12.9/"* ]]; } \
-    || { [ -n "${LD_PRELOAD:-}" ] && [[ "$LD_PRELOAD" == *"venv_build"* ]]; }; then
-    echo "=== AWS DLAMI detected — stripping LD_LIBRARY_PATH and LD_PRELOAD ==="
+# Same shell also sets LD_PRELOAD pointing at a venv that may not exist on
+# the compute node. Strip both ONLY when one of these explicit triggers fires;
+# do NOT pattern-match arbitrary substrings in LD_LIBRARY_PATH / LD_PRELOAD —
+# external clusters rely on those for AWS-OFI-NCCL, system cuDNN, etc., and a
+# false-positive substring match silently destroys their networking config.
+#   1. `SCALERL_FORCE_CLEAR_LD=1` — explicit user opt-in (.env or parent shell)
+#   2. `/etc/dlami/dlami_version` — AWS DLAMI marker file (canonical detection)
+if [ "${SCALERL_FORCE_CLEAR_LD:-0}" = "1" ] || [ -f /etc/dlami/dlami_version ]; then
+    echo "=== AWS DLAMI / SCALERL_FORCE_CLEAR_LD detected — stripping LD_LIBRARY_PATH and LD_PRELOAD ==="
     unset LD_PRELOAD
     unset LD_LIBRARY_PATH
 fi
 
-# Mirror baker's container-side runtime env (baker/cli/docker_runtime.py
-# EFA_RUNTIME_ENV). Baker runs prime-rl inside Docker and sets these on the
-# container; without Docker we set them on the slurm shell. Each value is
-# only set when not already provided so .env can override per-cluster.
+# Container-side runtime env mirrored on the slurm shell when not running
+# under Docker. Each value is only set when not already provided so .env can
+# override per-cluster.
 #
 # EFA-only knobs are gated on a probe: setting FI_PROVIDER=efa on a cluster
 # without EFA makes libfabric fail provider lookup and NCCL hangs at init.
@@ -123,8 +121,9 @@ fi
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-^lo,docker}"
 export NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-PHB}"
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-1800}"
-# CUDA_DEVICE_MAX_CONNECTIONS=1 constrains kernel concurrency on B200 and is
-# part of the working baker recipe.
+# CUDA_DEVICE_MAX_CONNECTIONS=1 constrains kernel concurrency on B200; raising
+# it triggers an NCCL/comm-overlap fast-path that's flaky for prime-rl's
+# weight-broadcast pattern.
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 
 # HF cache. Default to a repo-local cache so the cluster doesn't need a writable

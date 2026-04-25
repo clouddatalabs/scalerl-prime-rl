@@ -1,0 +1,24 @@
+# gitleaks configuration — extends the default ruleset with allowlist
+# entries for synthetic test fixtures imported from upstream Terminal-Bench.
+#
+# These files are intentionally crafted to look like credentials/keys for
+# CTF-style training tasks; they are NOT real secrets. Without an allowlist
+# entry the default gitleaks ruleset (and GitHub's secret-scanning) will
+# flag them on every push and create noisy security alerts on a public
+# Snowflake-handoff fork.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic credentials in imported terminal-bench task fixtures."
+paths = [
+  # Base64-encoded "credentials.txt" content used by the
+  # `recover-obfuscated-files` task. Decodes to fake user/pass/server lines.
+  '''environments/terminal_bench/tasks/recover-obfuscated-files/.*\.b64_content''',
+  # Imported task fixtures generally — Apache-2.0 upstream content under
+  # this tree is reviewed via THIRD_PARTY_NOTICES.md, not gitleaks.
+  '''environments/terminal_bench/tasks/.*/setup_files/''',
+  '''environments/terminal_bench/tasks/.*/environment/''',
+  '''environments/terminal_bench/tasks/.*/solution/''',
+]

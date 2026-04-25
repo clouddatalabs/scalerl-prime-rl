@@ -428,6 +428,24 @@ class RLConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
+    def validate_cispo_no_teacher(self):
+        """CISPO ignores `teacher_logprobs` — `cispo_loss_fn` does not consume
+        them. Configuring a teacher_model with `loss.type == "cispo"` would
+        silently pay the teacher-prefill compute cost on every example, ship
+        the tensors through TrainingSample, and have the trainer drop them.
+        Reject the combination loudly.
+        """
+        if self.trainer.loss.type == "cispo" and self.orchestrator.teacher_model is not None:
+            raise ValueError(
+                "trainer.loss.type='cispo' with [orchestrator.teacher_model] set: "
+                "CISPO does not consume teacher logprobs (no teacher_tau / KL term). "
+                "The teacher prefill cost would be paid for nothing. Either drop "
+                "[orchestrator.teacher_model] or switch to trainer.loss.type='default' "
+                "with teacher_tau > 0."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_external_rollout_mode(self):
         if self.orchestrator.teacher_rollout_model is None:
             return self

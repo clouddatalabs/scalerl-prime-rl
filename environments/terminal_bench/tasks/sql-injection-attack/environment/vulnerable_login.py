@@ -131,4 +131,7 @@ def login():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # debug=False — the SQL injection vulnerability does not need Flask's
+    # interactive debugger, and Werkzeug's PIN-protected debugger has historic
+    # RCE bypasses if the container's network is ever exposed beyond docker-rw.
+    app.run(host="0.0.0.0", port=5000, debug=False)

@@ -43,7 +43,7 @@ if ! flock -x -w 300 "$LOCK_FD"; then
 fi
 
 echo "Reinstalling flash-attn-cute to fix namespace conflict with flash-attn..."
-# Match the pin in pyproject.toml so this script and `uv sync --all-extras` agree.
+# Match the pin in pyproject.toml so this script and `uv sync --extra all` agree.
 uv pip install --reinstall --no-deps "flash-attn-4 @ git+https://github.com/Dao-AILab/flash-attention.git@abd9943b#subdirectory=flash_attn/cute"
 
 # Verify installation

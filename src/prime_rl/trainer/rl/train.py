@@ -448,7 +448,10 @@ def train(config: TrainerConfig):
                 # Per-sequence weights set by the orchestrator/packer (e.g. ScaleRL
                 # prompt-level averaging). When loss_scale_mode is "token" (the upstream
                 # default) the weights are ignored — see prime_rl.trainer.rl.loss.compute_loss.
-                sequence_loss_weights=micro_batch.get("sequence_loss_weights") or None,
+                # Strict access: TensorMicroBatch.sequence_loss_weights is required
+                # (see data.py); a missing key signals a packer regression and must
+                # fail loudly rather than silently shrink LR by 1/dp_world_size.
+                sequence_loss_weights=micro_batch["sequence_loss_weights"],
                 # FSDP averages gradients across DP ranks (gradient_divide_factor =
                 # dp_replicate*dp_shard*cp). For sequence/none loss_scale_mode the
                 # packer's weights are global, so compute_loss multiplies the rank

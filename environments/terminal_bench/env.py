@@ -2,14 +2,14 @@
 
 Design notes (see also ``environments.terminal_bench/__init__.py``):
 
-- Task format is the upstream Harbor layout used by
-  ``verifiers/environments/terminus_harbor`` and
-  ``verifiers/environments/opencode_harbor``: one directory per task
+- Task format is the upstream Harbor layout: one directory per task
   containing ``task.toml``, ``instruction.md``, ``environment/Dockerfile``
   (base image pinned via ``task.toml::[environment].docker_image``),
   and ``tests/test.sh`` which writes a ``/logs/verifier/reward.txt``
-  (float -- typically 0 or 1). We deliberately reuse the same layout so
-  Phase-2 (all 11 opencode_harbor tasks) is pure task selection.
+  (float -- typically 0 or 1). The 28 task fixtures imported from
+  upstream Terminal-Bench / opencode_harbor live under
+  ``environments/terminal_bench/tasks/``; see ``THIRD_PARTY_NOTICES.md``
+  for attribution.
 - The upstream ``HarborEnv`` spins up a Prime Intellect cloud sandbox
   per rollout and tunnels the agent's OpenAI traffic back to the
   training host via frpc. That's great for cloud agents but costs
@@ -44,7 +44,7 @@ Usage sketch for the orchestrator config::
 
     [[orchestrator.env]]
     id = "environments.terminal_bench"
-    args = { tasks = ["hello-world"], task_root = "verifiers/environments/terminus_harbor/tasks" }
+    args = { tasks = ["analyze-access-logs"], task_root = "environments/terminal_bench/tasks" }
 """
 
 from __future__ import annotations
@@ -857,7 +857,7 @@ async def _harbor_reward(state: vf.State, **kwargs) -> float:
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_TASK_ROOT = Path("verifiers/environments/terminus_harbor/tasks")
+_DEFAULT_TASK_ROOT = Path("environments/terminal_bench/tasks")
 
 # All shell tool calls run in /app by default, matching Harbor's
 # ``agent_workdir = "/app"`` convention. Task instructions that say
@@ -899,9 +899,9 @@ def load_environment(
             ``task_root``). If None, every subdirectory that has both
             ``task.toml`` and ``instruction.md`` is included.
         task_root: Path (absolute or relative to the prime-rl repo root)
-            pointing at a Harbor-format ``tasks/`` dir. The default
-            points at the single ``hello-world`` task that ships with
-            ``verifiers/environments/terminus_harbor``.
+            pointing at a Harbor-format ``tasks/`` dir. Defaults to
+            ``environments/terminal_bench/tasks`` (28 in-tree task
+            fixtures imported from upstream Terminal-Bench).
         max_turns: Hard cap on assistant turns per rollout.
         command_timeout_seconds: Timeout for individual ``shell`` calls.
         test_timeout_seconds: Timeout for ``bash test.sh`` at scoring

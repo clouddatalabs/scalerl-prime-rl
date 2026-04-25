@@ -234,8 +234,16 @@ def setup_loss_fn(loss_config: LossConfig) -> LossFn:
         return loss_fn
 
     if isinstance(loss_config, SFTLossConfig):
-        sft_loss_fn.loss_scale_mode = loss_config.loss_scale_mode
-        return sft_loss_fn
+        # Wrap in a fresh closure rather than mutating the module-level
+        # `sft_loss_fn`. Two consecutive `setup_loss_fn(SFTLossConfig(...))`
+        # calls with different `loss_scale_mode` values would otherwise share
+        # the same function object, and the second call would silently overwrite
+        # the first's mode for any caller still holding a prior reference.
+        def loss_fn(inputs: LossInputs) -> LossOutputs:
+            return sft_loss_fn(inputs)
+
+        loss_fn.loss_scale_mode = loss_config.loss_scale_mode
+        return loss_fn
 
     if isinstance(loss_config, CISPOLossConfig):
         def loss_fn(inputs: LossInputs) -> LossOutputs:

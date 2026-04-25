@@ -738,6 +738,17 @@ class BufferConfig(BaseConfig):
                 "no_positive_resampling_threshold or set easy_threshold = None to disable the "
                 "easy pool."
             )
+        if self.online_difficulty_filtering and self.no_positive_resampling:
+            raise ValueError(
+                "[orchestrator.buffer] online_difficulty_filtering=True with "
+                "no_positive_resampling=True is a deviation from ScaleRL §3.6: "
+                "online_difficulty_filtering drops rollouts with avg_reward in {0.0, 1.0} "
+                "from the buffer entirely (BEFORE NPR's pass-rate Welford update sees "
+                "them — see Buffer.update). NPR then can't observe high-reward groups, "
+                "so its eviction never fires. Pick ONE: rely on NPR (recommended for "
+                "ScaleRL) by setting online_difficulty_filtering=False, OR drop NPR "
+                "and use online_difficulty_filtering as a per-step variance proxy."
+            )
         return self
 
 

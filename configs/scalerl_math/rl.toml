@@ -144,7 +144,7 @@ matmul_precision = "highest"
 [trainer.model]
 # FA4 via the HF AttentionInterface bridge in trainer/model.py. impl="hf"
 # routes dense Qwen3 through the stock transformers model with our
-# `_fa4_attention_forward` (ported from baker; same FA4 git rev abd9943b).
+# `_fa4_attention_forward` (FA4 git rev abd9943b).
 # `attn = "fa4"` + `impl = "custom"` is also valid for MoE variants but
 # dense Qwen3 isn't registered in AutoModelForCausalLMPrimeRL today.
 attn = "fa4"

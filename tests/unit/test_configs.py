@@ -24,17 +24,54 @@ CONFIG_CLASSES = [
 ]
 
 
-def get_config_files() -> list[Path]:
-    """Any TOML file inside `configs/` or `examples/`"""
-    config_files = list(Path("configs").rglob("*.toml"))
-    example_files = list(Path("examples").rglob("*.toml"))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
-    return config_files + example_files
+
+def get_config_files() -> list[Path]:
+    """Any TOML file inside `configs/` or `examples/`.
+
+    Anchor at the repo root (NOT pytest's cwd) so the parametrize list is
+    non-empty regardless of where pytest runs from. A cwd-relative glob
+    silently produced an empty list when run from any other directory,
+    making this entire `test_load_configs` slice a no-op green pass.
+    """
+    config_files = list((_REPO_ROOT / "configs").rglob("*.toml"))
+    example_files = list((_REPO_ROOT / "examples").rglob("*.toml"))
+
+    files = config_files + example_files
+    if not files:
+        raise RuntimeError(
+            f"No TOML configs found under {_REPO_ROOT}/configs or "
+            f"{_REPO_ROOT}/examples — refusing to run a parametrize=0 'green'."
+        )
+    return files
+
+
+def _expected_class_for(config_file: Path):
+    """Best-fit expected schema by directory name. Falls back to the loose
+    any-of contract for paths we don't recognize, but the canonical ScaleRL
+    configs are pinned strictly so a typo that breaks RLConfig but parses
+    as OrchestratorConfig (a subset) cannot slip through."""
+    rel = config_file.relative_to(_REPO_ROOT)
+    parts = rel.parts
+    if "scalerl_math" in parts or "scalerl_terminal_bench" in parts:
+        return RLConfig
+    # Upstream debug/example configs are heterogeneous — any of the five.
+    return None
 
 
 @pytest.mark.parametrize("config_file", get_config_files(), ids=lambda x: x.as_posix())
 def test_load_configs(config_file: Path):
-    """Tests that all config files can be loaded by at least one config class."""
+    """Tests that all config files can be loaded by their expected class
+    (when known) or at least one of the five (for upstream debug configs).
+    """
+    expected = _expected_class_for(config_file)
+    if expected is not None:
+        # Strict pin: typo in a ScaleRL config that shifts the parse from
+        # RLConfig to a subset class would silently pass under any-of-five.
+        cli(expected, args=["@", config_file.as_posix()])
+        return
+
     could_parse = []
     for config_cls in CONFIG_CLASSES:
         try:
