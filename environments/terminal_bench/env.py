@@ -360,10 +360,16 @@ class _DockerClient:
         # rollout container.
         parent = os.path.dirname(dst.rstrip("/")) or "/"
         ensure = f"mkdir -p {shlex.quote(parent)}"
-        exit_code, _, stderr = await self.exec(container, ensure, timeout=10)
+        # working_dir="/" — see prep /tests note. A task whose Dockerfile
+        # WORKDIR points at a not-yet-existing path would otherwise OCI-fail
+        # the chdir before the mkdir runs.
+        exit_code, stdout, stderr = await self.exec(
+            container, ensure, timeout=10, working_dir="/"
+        )
         if exit_code != 0:
             raise RuntimeError(
-                f"mkdir parent for {dst!r} in {container!r} failed: {stderr!r}"
+                f"mkdir parent for {dst!r} in {container!r} failed: "
+                f"exit={exit_code} stdout={stdout!r} stderr={stderr!r}"
             )
 
         cmd = [*self._prefix(), "cp", src_str, f"{container}:{dst}"]
@@ -1091,14 +1097,21 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         # hello.txt" expecting cwd=/app, and test.sh writes reward
         # to /logs/verifier). Doing this once at rollout start means
         # the model's first shell call can't race this setup.
-        exit_code, _, stderr = await self._docker.exec(
+        # Force working_dir="/" so a task whose Dockerfile WORKDIR
+        # points at a not-yet-existing path (e.g. `WORKDIR /app/personal-site`
+        # without a prior `RUN mkdir -p /app/personal-site`) doesn't
+        # fail this docker exec at the OCI chdir step before our
+        # mkdir runs. The mkdir uses absolute paths so cwd is irrelevant.
+        exit_code, stdout, stderr = await self._docker.exec(
             container,
             f"mkdir -p {_AGENT_WORKDIR} /logs/verifier",
             timeout=10,
+            working_dir="/",
         )
         if exit_code != 0:
             raise RuntimeError(
-                f"Post-create setup (mkdir agent dirs) failed in {container}: {stderr!r}"
+                f"Post-create setup (mkdir agent dirs) failed in {container}: "
+                f"exit={exit_code} stdout={stdout!r} stderr={stderr!r}"
             )
 
         return await super().setup_state(state)
@@ -1203,8 +1216,19 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
 
         # Harbor expects tests at /tests and reward output at
         # /logs/verifier/reward.txt; pre-create both paths.
+        # Force working_dir="/" — some task Dockerfiles set a WORKDIR that
+        # doesn't exist in the built image's filesystem (observed:
+        # `WORKDIR /app/personal-site` for a task whose `mkdir /app/personal-site`
+        # COPY step was elided). Docker exec then fails with
+        # `OCI runtime exec failed: chdir to cwd ("/app/personal-site")
+        # set in config.json failed: no such file or directory`
+        # BEFORE our prep command even runs. Our prep uses absolute paths
+        # only, so the cwd is irrelevant for the command itself; pinning
+        # it to "/" sidesteps any per-task WORKDIR fragility.
         prep = "mkdir -p /tests /logs/verifier && rm -rf /tests/* 2>/dev/null || true"
-        exit_code, stdout, stderr = await self._docker.exec(container, prep, timeout=30)
+        exit_code, stdout, stderr = await self._docker.exec(
+            container, prep, timeout=30, working_dir="/"
+        )
         if exit_code != 0:
             # Include exit_code AND stdout — when the container has exited
             # before exec runs, docker prints to its own stderr but in some
@@ -1231,6 +1255,7 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
             container,
             "cd /tests && bash test.sh",
             timeout=self._test_timeout_seconds,
+            working_dir="/",
         )
         # test.sh can exit non-zero even on a valid 0-reward run if the
         # pytest harness returns non-zero; the reward file is the source
@@ -1251,6 +1276,7 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
             "if [ -s /logs/verifier/reward.txt ]; then cat /logs/verifier/reward.txt; "
             "elif [ -s /logs/verifier/reward.json ]; then cat /logs/verifier/reward.json; fi",
             timeout=10,
+            working_dir="/",
         )
         raw = (reward_txt or "").strip()
         if not raw:
