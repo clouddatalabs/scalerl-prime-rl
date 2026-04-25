@@ -519,6 +519,31 @@ def _validate_orch_lora_against_trainer(
     return True, ""
 
 
+def _validate_orch_optim_lr_explicit(orch_config: "OrchestratorConfig") -> tuple[bool, str]:
+    """Refuse multi-run orchestrator configs that didn't explicitly set `[orchestrator.optim] lr`.
+
+    Per-run optimizer LR is consumed by the multi-scheduler; its default
+    `1e-4` is 200x ScaleRL §3.3's `5e-7`. A copy-pasted multi-run TOML that
+    sets `[trainer.optim] lr = 5e-7` but forgets to mirror that on the
+    per-run orchestrator config silently trains every adapter at 1e-4. The
+    multi-run path discovers orchestrator configs out-of-process so a
+    single RLConfig-level validator can't see them — register this hook
+    inside setup_multi_run_manager so each per-run config is rejected at
+    discovery time when `lr` was inherited from the schema default rather
+    than explicitly written.
+    """
+    if "lr" not in orch_config.optim.model_fields_set:
+        return (
+            False,
+            "[orchestrator.optim] lr is required in multi-run mode (it is "
+            "consumed by the per-run multi-scheduler). The schema default "
+            "1e-4 is 200x ScaleRL §3.3's 5e-7 and silently mistraining a "
+            "multi-run sweep is a real footgun. Set `[orchestrator.optim] "
+            "lr = <value>` explicitly for every per-run TOML."
+        )
+    return True, ""
+
+
 def setup_multi_run_manager(
     output_dir: Path, max_runs: int, device: torch.device, lora_config: LoRAConfig | None = None
 ) -> MultiRunManager:
@@ -556,5 +581,12 @@ def setup_multi_run_manager(
 
         _MULTI_RUN_MANAGER.register_config_validation_hook(validate_lora_rank)
         _MULTI_RUN_MANAGER.register_discovered_hook(on_run_discovered)
+
+    # Always register the per-run LR explicit-set check in multi-run mode.
+    # max_runs == 1 is the single-run path where orchestrator.optim.lr is
+    # dead — only multi-run mode consumes it (multi-scheduler at scheduler.py
+    # line ~149, multi-optimizer at optim.py line ~294).
+    if max_runs > 1 and _MULTI_RUN_MANAGER.world.is_master:
+        _MULTI_RUN_MANAGER.register_config_validation_hook(_validate_orch_optim_lr_explicit)
 
     return _MULTI_RUN_MANAGER
