@@ -487,6 +487,38 @@ def get_multi_run_manager() -> MultiRunManager:
     return _MULTI_RUN_MANAGER
 
 
+def _validate_orch_lora_against_trainer(
+    orch_config: "OrchestratorConfig", trainer_lora: LoRAConfig
+) -> tuple[bool, str]:
+    """Validate an orchestrator config's LoRA section against the trainer's LoRA.
+
+    Mutates the orch config in place to fill in defaults from the trainer
+    (rank/alpha may be omitted in the orch TOML to inherit). Returns the
+    standard `(is_valid, error_message)` contract used by the multi-run
+    config-validation hook chain. Extracted from the closure inside
+    `setup_multi_run_manager` so unit tests can pin the contract — the
+    `orch_config.model.lora is None` rejection is the load-bearing path
+    that prevents an AttributeError on the trainer's master rank.
+    """
+    if orch_config.model.lora is None:
+        return (
+            False,
+            "[model.lora] section is required in the orchestrator config when "
+            "the trainer is configured with LoRA. Add `[model.lora]` (rank "
+            "and alpha may be omitted to inherit the trainer's values).",
+        )
+    if orch_config.model.lora.rank is None:
+        orch_config.model.lora.rank = trainer_lora.rank
+    if orch_config.model.lora.alpha is None:
+        orch_config.model.lora.alpha = trainer_lora.alpha
+    if orch_config.model.lora.rank > trainer_lora.rank:
+        return (
+            False,
+            f"model.lora.rank ({orch_config.model.lora.rank}) exceeds trainer max rank ({trainer_lora.rank})",
+        )
+    return True, ""
+
+
 def setup_multi_run_manager(
     output_dir: Path, max_runs: int, device: torch.device, lora_config: LoRAConfig | None = None
 ) -> MultiRunManager:
@@ -510,19 +542,16 @@ def setup_multi_run_manager(
         trainer_lora = lora_config
 
         def validate_lora_rank(orch_config: "OrchestratorConfig") -> tuple[bool, str]:
-            # Default to trainer's rank/alpha if not specified
-            if orch_config.model.lora.rank is None:
-                orch_config.model.lora.rank = trainer_lora.rank
-            if orch_config.model.lora.alpha is None:
-                orch_config.model.lora.alpha = trainer_lora.alpha
-            if orch_config.model.lora.rank > trainer_lora.rank:
-                return (
-                    False,
-                    f"model.lora.rank ({orch_config.model.lora.rank}) exceeds trainer max rank ({trainer_lora.rank})",
-                )
-            return True, ""
+            return _validate_orch_lora_against_trainer(orch_config, trainer_lora)
 
         def on_run_discovered(idx: int, run_id: str, orch_config: "OrchestratorConfig") -> None:
+            # Validation hook above guarantees orch_config.model.lora is not None
+            # before this discovered hook fires; keep an explicit assert so a
+            # future refactor that reorders or skips validation surfaces the
+            # contract loudly rather than crashing on attribute access.
+            assert orch_config.model.lora is not None, (
+                "on_run_discovered requires validate_lora_rank to have run first"
+            )
             _MULTI_RUN_MANAGER.scaling_factors[idx] = orch_config.model.lora.alpha / orch_config.model.lora.rank
 
         _MULTI_RUN_MANAGER.register_config_validation_hook(validate_lora_rank)
