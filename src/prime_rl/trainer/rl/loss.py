@@ -313,7 +313,7 @@ def compute_loss(
     loss_scale: int,
     sequence_loss_weights: list[float] | None = None,
     loss_scale_mode: LossScaleMode | None = None,
-    fsdp_world_size: int = 1,
+    fsdp_gradient_divide_factor: int = 1,
 ) -> tuple[Float[Tensor, ""], dict[str, Any]]:
     """
     Compute loss for packed sequences (batch size = 1, multiple sequences packed along sequence dimension).
@@ -334,10 +334,15 @@ def compute_loss(
         loss_scale_mode: How to combine per-sequence losses. Defaults to
             `getattr(loss_fn, "loss_scale_mode", "token")` so call sites that
             don't pass it inherit the loss-fn's preference.
-        fsdp_world_size: data-parallel world size used by FSDP gradient
-            averaging (`dp_replicate * dp_shard * cp` from `parallel_dims`).
-            Only consulted in `sequence`/`none` mode; defaults to 1 so
-            single-process tests stay simple.
+        fsdp_gradient_divide_factor: the divisor that PyTorch FSDP applies
+            during its all-reduce of gradients — `dp_replicate * dp_shard * cp`
+            on the (dp_replicate, dp_shard_cp) hsdp mesh. Pass exactly
+            `parallel_dims.fsdp_gradient_divide_factor`. NOT the same as
+            `dist.get_world_size()` if you ever add pipeline parallel — PP
+            does not reduce gradients across PP ranks, so `world_size` would
+            shrink the gradient by `1/pp` after FSDP averaging. Only consulted
+            in `sequence`/`none` mode; defaults to 1 so single-process tests
+            stay simple.
 
     Returns:
         Tuple of (scaled_loss, aggregated_metrics)
@@ -448,15 +453,15 @@ def compute_loss(
         # `mean_rank(local_loss / local_tokens)`, which approximates but does
         # not exactly equal `global_loss / global_tokens`. Same as upstream;
         # call out if you ever change loss_scale here.
-        if not isinstance(fsdp_world_size, int) or fsdp_world_size < 1:
+        if not isinstance(fsdp_gradient_divide_factor, int) or fsdp_gradient_divide_factor < 1:
             raise ValueError(
                 "compute_loss(loss_scale_mode='sequence'/'none') requires a "
-                "positive integer `fsdp_world_size` to cancel FSDP's "
+                "positive integer `fsdp_gradient_divide_factor` to cancel FSDP's "
                 "gradient_divide_factor. Got "
-                f"fsdp_world_size={fsdp_world_size!r}. Production callers should "
+                f"fsdp_gradient_divide_factor={fsdp_gradient_divide_factor!r}. Production callers should "
                 "pass `parallel_dims.fsdp_gradient_divide_factor`; tests can pass 1."
             )
-        scaled_loss = total_loss * float(fsdp_world_size)
+        scaled_loss = total_loss * float(fsdp_gradient_divide_factor)
 
     aggregated: dict[str, Any] = {}
     for k, v in all_metrics.items():

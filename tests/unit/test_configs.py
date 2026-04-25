@@ -700,7 +700,7 @@ def test_linear_scheduler_config_rejects_zero_phases():
 def test_rl_config_rejects_sequence_mode_without_prompt_average_loss():
     """`loss_scale_mode in {sequence, none}` without `prompt_average_loss=True`
     leaves per-sequence weights at the neutral 1.0 default. compute_loss
-    multiplies by `fsdp_world_size`, producing a raw global sum scaled by DP
+    multiplies by `fsdp_gradient_divide_factor`, producing a raw global sum scaled by DP
     — effective LR scales linearly with batch size and DP size. CISPO defaults
     to sequence so an out-of-the-box CISPO config without prompt-avg silently
     lacks normalization."""

@@ -525,7 +525,7 @@ def train(config: TrainerConfig):
                 # dp_replicate*dp_shard*cp). For sequence/none loss_scale_mode the
                 # packer's weights are global, so compute_loss multiplies the rank
                 # loss by this factor to cancel the FSDP divisor.
-                fsdp_world_size=parallel_dims.fsdp_gradient_divide_factor,
+                fsdp_gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
             )
 
             # Backward pass

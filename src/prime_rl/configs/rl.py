@@ -813,7 +813,7 @@ class RLConfig(BaseConfig):
             loss_scale_mode in {'sequence','none'} without
             prompt_average_loss=True leaves the per-sequence weights at the
             neutral 1.0 default. compute_loss then computes
-            `sum_i loss_i * fsdp_world_size`, which after FSDP averaging is
+            `sum_i loss_i * fsdp_gradient_divide_factor`, which after FSDP averaging is
             the raw (unnormalized) sum over the global batch — effective LR
             scales linearly with batch_size * avg_completion_len. CISPO
             defaults to 'sequence', so an out-of-the-box CISPO config without

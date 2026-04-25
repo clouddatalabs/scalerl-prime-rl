@@ -331,8 +331,8 @@ def test_compute_loss_sequence_mode_uses_weights_no_token_divide():
     assert torch.isclose(loss, torch.tensor(2.25), atol=1e-6)
 
 
-def test_compute_loss_sequence_mode_scales_by_fsdp_world_size():
-    """Sequence-mode loss must be multiplied by fsdp_world_size so that FSDP's
+def test_compute_loss_sequence_mode_scales_by_fsdp_gradient_divide_factor():
+    """Sequence-mode loss must be multiplied by fsdp_gradient_divide_factor so that FSDP's
     gradient_divide_factor=dp_world_size cancels and the aggregate gradient
     equals `sum_global(w_i * grad_i)`. Without this multiplier the effective
     LR shrinks 1/dp_world_size silently in multi-rank DP."""
@@ -351,7 +351,7 @@ def test_compute_loss_sequence_mode_scales_by_fsdp_world_size():
         loss_fn=loss_fn,
         loss_scale=999,
         sequence_loss_weights=[0.25, 0.5],
-        fsdp_world_size=1,
+        fsdp_gradient_divide_factor=1,
     )
     loss_dp4, _ = compute_loss(
         trainer_logprobs=trainer_logprobs,
@@ -362,12 +362,12 @@ def test_compute_loss_sequence_mode_scales_by_fsdp_world_size():
         loss_fn=loss_fn,
         loss_scale=999,
         sequence_loss_weights=[0.25, 0.5],
-        fsdp_world_size=4,
+        fsdp_gradient_divide_factor=4,
     )
     assert torch.isclose(loss_dp4, loss_dp1 * 4.0, atol=1e-6)
 
 
-def test_compute_loss_none_mode_scales_by_fsdp_world_size():
+def test_compute_loss_none_mode_scales_by_fsdp_gradient_divide_factor():
     """`loss_scale_mode = "none"` shares the sequence/none code branch and must
     apply the same FSDP-world-size multiplier."""
     trainer_logprobs = [torch.tensor([-1.0, -2.0]), torch.tensor([-3.0])]
@@ -385,7 +385,7 @@ def test_compute_loss_none_mode_scales_by_fsdp_world_size():
         loss_fn=loss_fn,
         loss_scale=999,
         sequence_loss_weights=[0.25, 0.5],
-        fsdp_world_size=1,
+        fsdp_gradient_divide_factor=1,
     )
     loss_dp4, _ = compute_loss(
         trainer_logprobs=trainer_logprobs,
@@ -396,22 +396,22 @@ def test_compute_loss_none_mode_scales_by_fsdp_world_size():
         loss_fn=loss_fn,
         loss_scale=999,
         sequence_loss_weights=[0.25, 0.5],
-        fsdp_world_size=4,
+        fsdp_gradient_divide_factor=4,
     )
     assert torch.isclose(loss_dp4, loss_dp1 * 4.0, atol=1e-6)
 
 
-def test_compute_loss_sequence_mode_rejects_invalid_fsdp_world_size():
-    """`compute_loss(loss_scale_mode='sequence')` requires fsdp_world_size >= 1.
+def test_compute_loss_sequence_mode_rejects_invalid_fsdp_gradient_divide_factor():
+    """`compute_loss(loss_scale_mode='sequence')` requires fsdp_gradient_divide_factor >= 1.
     A future caller (custom loss wrapper, copy-pasted test pattern) that omits
     the kwarg would silently get the wrong scaling — same class as the old
-    AdamW eps drop. Pin against fsdp_world_size=0 explicitly."""
+    AdamW eps drop. Pin against fsdp_gradient_divide_factor=0 explicitly."""
     trainer_logprobs = [torch.tensor([-1.0]), torch.tensor([-2.0])]
     inference_logprobs = [torch.zeros(1), torch.zeros(1)]
     advantages = [torch.zeros(1), torch.zeros(1)]
     loss_mask = [torch.tensor([True]), torch.tensor([True])]
     loss_fn = setup_loss_fn(SFTLossConfig(loss_scale_mode="sequence"))
-    with pytest.raises(ValueError, match="fsdp_world_size"):
+    with pytest.raises(ValueError, match="fsdp_gradient_divide_factor"):
         compute_loss(
             trainer_logprobs=trainer_logprobs,
             inference_logprobs=inference_logprobs,
@@ -421,11 +421,11 @@ def test_compute_loss_sequence_mode_rejects_invalid_fsdp_world_size():
             loss_fn=loss_fn,
             loss_scale=1,
             sequence_loss_weights=[0.5, 0.5],
-            fsdp_world_size=0,
+            fsdp_gradient_divide_factor=0,
         )
 
 
-def test_compute_loss_token_mode_unaffected_by_fsdp_world_size():
+def test_compute_loss_token_mode_unaffected_by_fsdp_gradient_divide_factor():
     """Token-mode divides by local trainable tokens; the FSDP factor cancels
     naturally under balanced packing, so compute_loss must NOT apply it."""
     trainer_logprobs = [torch.tensor([-1.0, -2.0]), torch.tensor([-3.0])]
@@ -442,7 +442,7 @@ def test_compute_loss_token_mode_unaffected_by_fsdp_world_size():
         loss_mask=loss_mask,
         loss_fn=loss_fn,
         loss_scale=3,
-        fsdp_world_size=1,
+        fsdp_gradient_divide_factor=1,
     )
     loss_dp4, _ = compute_loss(
         trainer_logprobs=trainer_logprobs,
@@ -452,7 +452,7 @@ def test_compute_loss_token_mode_unaffected_by_fsdp_world_size():
         loss_mask=loss_mask,
         loss_fn=loss_fn,
         loss_scale=3,
-        fsdp_world_size=4,
+        fsdp_gradient_divide_factor=4,
     )
     assert torch.isclose(loss_dp4, loss_dp1, atol=1e-6)
 
