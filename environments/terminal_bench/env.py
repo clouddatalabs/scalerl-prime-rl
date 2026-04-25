@@ -421,6 +421,40 @@ class _DockerClient:
         await proc.wait()
         return proc.returncode == 0
 
+    async def rmi(self, image: str) -> None:
+        """``docker rmi -f <image>``. Used by the BuildKit-corruption recovery
+        path to invalidate a tagged-but-broken image so the next build goes
+        from scratch. ``-f`` removes even if a stopped container references
+        it; running containers are NOT killed.
+        """
+        cmd = [*self._prefix(), "rmi", "-f", image]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"docker rmi {image!r} failed: "
+                f"{stderr.decode(errors='replace').strip()[:300]}"
+            )
+
+    # BuildKit corruption signatures we recover from with a --no-cache retry.
+    # When a previous racing build left dangling parent snapshots in the
+    # snapshotter's metadata, every subsequent cached build of the same
+    # Dockerfile step fails with "parent snapshot ... does not exist". The
+    # cache is poisoned at the daemon layer; we can't `flock` our way out.
+    # Detect the symptom and retry with --no-cache to rebuild from scratch
+    # against the FROM layer, which restores the snapshotter to a healthy
+    # state for that lineage. Once a clean rebuild lands, subsequent cached
+    # builds succeed normally.
+    _BUILDKIT_CORRUPTION_MARKERS = (
+        "parent snapshot",
+        "failed to extract layer",
+        "failed to get reader from content store",
+    )
+
     async def build(
         self,
         *,
@@ -441,9 +475,32 @@ class _DockerClient:
 
         Raises on non-zero exit; stderr tail is surfaced in the exception
         so rollout failures point at the actual missing package rather
-        than "docker run: image not found".
+        than "docker run: image not found". On detected BuildKit cache
+        corruption (see ``_BUILDKIT_CORRUPTION_MARKERS``), retry once
+        with ``--no-cache`` to bypass the poisoned cache layer.
         """
+        await self._build_one(
+            tag=tag,
+            context_dir=context_dir,
+            dockerfile=dockerfile,
+            timeout=timeout,
+            log_path=log_path,
+            no_cache=False,
+        )
+
+    async def _build_one(
+        self,
+        *,
+        tag: str,
+        context_dir: str | os.PathLike[str],
+        dockerfile: str | os.PathLike[str] | None,
+        timeout: int,
+        log_path: str | os.PathLike[str] | None,
+        no_cache: bool,
+    ) -> None:
         cmd = [*self._prefix(), "build", "-t", tag]
+        if no_cache:
+            cmd += ["--no-cache"]
         if dockerfile is not None:
             cmd += ["-f", os.fspath(dockerfile)]
         cmd += [os.fspath(context_dir)]
@@ -466,9 +523,33 @@ class _DockerClient:
                         f"(context={context_dir}); see {log_path}"
                     )
                 if rc != 0:
+                    log_tail = ""
+                    try:
+                        with open(log_path, "rb") as f:
+                            f.seek(0, os.SEEK_END)
+                            size = f.tell()
+                            f.seek(max(0, size - 8192))
+                            log_tail = f.read().decode(errors="replace")
+                    except OSError:
+                        pass
+                    if not no_cache and self._is_buildkit_corruption(log_tail):
+                        _logger.warning(
+                            "terminal_bench_local: BuildKit cache corruption "
+                            "detected for %s; retrying with --no-cache",
+                            tag,
+                        )
+                        await self._build_one(
+                            tag=tag,
+                            context_dir=context_dir,
+                            dockerfile=dockerfile,
+                            timeout=timeout,
+                            log_path=log_path,
+                            no_cache=True,
+                        )
+                        return
                     raise RuntimeError(
                         f"docker build for {tag!r} failed (exit={rc}); "
-                        f"see {log_path} for the full log"
+                        f"see {log_path} for the full log\n{log_tail[-2000:]}"
                     )
             finally:
                 log_file.close()
@@ -492,10 +573,30 @@ class _DockerClient:
                     f"(context={context_dir})"
                 )
             if proc.returncode != 0:
-                tail = stdout_b.decode(errors="replace").strip()[-2000:]
+                output = stdout_b.decode(errors="replace")
+                if not no_cache and self._is_buildkit_corruption(output):
+                    _logger.warning(
+                        "terminal_bench_local: BuildKit cache corruption "
+                        "detected for %s; retrying with --no-cache",
+                        tag,
+                    )
+                    await self._build_one(
+                        tag=tag,
+                        context_dir=context_dir,
+                        dockerfile=dockerfile,
+                        timeout=timeout,
+                        log_path=log_path,
+                        no_cache=True,
+                    )
+                    return
+                tail = output.strip()[-2000:]
                 raise RuntimeError(
                     f"docker build for {tag!r} failed (exit={proc.returncode}):\n{tail}"
                 )
+
+    @classmethod
+    def _is_buildkit_corruption(cls, text: str) -> bool:
+        return any(marker in text for marker in cls._BUILDKIT_CORRUPTION_MARKERS)
 
 
 class TerminalBenchLocalEnv(vf.StatefulToolEnv):
@@ -580,6 +681,40 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
     def _dockerfile_path(self, spec: _TaskSpec) -> Path | None:
         candidate = spec.dir / "environment" / "Dockerfile"
         return candidate if candidate.is_file() else None
+
+    def _tb_labels(self, task_name: str) -> dict[str, str]:
+        """Labels stamped on every rollout container.
+
+        `prime_rl_tb_env=1` is the discoverability label (find any tb
+        container on this host); `prime_rl_tb_run_id={run}` is the
+        per-run-unique label the startup sweep filters by, so concurrent
+        runs on the same host don't kill each other. `prime_rl_tb_task`
+        is the task name for human-greppable `docker ps` output.
+        """
+        return {
+            "prime_rl_tb_env": "1",
+            "prime_rl_tb_run_id": self._run_id,
+            "prime_rl_tb_task": task_name,
+        }
+
+    async def _invalidate_image(self, spec: _TaskSpec, tag: str) -> None:
+        """Drop the cached tag and best-effort `docker rmi` it so the next
+        `_resolve_image` call goes through the build path again. Used when
+        `docker run` fails with a BuildKit-cache-corruption signature on a
+        tagged-but-broken image (`image_exists()` returns True but the run
+        fails to extract a layer). Without invalidation, every subsequent
+        rollout short-circuits straight back to the broken tag.
+        """
+        self._resolved_tags.pop(spec.name, None)
+        try:
+            await self._docker.rmi(tag)
+        except Exception as e:
+            _logger.warning(
+                "terminal_bench_local: docker rmi %s failed: %r (continuing — "
+                "the next rebuild will overwrite the tag anyway)",
+                tag,
+                e,
+            )
 
     async def _resolve_image(self, spec: _TaskSpec) -> str:
         """Return a ``docker run``-able tag for ``spec``.
@@ -721,26 +856,51 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
             await self._docker.run_detached(
                 image,
                 name=container,
-                # `prime_rl_tb_env=1` is the discoverability label (find any
-                # tb container on this host); `prime_rl_tb_run_id={run}` is
-                # the per-run-unique label the startup sweep filters by, so
-                # concurrent runs on the same host don't kill each other.
-                # `prime_rl_tb_task` is the task name for human-greppable
-                # `docker ps` output.
-                labels={
-                    "prime_rl_tb_env": "1",
-                    "prime_rl_tb_run_id": self._run_id,
-                    "prime_rl_tb_task": spec.name,
-                },
+                labels=self._tb_labels(spec.name),
             )
-        except Exception as e:
-            # Leave state in a safe shape so cleanup can no-op. Re-raise
-            # so the orchestrator marks the rollout as errored (zero
-            # reward) instead of spinning forever.
-            state["tb_container_id"] = None
-            state["tb_task_dir"] = str(spec.dir)
-            state["tb_setup_error"] = str(e)
-            raise
+        except RuntimeError as e:
+            # `docker run` failed. If the failure looks like the BuildKit
+            # corruption symptom ("failed to extract layer / content digest
+            # not found"), the tag points at an image whose layers are
+            # missing on disk — `image_exists()` returns True but the run
+            # is unrecoverable. Untag, drop our cached resolution, rebuild
+            # under flock, and retry the run once. Without this, every
+            # subsequent rollout of the corrupted task hits the same error
+            # forever (image_exists keeps short-circuiting back to the
+            # broken tag).
+            if (
+                self._build_local_images
+                and self._dockerfile_path(spec) is not None
+                and _DockerClient._is_buildkit_corruption(str(e))
+            ):
+                _logger.warning(
+                    "terminal_bench_local: docker run for %s hit BuildKit "
+                    "corruption (%s); untagging + rebuilding under flock",
+                    image,
+                    e,
+                )
+                await self._invalidate_image(spec, image)
+                image = await self._resolve_image(spec)
+                container = f"tb-{spec.name}-{uuid.uuid4().hex[:16]}"
+                try:
+                    await self._docker.run_detached(
+                        image,
+                        name=container,
+                        labels=self._tb_labels(spec.name),
+                    )
+                except Exception as e2:
+                    state["tb_container_id"] = None
+                    state["tb_task_dir"] = str(spec.dir)
+                    state["tb_setup_error"] = str(e2)
+                    raise
+            else:
+                # Leave state in a safe shape so cleanup can no-op. Re-raise
+                # so the orchestrator marks the rollout as errored (zero
+                # reward) instead of spinning forever.
+                state["tb_container_id"] = None
+                state["tb_task_dir"] = str(spec.dir)
+                state["tb_setup_error"] = str(e)
+                raise
 
         state["tb_container_id"] = container
         state["tb_task_dir"] = str(spec.dir)
