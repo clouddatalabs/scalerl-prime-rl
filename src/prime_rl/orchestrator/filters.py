@@ -171,13 +171,20 @@ def apply_filters(filters: list[RolloutFilter], rollouts: list[vf.RolloutOutput]
     for rollout in rollouts:
         for filt in filters:
             result = filt.check(rollout)
-            if result.detected:
-                counts[filt.name] += 1
-                total_detected += 1
-                rollout["filters"][filt.name] = True
-                if filt.enforce:
-                    rollout["is_filtered"] = True
-                    total_enforced += 1
+            if not result.detected:
+                continue
+            counts[filt.name] += 1
+            total_detected += 1
+            rollout["filters"][filt.name] = True
+            if filt.enforce:
+                rollout["is_filtered"] = True
+                total_enforced += 1
+                # Stop at the first ENFORCING detection so we don't double-count
+                # `total_enforced`. Monitoring detections (`enforce=False`) fall
+                # through so a later enforcing filter (e.g. ZeroAdvantageFilter)
+                # still gets a chance to drop the rollout — without this, a
+                # monitoring filter that fires first silently leaks zero-advantage
+                # rollouts into the trainer.
                 break
 
     if total_detected > 0:

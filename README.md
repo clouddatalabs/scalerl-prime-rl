@@ -1,3 +1,17 @@
+<h3 align="center">
+scalerl-prime-rl — public POC fork of <a href="https://github.com/PrimeIntellect-ai/prime-rl">PrimeIntellect-ai/prime-rl</a>
+</h3>
+
+> **This fork** adds the seven training-recipe ingredients from
+> [The Art of Scaling Reinforcement Learning Compute for LLMs](https://arxiv.org/abs/2510.13786)
+> on top of an upstream prime-rl checkpoint (commit `20454ecd7`). It is the
+> code we hand to Snowflake for the ScaleRL POC. Everything Snowflake-specific
+> lives in **[`docs/SCALERL.md`](docs/SCALERL.md)** — read that first; the
+> Quickstart there is the working setup. The rest of this README is the
+> upstream prime-rl README, kept verbatim for reference.
+
+---
+
 <p align="center">
 </p>
 

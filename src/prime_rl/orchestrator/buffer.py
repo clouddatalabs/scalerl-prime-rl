@@ -347,15 +347,26 @@ class Buffer:
             # Build hash → env_name lookup so we attach stats to the right buffer.
             hash_to_env = {h: env for env, env_hashes in hash_lookup.items() for h in env_hashes}
             for entry in saved_pass_rate_stats:
-                h = entry.get("example_hash")
-                if h is None:
-                    continue
+                # Strict key access: a future schema rename should fail loudly
+                # rather than silently restart NPR's pass-rate stats from zero
+                # (which would re-admit every formerly-excluded prompt mid-run).
+                try:
+                    h = entry["example_hash"]
+                    num_groups = float(entry["num_groups"])
+                    pass_rate = float(entry["pass_rate"])
+                except KeyError as exc:
+                    raise ValueError(
+                        f"NPR pass-rate checkpoint entry missing required key {exc!r} "
+                        f"(entry={entry!r}). Refusing to silently reset stats; "
+                        "either fix the checkpoint or pass --ckpt.skip_buffer to "
+                        "discard buffer state on resume."
+                    ) from exc
                 env_name = hash_to_env.get(h)
                 if env_name is None:
                     continue
                 self.env_buffers[env_name].pass_rate_stats[h] = {
-                    "num_groups": float(entry.get("num_groups", 0.0)),
-                    "pass_rate": float(entry.get("pass_rate", 0.0)),
+                    "num_groups": num_groups,
+                    "pass_rate": pass_rate,
                 }
                 restored += 1
             self.logger.debug(

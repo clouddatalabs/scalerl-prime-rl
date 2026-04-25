@@ -209,6 +209,26 @@ echo "================================="
 # `source .venv/bin/activate` does not always rewrite PATH cleanly under slurm.
 RL_ARGS=()
 if [ "${SCALERL_RESUME:-0}" = "1" ]; then
+    # Fail-fast if there's no checkpoint to resume from. Otherwise prime-rl
+    # logs a `WARNING: no checkpoint found` and silently restarts from
+    # step 0 — wiping prior rollouts and broadcasts in the same output_dir
+    # via `clean_future_steps(resume_step=-1)`. That's a footgun the user
+    # almost never wants when they explicitly asked to resume.
+    OUTPUT_DIR_RESOLVED="$("$PYBIN" -c "
+import sys, tomli
+from prime_rl.configs.rl import RLConfig
+cfg = RLConfig.model_validate(tomli.loads(open(sys.argv[1],'rb').read().decode()))
+print(cfg.output_dir)
+" "$SCALERL_CONFIG")"
+    CKPT_DIR="$REPO_ROOT/$OUTPUT_DIR_RESOLVED/checkpoints"
+    if [ -z "$(find "$CKPT_DIR" -mindepth 1 -maxdepth 1 -type d -name 'step_*' 2>/dev/null)" ]; then
+        echo "ERROR: SCALERL_RESUME=1 but no checkpoints found under $CKPT_DIR." >&2
+        echo "       The first checkpoint lands at [ckpt] interval (= ${SCALERL_CKPT_INTERVAL:-100}) steps;" >&2
+        echo "       a run that crashed before that has nothing to resume from." >&2
+        echo "       Resubmit without SCALERL_RESUME=1 to start fresh, or rm -rf the output_dir if you" >&2
+        echo "       want a clean restart in place." >&2
+        exit 1
+    fi
     RL_ARGS+=(--ckpt.resume_step=-1)
 fi
 "$REPO_ROOT/.venv/bin/rl" @ "$SCALERL_CONFIG" "${RL_ARGS[@]}"

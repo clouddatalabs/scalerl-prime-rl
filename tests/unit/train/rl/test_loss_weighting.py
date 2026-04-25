@@ -345,6 +345,30 @@ def test_compute_loss_none_mode_scales_by_fsdp_world_size():
     assert torch.isclose(loss_dp4, loss_dp1 * 4.0, atol=1e-6)
 
 
+def test_compute_loss_sequence_mode_rejects_invalid_fsdp_world_size():
+    """`compute_loss(loss_scale_mode='sequence')` requires fsdp_world_size >= 1.
+    A future caller (custom loss wrapper, copy-pasted test pattern) that omits
+    the kwarg would silently get the wrong scaling — same class as the old
+    AdamW eps drop. Pin against fsdp_world_size=0 explicitly."""
+    trainer_logprobs = [torch.tensor([-1.0]), torch.tensor([-2.0])]
+    inference_logprobs = [torch.zeros(1), torch.zeros(1)]
+    advantages = [torch.zeros(1), torch.zeros(1)]
+    loss_mask = [torch.tensor([True]), torch.tensor([True])]
+    loss_fn = setup_loss_fn(SFTLossConfig(loss_scale_mode="sequence"))
+    with pytest.raises(ValueError, match="fsdp_world_size"):
+        compute_loss(
+            trainer_logprobs=trainer_logprobs,
+            inference_logprobs=inference_logprobs,
+            teacher_logprobs=None,
+            advantages=advantages,
+            loss_mask=loss_mask,
+            loss_fn=loss_fn,
+            loss_scale=1,
+            sequence_loss_weights=[0.5, 0.5],
+            fsdp_world_size=0,
+        )
+
+
 def test_compute_loss_token_mode_unaffected_by_fsdp_world_size():
     """Token-mode divides by local trainable tokens; the FSDP factor cancels
     naturally under balanced packing, so compute_loss must NOT apply it."""

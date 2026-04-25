@@ -46,6 +46,12 @@ type = "nccl"
 # This is the Snowflake reproduction target — match the paper.
 batch_size = 768
 rollouts_per_example = 16
+# Terminal-Bench rollouts are multi-turn tool-call sessions; the chat
+# template removes/inserts tokens between turns, so the prime-rl token
+# client (which assumes a linear, append-only token history) cannot be used
+# without silently corrupting train/inference logprob alignment. Force the
+# string-client path. (See OrchestratorConfig.use_token_client docstring.)
+use_token_client = false
 strict_async_level = false
 max_off_policy_steps = 1000000000
 prompt_average_loss = true
