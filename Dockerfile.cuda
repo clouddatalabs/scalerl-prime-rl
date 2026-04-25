@@ -30,8 +30,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && apt-get clean autoclean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Download the latest installer
-ADD https://astral.sh/uv/install.sh /uv-installer.sh
+# Pin uv to the same version that scripts/install.sh pins for host-side
+# installs. With `[tool.uv] preview = true` (pyproject.toml), resolver
+# semantics drift across uv minors — `--locked` constrains version
+# resolution but preview-flag knobs (no-build-isolation-package,
+# override-dependencies) can still differ. Mismatched uv between Docker
+# and host installs can produce a working host venv and a broken
+# container venv (or vice-versa). Override at build time with
+# `--build-arg UV_VERSION=...` if you've validated a newer release.
+ARG UV_VERSION=0.11.6
+ADD https://astral.sh/uv/${UV_VERSION}/install.sh /uv-installer.sh
 
 # Set install dir to location accessible to non-root users
 RUN INSTALLER_NO_MODIFY_PATH=1 UV_INSTALL_DIR="/usr/local/bin" sh /uv-installer.sh && rm /uv-installer.sh
