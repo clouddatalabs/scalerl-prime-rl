@@ -368,13 +368,22 @@ def train(config: SFTConfig):
             with maybe_record_function("forward"):
                 local_loss_sum, local_token_count = compute_loss(micro_batch)
 
-            step_local_token_count += local_token_count
-
             if torch.isnan(local_loss_sum.detach()):
+                # `torch.nan_to_num`'s autograd derivative is `grad *
+                # isfinite(self)`, so the gradient contribution from this
+                # micro-step is correctly zero — but the global denominator
+                # used for `grad_scale` is the all-reduced sum of
+                # `step_local_token_count`. If we counted these tokens
+                # there too, the gradient (numerator) would exclude them
+                # while the denominator includes them, biasing the final
+                # gradient low by `non_nan_tokens / all_tokens`. Skip the
+                # token count alongside the backward contribution so the
+                # numerator and denominator are over the same set.
                 nan_loss_count += 1
                 logger.warning("Local loss is nan, excluding this micro step from backward")
                 scaled_loss = torch.nan_to_num(local_loss_sum, nan=0.0) / grad_accum_steps
             else:
+                step_local_token_count += local_token_count
                 step_loss_sum += local_loss_sum.detach()
                 scaled_loss = local_loss_sum / grad_accum_steps
 
