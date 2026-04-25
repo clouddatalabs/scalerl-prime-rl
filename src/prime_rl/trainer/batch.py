@@ -216,13 +216,18 @@ def pad_micro_batch(micro_batch: MicroBatch, pad_to_multiple_of: int) -> MicroBa
     # routed_experts is per-token; without padding here, the downstream
     # `torch.tensor(...).reshape(...)` in `_micro_batch_to_tensor` would
     # either crash on shape mismatch or silently misalign router-replay
-    # supervision with token positions. Padding entries get a single layer/topk
-    # entry of -1s sized like the existing entries — loss_mask is False on
-    # padding tokens so router-replay loss ignores them, but we keep the
-    # tensor shape consistent with `len(input_ids)`.
+    # supervision with token positions. Pad with **0** (valid expert index),
+    # NOT -1: the MoE forward pass calls `scores.gather(dim=1, index=routed_experts)`
+    # unconditionally before any loss masking, so any out-of-range index
+    # crashes the gather (RuntimeError on CPU, device-side assert on CUDA).
+    # `loss_mask=False` does not gate the gather, only the loss; the comment
+    # in the prior version got that wrong. Filler 0 matches the convention
+    # used by `_align_routed_experts` in orchestrator/trajectories.py and
+    # only over-counts expert 0 in the load-balancing histogram by the
+    # padding-token count — pad tokens are loss-masked so the bias is benign.
     if micro_batch.routed_experts is not None and len(micro_batch.routed_experts) > 0:
         layers_topk = micro_batch.routed_experts[0]
-        pad_entry = [[-1 for _ in row] for row in layers_topk]
+        pad_entry = [[0 for _ in row] for row in layers_topk]
         micro_batch.routed_experts.extend([pad_entry] * padding_size)
     # The padding tokens get position_ids = range(padding_size) above, which restarts at 0.
     # `get_response_lengths` (utils.py) reads position_id resets as sequence boundaries — but

@@ -205,3 +205,49 @@ def test_packed_micro_batch_or_merges_synth_flag():
     )
     assert len(packed) == 1
     assert packed[0].inference_logprobs_synthesized is True
+
+
+def test_make_dummy_batch_resets_synth_flag():
+    """`_make_dummy_batch` must reset inference_logprobs_synthesized to False
+    even when the source has it set, otherwise the deepcopy carries the flag
+    into the IS-ratio runtime guard which fires before the loss_mask=False
+    short-circuit. Confirmed regression-prone — this is testing the round-20
+    fix."""
+    from prime_rl.trainer.batch import _make_dummy_batch
+
+    synth_sample = prepare_sample(_make_synthesized_sample(True), seq_len=4)
+    assert synth_sample.inference_logprobs_synthesized is True
+    dummy = _make_dummy_batch(synth_sample)
+    assert dummy.inference_logprobs_synthesized is False
+    # And the loss-mask is fully zeroed so the guard's short-circuit is also intact.
+    assert all(not m for m in dummy.loss_mask)
+
+
+def test_pad_micro_batch_routed_experts_uses_valid_expert_index():
+    """`pad_micro_batch` extends `routed_experts` with a valid expert index (0).
+    Padding with -1 (the original round-20 attempt) crashes the MoE forward
+    `scores.gather(dim=1, index=routed_experts)` with an out-of-range index.
+    Filler 0 matches the convention in `_align_routed_experts`.
+    """
+    from prime_rl.trainer.batch import pad_micro_batch
+    from prime_rl.transport.types import MicroBatch
+
+    mb = MicroBatch(
+        input_ids=[1, 2, 3, 4],
+        loss_mask=[True, True, True, True],
+        advantages=[1.0, 1.0, 1.0, 1.0],
+        inference_logprobs=[0.0] * 4,
+        position_ids=[0, 1, 2, 3],
+        temperatures=[1.0] * 4,
+        sequence_loss_weights=[1.0],
+        lora_num_tokens=[4],
+        # 4 tokens × 2 layers × topk=2
+        routed_experts=[[[0, 1], [2, 3]], [[1, 2], [3, 0]], [[2, 3], [0, 1]], [[3, 0], [1, 2]]],
+    )
+    pad_micro_batch(mb, pad_to_multiple_of=8)
+    assert len(mb.routed_experts) == 8
+    # Each padding entry must contain only valid (>=0) expert indices.
+    for entry in mb.routed_experts[4:]:
+        for layer in entry:
+            for e in layer:
+                assert e >= 0, f"Pad entry contains negative index {e!r}; would crash scores.gather"

@@ -1031,6 +1031,32 @@ class TrainerConfig(BaseConfig):
     ] = TrainerExperimentalConfig()
 
     @model_validator(mode="after")
+    def fp32_lm_head_requires_highest_matmul_precision(self):
+        """Refuse fp32_lm_head=True with matmul_precision != "highest".
+
+        Mirrors the RLConfig-level cross-validator (validate_fp32_lm_head_matmul_precision
+        in configs/rl.py) but is attached here so the SFT path catches it
+        too. PyTorch's `set_float32_matmul_precision("high")` (the trainer
+        default) silently relaxes FP32 matmuls to TF32 (10-bit mantissa) on
+        NVIDIA Ampere+. The LM-head matmul is `F.linear(hidden.float(),
+        weight.float())` and honors the global flag, defeating the very
+        train/inference logprob parity that fp32_lm_head exists for
+        (ScaleRL §3.2 / MiniMax-M1 §3.2).
+        """
+        if not self.model.fp32_lm_head:
+            return self
+        if self.matmul_precision != "highest":
+            raise ValueError(
+                "trainer.model.fp32_lm_head=True requires "
+                f"trainer.matmul_precision='highest' (got {self.matmul_precision!r}). "
+                "'high'/'medium' silently relaxes FP32 matmuls to TF32 (10-bit "
+                "mantissa) on NVIDIA Ampere+, defeating the §3.2 train/inference "
+                "logprob-parity ingredient. Set [trainer] matmul_precision = "
+                "\"highest\" or disable fp32_lm_head."
+            )
+        return self
+
+    @model_validator(mode="after")
     def deepep_disables_grad_clipping(self):
         if self.model.ep_comm_backend == "deepep" and self.optim.max_norm is not None:
             warnings.warn(

@@ -148,12 +148,35 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     advantages = loss_config.adv_tau * advantages
     if teacher_logprobs is not None:
         teacher_kl = teacher_logprobs - trainer_logprobs
+        # Zero out teacher_kl at non-trainable positions BEFORE folding into
+        # advantages. The downstream `keep_mask * advantages * importance_ratio`
+        # relies on `0.0 * x == 0.0`, but IEEE 754 has `0.0 * NaN == NaN` and
+        # `0.0 * ±Inf == NaN`. Teacher inference (especially under the off-policy
+        # ScaleRL §3.5 KL-distillation regime with max_async_level=8) can emit
+        # `-inf` logprobs at non-trainable positions for tokens it rates as
+        # impossible — those would silently poison `advantages` and propagate
+        # NaN through the entire batch's gradient. Mask first, fold second.
+        teacher_kl = torch.where(loss_mask, teacher_kl, torch.zeros_like(teacher_kl))
         advantages = advantages + loss_config.teacher_tau * teacher_kl.detach()
     else:
         teacher_kl = None
 
-    pg_loss = keep_mask * advantages * importance_ratio
-    kl_loss = loss_mask * log_importance_ratio**2
+    # Same IEEE 0*NaN=NaN hazard on the importance-ratio path: if either
+    # `trainer_logprobs` or `inference_logprobs` is non-finite at a non-trainable
+    # position (vLLM occasionally emits ±inf for impossible tokens at packed
+    # prefixes; the trainer FP32 LM head normally produces finite values but
+    # `selective_log_softmax` can return -inf when `labels` indexes a position
+    # the masked-fill set to -inf), the unmasked product propagates NaN. Mask
+    # before multiplying so `keep_mask=False` positions truly contribute zero.
+    safe_importance_ratio = torch.where(
+        keep_mask, importance_ratio, torch.zeros_like(importance_ratio)
+    )
+    safe_advantages = torch.where(keep_mask, advantages, torch.zeros_like(advantages))
+    pg_loss = keep_mask * safe_advantages * safe_importance_ratio
+    safe_log_importance_ratio_sq = torch.where(
+        loss_mask, log_importance_ratio**2, torch.zeros_like(log_importance_ratio)
+    )
+    kl_loss = loss_mask * safe_log_importance_ratio_sq
     loss = (-pg_loss + loss_config.kl_tau * kl_loss).sum()
 
     metrics = {

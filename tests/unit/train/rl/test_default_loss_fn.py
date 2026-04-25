@@ -149,3 +149,44 @@ def test_default_loss_teacher_kl_metric_present_only_when_teacher_logprobs_set()
     )
     out_yes = default_loss_fn(with_teacher, DefaultLossConfig(kl_tau=0.0))
     assert "teacher_kl" in out_yes.metrics
+
+
+def test_default_loss_does_not_propagate_inf_teacher_logprob_at_masked_position():
+    """Non-finite teacher_logprobs at non-trainable positions must not poison
+    the loss. IEEE 754 has 0.0 * NaN/-Inf = NaN, so the obvious
+    `keep_mask * advantages * importance_ratio` formula is not safe by itself
+    — teacher_kl must be masked BEFORE folding into advantages.
+
+    Trigger: teacher prefill on an off-policy completion can underflow to -inf
+    for tokens the teacher rates impossible. If ANY of those land on a
+    loss_mask=False position, NaN propagates through the entire batch's
+    gradient.
+    """
+    inputs = _inputs(
+        trainer_lp=[0.0, -1.0, 0.0],
+        inference_lp=[0.0, 0.0, 0.0],
+        advantages=[1.0, 1.0, 1.0],
+        loss_mask=[True, False, True],
+        teacher_lp=[0.0, float("-inf"), 0.0],  # -inf at the loss-masked position
+    )
+    cfg = DefaultLossConfig(dppo_mask_high=10.0, dppo_mask_low=10.0,
+                            kl_tau=0.0, adv_tau=1.0, teacher_tau=1.0)
+    out = default_loss_fn(inputs, cfg)
+    assert torch.isfinite(out.loss), f"loss leaked NaN/Inf via teacher_kl: {out.loss}"
+
+
+def test_default_loss_does_not_propagate_inf_inference_logprob_at_masked_position():
+    """Same hazard on the importance-ratio path. If either trainer_lp or
+    inference_lp is non-finite at a loss_mask=False position, the IS ratio
+    becomes Inf there; mask must be applied before multiplication.
+    """
+    inputs = _inputs(
+        trainer_lp=[0.0, 0.0, 0.0],
+        inference_lp=[0.0, float("-inf"), 0.0],  # -inf at loss_mask=False position
+        advantages=[1.0, 1.0, 1.0],
+        loss_mask=[True, False, True],
+    )
+    cfg = DefaultLossConfig(dppo_mask_high=10.0, dppo_mask_low=10.0,
+                            kl_tau=1.0, adv_tau=1.0)
+    out = default_loss_fn(inputs, cfg)
+    assert torch.isfinite(out.loss), f"loss leaked NaN/Inf via importance_ratio: {out.loss}"
