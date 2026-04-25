@@ -231,3 +231,106 @@ def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):
 
     assert len(new_buffer.env_buffers["env_b"].easy_examples) == 0
     assert new_buffer.env_buffers["env_b"].num_normal == 1
+
+
+def test_buffer_no_positive_resampling_excludes_after_threshold(dummy_envs, make_rollouts):
+    """A prompt whose running pass-rate crosses the threshold gets excluded permanently."""
+    buffer = Buffer(
+        dummy_envs,
+        BufferConfig(no_positive_resampling=True, no_positive_resampling_threshold=0.9),
+    )
+    eb = buffer.env_buffers["env_a"]
+    initial_normal = eb.num_normal
+
+    # Single example crosses threshold on the first group: avg_reward=1.0 ≥ 0.9.
+    buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[1.0]))
+
+    assert 0 not in eb.examples, "Example should be removed from the active pool."
+    assert 0 in eb.excluded_examples, "Example should land in excluded_examples."
+    assert eb.num_normal == initial_normal - 1
+    assert eb.num_excluded_per_step == 1
+
+
+def test_buffer_no_positive_resampling_keeps_below_threshold(dummy_envs, make_rollouts):
+    """A prompt with avg_reward below threshold stays in the pool, stats accumulate."""
+    buffer = Buffer(
+        dummy_envs,
+        BufferConfig(no_positive_resampling=True, no_positive_resampling_threshold=0.9),
+    )
+    eb = buffer.env_buffers["env_a"]
+    initial_normal = eb.num_normal
+
+    # avg_reward=0.5 stays below 0.9 — Welford-cumulative stays at 0.5 even after many groups.
+    for _ in range(5):
+        buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[0.5]))
+
+    assert 0 in eb.examples, "Example below threshold should stay in the pool."
+    assert eb.num_normal == initial_normal
+    h = eb.get_example_hash(eb.examples[0])
+    assert eb.pass_rate_stats[h]["pass_rate"] == pytest.approx(0.5, abs=1e-6)
+    assert eb.pass_rate_stats[h]["num_groups"] == 5.0
+
+
+def test_buffer_no_positive_resampling_welford_cumulative_mean(dummy_envs, make_rollouts):
+    """Pass rate is Welford-cumulative — old groups are not forgotten."""
+    buffer = Buffer(
+        dummy_envs,
+        BufferConfig(no_positive_resampling=True, no_positive_resampling_threshold=0.95),
+    )
+    eb = buffer.env_buffers["env_a"]
+
+    # Hard early (5x at 0.0), easy late (1x at 1.0): mean = 1/6 ≈ 0.167. Far below 0.95 threshold.
+    for _ in range(5):
+        buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[0.0]))
+    buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[1.0]))
+
+    assert 0 in eb.examples, "Cumulative mean stays below threshold; example must remain."
+    h = eb.get_example_hash(eb.examples[0])
+    assert eb.pass_rate_stats[h]["pass_rate"] == pytest.approx(1 / 6, abs=1e-6)
+
+
+def test_buffer_no_positive_resampling_disabled_by_default(dummy_envs, make_rollouts):
+    """With NPR disabled (default), no exclusions happen even at avg_reward=1.0."""
+    buffer = Buffer(dummy_envs, BufferConfig())
+    eb = buffer.env_buffers["env_a"]
+
+    buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[1.0]))
+
+    assert 0 in eb.examples
+    assert eb.excluded_examples == {}
+    assert eb.pass_rate_stats == {}
+
+
+def test_buffer_no_positive_resampling_save_load_round_trip(dummy_envs, make_rollouts, tmp_path):
+    """Save+load preserves excluded_examples and pass_rate_stats."""
+    buffer = Buffer(
+        dummy_envs,
+        BufferConfig(no_positive_resampling=True, no_positive_resampling_threshold=0.9),
+    )
+
+    # Push example 0 into excluded; let example 1 accumulate one below-threshold group.
+    buffer.update(make_rollouts(buffer, "env_a", [0], rewards=[1.0]))
+    buffer.update(make_rollouts(buffer, "env_a", [1], rewards=[0.5]))
+    buffer.save(tmp_path / "buffer")
+
+    new_buffer = Buffer(
+        dummy_envs,
+        BufferConfig(no_positive_resampling=True, no_positive_resampling_threshold=0.9),
+    )
+    new_buffer.load(tmp_path / "buffer")
+    eb = new_buffer.env_buffers["env_a"]
+
+    assert 0 in eb.excluded_examples, "Excluded example must round-trip."
+    assert 0 not in eb.examples, "Excluded example must NOT be back in the active pool."
+    # Both examples accumulated stats — example 0 (excluded) and example 1 (still in pool).
+    assert len(eb.pass_rate_stats) == 2, f"Expected stats for both examples; got {eb.pass_rate_stats}"
+    # Verify the below-threshold example's stats round-trip with the right pass rate.
+    h_below = eb.get_example_hash(eb.examples[1])
+    assert eb.pass_rate_stats[h_below]["pass_rate"] == pytest.approx(0.5, abs=1e-6)
+    assert eb.pass_rate_stats[h_below]["num_groups"] == 1.0
+
+
+def test_buffer_no_positive_resampling_threshold_required():
+    """no_positive_resampling=True without threshold raises at config validation."""
+    with pytest.raises(ValueError, match="no_positive_resampling_threshold"):
+        BufferConfig(no_positive_resampling=True)

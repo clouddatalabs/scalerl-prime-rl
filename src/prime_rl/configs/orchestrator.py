@@ -663,10 +663,46 @@ class BufferConfig(BaseConfig):
         ),
     ] = ["env_name", "prompt"]
 
+    no_positive_resampling: Annotated[
+        bool,
+        Field(
+            description=(
+                "Enable ScaleRL §3.6 'Adaptive Prompt Filtering' — once a prompt's running pass rate "
+                "(Welford-cumulative mean of avg_reward across all groups it appears in) crosses "
+                "no_positive_resampling_threshold, permanently remove the prompt from the sampling pool. "
+                "State is checkpointed by example hash so resumes restore exclusions. Threshold operates "
+                "on avg_reward, which coincides with pass-fraction for binary rewards (terminal-bench "
+                "test.sh ∈ {0, 1}); document the binary-reward assumption if you change reward shape. "
+                "Interaction with easy_threshold: NPR runs AFTER update_pools, so any example evicted "
+                "to the easy pool (avg_reward >= easy_threshold) skips its NPR update for that step. "
+                "If easy_threshold <= no_positive_resampling_threshold, NPR is effectively shadowed by "
+                "the easy pool; configure them so NPR sees a window above easy_threshold or accept that "
+                "the easy pool will absorb the high-reward prompts first."
+            )
+        ),
+    ] = False
+
+    no_positive_resampling_threshold: Annotated[
+        float | None,
+        Field(
+            ge=0.0,
+            le=1.0,
+            description=(
+                "Pass-rate threshold for no_positive_resampling. ScaleRL paper uses 0.9 (Polaris "
+                "convention). When None and no_positive_resampling is True, validation rejects."
+            ),
+        ),
+    ] = None
+
     @model_validator(mode="after")
     def validate_thresholds(self):
         if self.easy_threshold is not None and self.hard_threshold is not None:
             assert self.easy_threshold > self.hard_threshold, "easy_threshold must be greater than hard_threshold."
+        if self.no_positive_resampling and self.no_positive_resampling_threshold is None:
+            raise ValueError(
+                "no_positive_resampling=True requires no_positive_resampling_threshold to be set "
+                "(ScaleRL paper uses 0.9)."
+            )
         return self
 
 

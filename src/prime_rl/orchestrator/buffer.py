@@ -45,6 +45,12 @@ class _EnvBuffer:
         self.easy_examples: list[dict] = []
         self.hard_examples: list[dict] = []
 
+        # ScaleRL §3.6 No-Positive-Resampling. `excluded_examples` holds prompts whose
+        # running pass-rate has crossed the threshold; they never come back. `pass_rate_stats`
+        # tracks the Welford-cumulative pass rate per example hash so resumes restore state.
+        self.excluded_examples: dict[int, dict] = {}
+        self.pass_rate_stats: dict[str, dict[str, float]] = {}
+
         self.reset_step_metrics()
 
     @property
@@ -53,7 +59,7 @@ class _EnvBuffer:
 
     @property
     def num_total(self) -> int:
-        return self.num_normal + len(self.easy_examples) + len(self.hard_examples)
+        return self.num_normal + len(self.easy_examples) + len(self.hard_examples) + len(self.excluded_examples)
 
     def sample_example(self) -> dict:
         key = random.choice(tuple(self.examples))
@@ -85,6 +91,38 @@ class _EnvBuffer:
         zero = lambda: {p: 0 for p in POOLS}
         self.num_examples_per_step = zero()
         self.num_rollouts_per_step = zero()
+        self.num_excluded_per_step = 0
+
+    def update_pass_rate(self, example_id: int, avg_reward: float) -> bool:
+        """Update Welford-cumulative pass rate; permanently exclude on threshold cross.
+
+        Returns True iff this call moved the example into `excluded_examples`. The current
+        rollout group's training payload still flows downstream — exclusion takes effect
+        for *future* sampling only.
+
+        Pass-rate semantics: ScaleRL §3.6 says "history of pass rates" without pinning a
+        window. We use Welford-cumulative mean over the prompt's full lifetime — easy
+        prompts that started hard take a long time to cross the threshold under this
+        choice, vs an EMA which would cross faster. Document if you change it.
+        """
+        if not self.config.no_positive_resampling or self.config.no_positive_resampling_threshold is None:
+            return False
+        if example_id not in self.examples:
+            # Already promoted to easy/hard pool or already excluded — don't double-count.
+            return False
+
+        h = self.get_example_hash(self.examples[example_id])
+        stats = self.pass_rate_stats.setdefault(h, {"num_groups": 0.0, "pass_rate": 0.0})
+        n = stats["num_groups"] + 1
+        p = stats["pass_rate"] + (avg_reward - stats["pass_rate"]) / n
+        stats["num_groups"] = n
+        stats["pass_rate"] = p
+
+        if p >= self.config.no_positive_resampling_threshold:
+            self.excluded_examples[example_id] = self.examples.pop(example_id)
+            self.num_excluded_per_step += 1
+            return True
+        return False
 
     def get_metrics(self) -> dict[str, float]:
         metrics = {}
@@ -165,6 +203,10 @@ class Buffer:
             eb = self.env_buffers[env_name]
             avg_reward = mean([r["reward"] for r in example_rollouts])
             eb.update_pools(example_id, avg_reward)
+            # NPR runs after pool eviction so it's a no-op for examples already in easy/hard
+            # (and for anything previously excluded). The current group still flows to training;
+            # the exclusion only takes effect for future sampling.
+            eb.update_pass_rate(example_id, avg_reward)
 
             if self.config.online_difficulty_filtering:
                 if avg_reward == 0.0:
@@ -195,23 +237,43 @@ class Buffer:
 
         all_easy = [ex for eb in self.env_buffers.values() for ex in eb.easy_examples]
         all_hard = [ex for eb in self.env_buffers.values() for ex in eb.hard_examples]
+        all_excluded = [ex for eb in self.env_buffers.values() for ex in eb.excluded_examples.values()]
+        all_pass_rate_stats = [
+            {"example_hash": h, **stats}
+            for eb in self.env_buffers.values()
+            for h, stats in eb.pass_rate_stats.items()
+        ]
         write_jsonl(all_easy, path / "easy_examples.jsonl")
         write_jsonl(all_hard, path / "hard_examples.jsonl")
+        write_jsonl(all_excluded, path / "excluded_examples.jsonl")
+        write_jsonl(all_pass_rate_stats, path / "pass_rate_stats.jsonl")
         write_jsonl(self.rollout_buffer, path / "rollout_buffer.jsonl")
 
     def load(self, path: Path) -> None:
         """Loads pool assignments and rollouts from checkpoint."""
 
-        def read_jsonl(filepath: Path) -> list[dict]:
+        def read_jsonl(filepath: Path, missing_ok: bool = False) -> list[dict]:
+            if missing_ok and not filepath.exists():
+                return []
             with open(filepath, "r") as f:
                 return [json.loads(line) for line in f]
 
         saved_easy = read_jsonl(path / "easy_examples.jsonl")
         saved_hard = read_jsonl(path / "hard_examples.jsonl")
+        # Excluded examples and pass-rate stats are missing-ok: pre-NPR checkpoints
+        # don't have these files and resuming should not crash on them.
+        saved_excluded = read_jsonl(path / "excluded_examples.jsonl", missing_ok=True)
+        saved_pass_rate_stats = read_jsonl(path / "pass_rate_stats.jsonl", missing_ok=True)
         saved_rollouts = cast(list[vf.RolloutOutput], read_jsonl(path / "rollout_buffer.jsonl"))
 
-        if not any(saved_easy) and not any(saved_hard) and not any(saved_rollouts):
-            self.logger.debug("No easy/ hard examples or rollouts found in checkpoint")
+        if (
+            not any(saved_easy)
+            and not any(saved_hard)
+            and not any(saved_excluded)
+            and not any(saved_pass_rate_stats)
+            and not any(saved_rollouts)
+        ):
+            self.logger.debug("No easy/hard/excluded examples, pass-rate stats, or rollouts found in checkpoint")
             return
 
         # Build hash lookup across all env buffers: env -> (hash -> example_id)
@@ -240,8 +302,13 @@ class Buffer:
                         eb = self.env_buffers[env_name]
                         matched = eb.examples.pop(example_id, None)
                         if matched is not None:
-                            target = eb.easy_examples if pool_name == "easy" else eb.hard_examples
-                            target.append(matched)
+                            if pool_name == "easy":
+                                eb.easy_examples.append(matched)
+                            elif pool_name == "hard":
+                                eb.hard_examples.append(matched)
+                            else:
+                                # NPR exclusion: keyed by example_id in a dict, not a list.
+                                eb.excluded_examples[example_id] = matched
                             num_moved += 1
                             break
             return num_moved
@@ -263,6 +330,37 @@ class Buffer:
                     f"Could not move {len(saved_hard) - num_moved} example(s) from checkpoint to hard pool. "
                     "This usually means you resumed with an env mix that does not contain all previous examples."
                 )
+
+        if any(saved_excluded):
+            num_moved = move_saved_pool(saved_excluded, "excluded")
+            self.logger.debug(
+                f"Restored {num_moved}/{len(saved_excluded)} no-positive-resampling exclusion(s) from checkpoint."
+            )
+            if num_moved != len(saved_excluded):
+                self.logger.warning(
+                    f"Could not restore {len(saved_excluded) - num_moved} no-positive-resampling exclusion(s); "
+                    "the resume dataset does not contain those examples."
+                )
+
+        if any(saved_pass_rate_stats):
+            restored = 0
+            # Build hash → env_name lookup so we attach stats to the right buffer.
+            hash_to_env = {h: env for env, env_hashes in hash_lookup.items() for h in env_hashes}
+            for entry in saved_pass_rate_stats:
+                h = entry.get("example_hash")
+                if h is None:
+                    continue
+                env_name = hash_to_env.get(h)
+                if env_name is None:
+                    continue
+                self.env_buffers[env_name].pass_rate_stats[h] = {
+                    "num_groups": float(entry.get("num_groups", 0.0)),
+                    "pass_rate": float(entry.get("pass_rate", 0.0)),
+                }
+                restored += 1
+            self.logger.debug(
+                f"Loaded {restored}/{len(saved_pass_rate_stats)} no-positive-resampling pass-rate stat(s) from checkpoint."
+            )
 
         if any(saved_rollouts):
             valid = [r for r in saved_rollouts if r.get("env_name") in self.env_names]
@@ -312,9 +410,16 @@ class Buffer:
         total_normal = sum(eb.num_normal for eb in self.env_buffers.values())
         total_easy = sum(len(eb.easy_examples) for eb in self.env_buffers.values())
         total_hard = sum(len(eb.hard_examples) for eb in self.env_buffers.values())
+        total_excluded = sum(len(eb.excluded_examples) for eb in self.env_buffers.values())
         pool_ratios = mean_normalize([total_easy, total_normal, total_hard])
         for pool, ratio in zip(POOLS, pool_ratios):
             metrics[f"pool/{pool}"] = ratio
+
+        if self.config.no_positive_resampling:
+            num_excluded_per_step = sum(eb.num_excluded_per_step for eb in self.env_buffers.values())
+            if total_examples:
+                metrics["excluded_examples/no_positive_resampling"] = num_excluded_per_step / total_examples
+            metrics["excluded_examples/no_positive_resampling/cumulative"] = total_excluded
 
         # Per-env metrics
         for eb in self.env_buffers.values():
