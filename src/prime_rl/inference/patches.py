@@ -1,5 +1,59 @@
+import os
+
 import torch
 from vllm.triton_utils import tl, triton
+
+
+def vllm_fp32_lm_head_enabled() -> bool:
+    """Return True iff PRIME_RL_VLLM_FP32_LM_HEAD is set to a truthy value.
+
+    The env var is set by `prime_rl.inference.server.setup_vllm_env` from
+    `InferenceConfig.model.fp32_lm_head` before vLLM is imported, so it's
+    visible in every spawned vLLM worker.
+    """
+    value = os.environ.get("PRIME_RL_VLLM_FP32_LM_HEAD", "0").strip().lower()
+    return value not in {"", "0", "false", "no", "off"}
+
+
+def promote_parallel_lm_head_to_fp32(model) -> int:
+    """Promote vLLM ParallelLMHead parameters to fp32 when enabled.
+
+    Called from `_patched_process_weights_after_loading` so the cast
+    happens after vLLM has loaded weights (and any prior dtype-conversion
+    plugins have run). Returns the number of LM-head modules promoted.
+    Logs the count so a `=0` result with the env var set is observable
+    rather than a silent debugging dead-end.
+    """
+    import logging
+
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    if not vllm_fp32_lm_head_enabled():
+        return 0
+
+    promoted = 0
+    for module in model.modules():
+        if not isinstance(module, ParallelLMHead):
+            continue
+        # Quantized vocab heads (AWQ/GPTQ/FP8) pack weights as integer dtypes;
+        # casting them to fp32 silently produces garbage. Refuse loudly.
+        if not module.weight.dtype.is_floating_point:
+            raise RuntimeError(
+                "fp32_lm_head is not supported with a quantized ParallelLMHead "
+                f"(weight dtype={module.weight.dtype}). Disable PRIME_RL_VLLM_FP32_LM_HEAD "
+                "or load an unquantized model."
+            )
+        if module.weight.dtype != torch.float32:
+            module.weight.data = module.weight.data.float()
+        if getattr(module, "bias", None) is not None and module.bias.dtype != torch.float32:
+            module.bias.data = module.bias.data.float()
+        # Sentinel so _patched_apply can route only the LM-head matmul through fp32,
+        # leaving the rest of the model in its original dtype.
+        module._prime_rl_fp32_lm_head = True
+        promoted += 1
+
+    logging.getLogger(__name__).info("prime-rl: promoted %d ParallelLMHead module(s) to fp32", promoted)
+    return promoted
 
 
 def transformers_v5_compat():
@@ -13,11 +67,58 @@ def transformers_v5_compat():
     if not hasattr(Qwen3VLMoeTextConfig, "tie_word_embeddings"):
         Qwen3VLMoeTextConfig.tie_word_embeddings = False
 
+    monkey_patch_vllm_fp32_lm_head()
     _patch_qwen35_lora()
     _patch_lora_key_prefix()
     monkey_patch_deep_gemm_ep_scatter()
     monkey_patch_dp_engine_core_pause_resume_deadlock()
     monkey_patch_offloading_connector_cpu_block_count()
+
+
+def monkey_patch_vllm_fp32_lm_head():
+    """Enable an fp32 LM-head projection for vLLM's ParallelLMHead when requested.
+
+    ScaleRL §3.2 / MiniMax-M1 §3.2: train/inference logprob correlation drops
+    to ~0.9 when the LM-head matmul runs in bf16 on both sides; promoting the
+    matmul + accumulator to fp32 brings it back above 0.99 and removes a
+    silent bias from any IS-based loss. Trainer side lives in
+    `prime_rl.trainer.models.layers.lm_head`; this is the inference-side half.
+    """
+    # Early return when disabled keeps the disabled path robust to vLLM API drift —
+    # the imports below touch internal vLLM symbols that move between minor versions.
+    if not vllm_fp32_lm_head_enabled():
+        return
+
+    import torch.nn.functional as F
+    from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod
+    from vllm.model_executor.model_loader import base_loader as model_loader_base
+    from vllm.model_executor.model_loader import utils as model_loader_utils
+
+    if getattr(UnquantizedEmbeddingMethod.apply, "_prime_rl_fp32_lm_head_patch", False):
+        return
+
+    original_apply = UnquantizedEmbeddingMethod.apply
+    original_process_weights_after_loading = model_loader_utils.process_weights_after_loading
+
+    def _patched_apply(self, layer, x, bias=None):
+        if not getattr(layer, "_prime_rl_fp32_lm_head", False):
+            return original_apply(self, layer, x, bias)
+
+        # fp32 matmul + accumulator. Casting at this boundary (not at output)
+        # is what actually reduces the bf16 noise; cast-at-output is a footgun.
+        x_fp32 = x if x.dtype == torch.float32 else x.float()
+        weight_fp32 = layer.weight if layer.weight.dtype == torch.float32 else layer.weight.float()
+        bias_fp32 = None if bias is None else (bias if bias.dtype == torch.float32 else bias.float())
+        return F.linear(x_fp32, weight_fp32, bias_fp32)
+
+    def _patched_process_weights_after_loading(model, model_config, target_device):
+        original_process_weights_after_loading(model, model_config, target_device)
+        promote_parallel_lm_head_to_fp32(model)
+
+    _patched_apply._prime_rl_fp32_lm_head_patch = True
+    UnquantizedEmbeddingMethod.apply = _patched_apply
+    model_loader_utils.process_weights_after_loading = _patched_process_weights_after_loading
+    model_loader_base.process_weights_after_loading = _patched_process_weights_after_loading
 
 
 @triton.jit
