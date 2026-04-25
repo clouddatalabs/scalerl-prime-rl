@@ -70,12 +70,22 @@ bash scripts/fix-flash-attn-cute.sh
 #      Set `WANDB_MODE=offline` if your cluster has no outbound network.
 #    The smoke configs ship with `[wandb]` commented out.
 
-# 4. Pre-download the model so the first sbatch doesn't block on a multi-GB
-#    pull through whatever NAT your compute nodes have. Uses HF_HOME set above.
-#    The CLI is `hf` in modern huggingface_hub; older `huggingface-cli` was
-#    removed. Invoke the venv binary directly so we don't clobber any
-#    pre-existing conda/pyenv activation in your shell.
+# 4. Pre-download the model AND the training dataset so the first sbatch
+#    doesn't block on multi-GB pulls through whatever NAT your compute nodes
+#    have. Uses HF_HOME set above. The CLI is `hf` in modern huggingface_hub;
+#    older `huggingface-cli` was removed. Invoke the venv binary directly so
+#    we don't clobber any pre-existing conda/pyenv activation in your shell.
+#
+#    Math-env (math smoke target): the dataset is `PrimeIntellect/Hendrycks-Math`
+#    plus the `math500` eval split. Without pre-staging, the orchestrator's
+#    first call to `load_dataset(...)` happens on the compute node and silently
+#    re-downloads (or fails on egress-restricted clusters). TB doesn't need
+#    a dataset stage — the tasks are bundled in the repo's
+#    `environments/terminal_bench/tasks/`.
 .venv/bin/hf download Qwen/Qwen3-8B
+# Only needed for the math smoke; TB users can skip these.
+.venv/bin/hf download --repo-type dataset PrimeIntellect/Hendrycks-Math
+.venv/bin/hf download --repo-type dataset HuggingFaceH4/MATH-500 || true  # eval-set
 
 # 5. Submit. Override the partition / log dir / config-to-launch if your
 #    cluster differs. OUTPUT_ROOT controls where the slurm stdout/stderr go;
@@ -305,8 +315,27 @@ See `docs/slurm.md` for the full `[slurm]` knob list (`partition`,
 `account`, `time`, `nodelist`, `exclude`, `pre_run_command`, etc.).
 Multi-node NCCL weight broadcast still
 requires the experimental override (already on in the shipped configs);
-on hardware without EFA set `SCALERL_NO_EFA=1` in your `.env` and switch
-`[weight_broadcast] type = "filesystem"` (then drop the override).
+on hardware without EFA, both halves are required: set
+`SCALERL_NO_EFA=1` in your `.env` to suppress EFA env-var exports AND
+switch the per-component weight-broadcast paths to filesystem. Setting
+just one half hangs at the first weight broadcast — the env var only
+suppresses the libfabric provider hint; the TOML still asks for NCCL.
+
+> ⚠️ **Multi-node TB rollouts need `PYTHONPATH=$REPO_ROOT`.** The
+> single-node `scripts/scalerl_smoke.sbatch` exports `PYTHONPATH` so
+> `vf.load_environment("environments.terminal_bench")` resolves; the
+> multi-node templates (`single_node_rl.sbatch.j2`, `multi_node_rl.sbatch.j2`)
+> do NOT. Add the export to your multi-node config's `[slurm]` block:
+> ```toml
+> [slurm]
+> pre_run_command = "export PYTHONPATH=$PROJECT_DIR:$PYTHONPATH"
+> ```
+> Without this, every TB rollout fails per-rollout with
+> `ModuleNotFoundError: No module named 'environments'`. The error
+> surfaces in the rollout JSONL as `reward = 0` —
+> indistinguishable from "model failed the task." Math-env users are
+> unaffected (math-env loads via the `[envs]` extra package, not from
+> the repo tree).
 
 ## Configs
 

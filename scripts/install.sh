@@ -125,8 +125,18 @@ main() {
     log_info "Repairing flash_attn.cute namespace (FA4)..."
     bash "$(dirname "${BASH_SOURCE[0]}")/fix-flash-attn-cute.sh"
 
-    log_info "Installing pre-commit hooks..."
-    uv run pre-commit install
+    # pre-commit hooks are dev-only; skip cleanly when the install path
+    # is a tarball / vendored drop with no `.git` directory (Snowflake-
+    # style consumption). Without this guard, `pre-commit install` aborts
+    # the script with a confusing "not a git repository" error after
+    # every other step has succeeded. Set INSTALL_PRECOMMIT=0 to
+    # explicitly skip even inside a git checkout.
+    if [ "${INSTALL_PRECOMMIT:-1}" = "1" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        log_info "Installing pre-commit hooks..."
+        uv run pre-commit install
+    else
+        log_info "Skipping pre-commit hooks (not a git checkout, or INSTALL_PRECOMMIT=0)."
+    fi
 
     log_info "Installation completed!"
 }

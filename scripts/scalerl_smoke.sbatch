@@ -139,6 +139,26 @@ export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 # home dir; if the operator pre-set HF_HOME in .env or the parent shell, honor it.
 export HF_HOME="${HF_HOME:-$REPO_ROOT/hf-cache}"
 
+# HF Hub default timeouts (10s) are too tight for a 16 GB Qwen3-8B pull
+# through corporate NAT; operators saw opaque ReadTimeoutError mid-download.
+# Match what `Dockerfile.cuda` already exports. Honor any operator-set
+# values from `.env` or the parent shell.
+export HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT:-300}"
+export HF_HUB_ETAG_TIMEOUT="${HF_HUB_ETAG_TIMEOUT:-500}"
+
+# WANDB is opt-in. Both shipped configs ship with `[wandb]` commented out;
+# if an operator uncomments it but forgets WANDB_API_KEY, wandb's interactive
+# `wandb login` prompt can hang `srun` (no TTY). Default to disabled when
+# no key is present, online when it is. Operators who want offline-mode
+# can set `WANDB_MODE=offline` explicitly.
+if [ -z "${WANDB_MODE:-}" ]; then
+    if [ -n "${WANDB_API_KEY:-}" ]; then
+        export WANDB_MODE="online"
+    else
+        export WANDB_MODE="disabled"
+    fi
+fi
+
 # Use the venv we set up in this repo. The .venv was populated with `uv sync
 # --extra all` outside slurm; we don't re-sync here to avoid network races
 # between concurrent jobs.
