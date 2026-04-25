@@ -109,13 +109,12 @@ rollouts_per_example = 4
 matmul_precision = "highest"
 
 [trainer.model]
-# Stage 1: sdpa (torch's bundled kernels — works on all sm_>=80 incl. B200).
-# The FA3 wheel from pytorch-cu128-test ships Hopper sm_90 kernels only and
-# crashes on B200 with "no kernel image is available for execution on the
-# device". Once smoke passes end-to-end on sdpa, move trainer to FA4
-# (`attn = "fa4"` + `impl = "custom"`) — note dense Qwen3 needs to be
-# registered in AutoModelForCausalLMPrimeRL first; only Qwen3*Moe* is today.
-attn = "sdpa"
+# FA4 via the HF AttentionInterface bridge in trainer/model.py. impl="hf"
+# routes dense Qwen3 through the stock transformers model with our
+# `_fa4_attention_forward` (ported from baker; same FA4 git rev abd9943b).
+# `attn = "fa4"` + `impl = "custom"` is also valid for MoE variants but
+# dense Qwen3 isn't registered in AutoModelForCausalLMPrimeRL today.
+attn = "fa4"
 impl = "hf"
 # Match vLLM inference dtype to avoid optimizer/inference numerical drift.
 optimization_dtype = "bfloat16"
@@ -157,8 +156,3 @@ dp = 4
 
 [inference.model]
 fp32_lm_head = true
-# Disable vLLM's torchinductor-compiled forward + cuda graph capture. The
-# compiled QKV mm path hits CUBLAS_STATUS_INVALID_VALUE on B200 with
-# vllm 0.19.1; enforce_eager runs uncompiled which sidesteps it. Re-enable
-# (drop this line) once the compile path is validated on B200.
-enforce_eager = true

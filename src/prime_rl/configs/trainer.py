@@ -417,9 +417,15 @@ class ModelConfig(BaseModelConfig):
         return self
 
     @model_validator(mode="after")
-    def flash_attention_4_only_with_custom_impl(self):
-        if self.attn == "fa4" and self.impl != "custom":
-            raise ValueError("Flash attention 4 is only supported with the custom implementation")
+    def flash_attention_4_supported_impls(self):
+        # FA4 ("fa4") is supported on both impl="hf" (via the
+        # `_fa4_attention_forward` HF AttentionInterface bridge in
+        # trainer/model.py) and impl="custom" (the in-tree ring-attention
+        # path). impl="auto" picks one based on the model — accept it too.
+        if self.attn == "fa4" and self.impl not in ("hf", "custom", "auto"):
+            raise ValueError(
+                f"Flash attention 4 is only supported with impl in (\"hf\", \"custom\", \"auto\"); got impl={self.impl!r}"
+            )
         return self
 
     @model_validator(mode="after")

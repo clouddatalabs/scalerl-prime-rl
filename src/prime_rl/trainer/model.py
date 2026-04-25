@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import cast
 
@@ -964,20 +965,171 @@ def _validate_flash_attn_4_installed() -> None:
         )
 
 
-def _register_fa4_attention_interface() -> None:
-    """Register a dummy `fa4` attention with transformers so AutoConfig accepts it.
+@lru_cache(maxsize=1)
+def _get_fa4_attention_kernels():
+    """Load FA4 kernels once and keep them behind a dynamo-disabled wrapper."""
+    from flash_attn.cute import flash_attn_func, flash_attn_varlen_func
 
-    The `flash_attention_*` naming pattern triggers transformers to attempt
-    installing a kernel from the hub, so we use the short name `fa4` internally.
-    This dummy is never called because fa4 is only supported with our custom
-    model implementation.
+    return torch._dynamo.disable(flash_attn_func), torch._dynamo.disable(flash_attn_varlen_func)
+
+
+def _get_flash_attn_target_dtype(query: torch.Tensor, module: nn.Module) -> torch.dtype | None:
+    """Mirror transformers' FA adapter dtype handling without mutating upstream code."""
+    if query.dtype != torch.float32:
+        return None
+    if torch.is_autocast_enabled("cuda"):
+        return torch.get_autocast_dtype("cuda")
+    if hasattr(module.config, "_is_quantized"):
+        return module.config.dtype
+    try:
+        return next(layer for layer in module.modules() if isinstance(layer, torch.nn.Linear)).weight.dtype
+    except StopIteration as exc:
+        raise ValueError(
+            f"Could not infer FA attention target dtype for {module.__class__.__name__}: "
+            "no torch.nn.Linear submodule was found."
+        ) from exc
+
+
+def _fa4_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    dropout: float = 0.0,
+    scaling: float | None = None,
+    sliding_window: int | None = None,
+    softcap: float | None = None,
+    is_causal: bool | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, None]:
+    """HF attention-interface bridge for FA4 on the dense model path.
+
+    Mirrors the transformers FA2 adapter closely enough for PrimeRL's packed
+    RL batches, but keeps the implementation local so we do not need to patch
+    the installed transformers package. Tracks transformers 5.x's
+    `_flash_attention_forward` dense-model interface. Ported from baker's
+    internal prime-rl fork (which uses the same FA4 git rev abd9943b that
+    we pin in pyproject.toml).
     """
+    from transformers.modeling_flash_attention_utils import (
+        _is_packed_sequence,
+        _pad_input,
+        _prepare_from_posids,
+        _unpad_input,
+        _upad_input,
+        fa_peft_integration_check,
+    )
+    from transformers.utils import logging as transformers_logging
+
+    logger = transformers_logging.get_logger(__name__)
+    if kwargs.get("output_attentions", False):
+        logger.warning_once(
+            "Flash Attention 4 does not support `output_attentions=True`. "
+            "Please switch to `eager` attention if that output is required."
+        )
+
+    if any(dim == 0 for dim in query.shape):
+        raise ValueError(
+            "Tensor query has a zero dimension. FlashAttention does not support empty inputs; "
+            "use SDPA instead."
+        )
+
+    if dropout not in (0.0, 0):
+        raise ValueError("The FA4 HF bridge currently only supports dropout=0.0.")
+
+    query_length = query.shape[2]
+    query = query.transpose(1, 2)
+    key = key.transpose(1, 2)
+    value = value.transpose(1, 2)
+
+    target_dtype = _get_flash_attn_target_dtype(query, module)
+    query, key, value = fa_peft_integration_check(query, key, value, target_dtype)
+
+    is_causal = module.is_causal if is_causal is None else is_causal
+    flash_kwargs: dict = {"causal": is_causal, "softmax_scale": scaling}
+    if sliding_window is not None:
+        raise NotImplementedError("FA4 sliding-window attention has not been verified yet.")
+    if softcap is not None:
+        flash_kwargs["softcap"] = softcap
+
+    deterministic = kwargs.get("deterministic")
+    if deterministic is not None:
+        flash_kwargs["deterministic"] = deterministic
+
+    position_ids = kwargs.get("position_ids")
+    cu_seq_lens_q = kwargs.get("cu_seq_lens_q")
+    cu_seq_lens_k = kwargs.get("cu_seq_lens_k")
+    max_length_q = kwargs.get("max_length_q")
+    max_length_k = kwargs.get("max_length_k")
+
+    flash_attn_func, flash_attn_varlen_func = _get_fa4_attention_kernels()
+    is_fa_with_position_ids = _is_packed_sequence(position_ids, batch_size=query.size(0))
+    is_fa_with_varlen_kwargs = all(
+        value is not None for value in (cu_seq_lens_q, cu_seq_lens_k, max_length_q, max_length_k)
+    )
+
+    if attention_mask is not None:
+        q, k, v, indices_q, (cu_seq_lens_q, cu_seq_lens_k), (max_length_q, max_length_k) = _upad_input(
+            query,
+            key,
+            value,
+            attention_mask,
+            query_length,
+            _unpad_input,
+        )
+        out = flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seq_lens_q,
+            cu_seqlens_k=cu_seq_lens_k,
+            max_seqlen_q=max_length_q,
+            max_seqlen_k=max_length_k,
+            **flash_kwargs,
+        )
+        if isinstance(out, tuple):
+            out = out[0]
+        out = _pad_input(out, indices_q, query.size(0), query_length)
+    elif is_fa_with_varlen_kwargs or is_fa_with_position_ids:
+        if cu_seq_lens_q is None or cu_seq_lens_k is None:
+            q, k, v, (cu_seq_lens_q, cu_seq_lens_k), (max_length_q, max_length_k) = _prepare_from_posids(
+                query,
+                key,
+                value,
+                position_ids,
+            )
+        else:
+            q = query.reshape(-1, query.size(-2), query.size(-1))
+            k = key.reshape(-1, key.size(-2), key.size(-1))
+            v = value.reshape(-1, value.size(-2), value.size(-1))
+
+        out = flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seq_lens_q,
+            cu_seqlens_k=cu_seq_lens_k,
+            max_seqlen_q=max_length_q,
+            max_seqlen_k=max_length_k,
+            **flash_kwargs,
+        )
+        if isinstance(out, tuple):
+            out = out[0]
+        out = out.view(query.size(0), -1, out.size(-2), out.size(-1))
+    else:
+        out = flash_attn_func(query, key, value, **flash_kwargs)
+        if isinstance(out, tuple):
+            out = out[0]
+
+    return out, None
+
+
+def _register_fa4_attention_interface() -> None:
+    """Register FA4 with transformers for both config parsing and HF model execution."""
     from transformers import AttentionInterface
 
-    def _noop(*args, **kwargs) -> None:
-        pass
-
-    AttentionInterface.register("fa4", _noop)
+    AttentionInterface.register("fa4", _fa4_attention_forward)
 
 
 def setup_model(
