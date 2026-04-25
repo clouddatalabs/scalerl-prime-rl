@@ -157,7 +157,13 @@ eps = 1e-15
 weight_decay = 0.01
 
 [trainer.scheduler]
-type = "constant"
+# ScaleRL §3.1: 100-step linear warmup into the constant lr=5e-7 phase. The
+# linear scheduler with `decay_steps = 0` keeps the LR at 1.0×base after the
+# warmup window — torch.optim.lr_scheduler.LinearLR caps at `end_factor` once
+# `total_iters` is reached, so this is effectively warmup→constant.
+type = "linear"
+warmup_steps = 100
+decay_steps = 0
 
 [trainer.loss]
 # Canonical Minimax-CISPO (ScaleRL §3.2). eps_max ablation says insensitive

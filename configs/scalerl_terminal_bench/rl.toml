@@ -42,7 +42,9 @@ keep_interval = 500
 type = "nccl"
 
 [orchestrator]
-batch_size = 256
+# ScaleRL paper §3.1: 48 prompts × 16 generations = 768 completions per step.
+# This is the Snowflake reproduction target — match the paper.
+batch_size = 768
 rollouts_per_example = 16
 strict_async_level = false
 max_off_policy_steps = 1000000000
@@ -145,7 +147,11 @@ eps = 1e-15
 weight_decay = 0.01
 
 [trainer.scheduler]
-type = "constant"
+# ScaleRL §3.1: 100-step linear warmup into the constant lr=5e-7 phase. See
+# scalerl_math/rl.toml for why decay_steps=0 produces warmup→constant.
+type = "linear"
+warmup_steps = 100
+decay_steps = 0
 
 [trainer.loss]
 type = "cispo"
