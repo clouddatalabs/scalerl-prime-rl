@@ -1,0 +1,20 @@
+version = "1.0"
+
+[metadata]
+author_name = "Louka Ewington-Pitsos"
+author_email = "lewingtonpitsos@gmail.com"
+difficulty = "easy"
+category = "data-science"
+tags = ["spreadsheet"]
+
+[verifier]
+timeout_sec = 200.0
+
+[agent]
+timeout_sec = 900.0
+
+[environment]
+docker_image = "tb-imported/bank-trans-filter:latest"
+cpus = 1
+memory = "2G"
+storage = "10G"

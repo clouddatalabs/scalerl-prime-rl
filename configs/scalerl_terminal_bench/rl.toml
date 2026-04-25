@@ -1,0 +1,143 @@
+# ScaleRL recipe on Terminal-Bench 2 — Snowflake POC handoff config
+#
+# Snowflake-side reproduction target. Same recipe as configs/scalerl_math/rl.toml
+# but pointed at the in-tree Terminal-Bench tasks (Harbor format, 30 tasks shipped
+# under environments/terminal_bench/tasks/). 20 train / 10 test per the doc.
+#
+# Preconditions:
+#   - Docker daemon reachable from rollout process (host or sock-mounted into container).
+#   - Each task's base image is pullable (first rollout of a task triggers the pull).
+
+max_steps = 500
+seq_len = 8192
+max_async_level = 8
+
+[deployment]
+num_train_gpus = 4
+num_infer_gpus = 4
+
+[model]
+name = "Qwen/Qwen3-8B"
+
+[wandb]
+project = "scalerl-prime-rl"
+name = "scalerl-tb-qwen3-8b"
+
+[ckpt]
+interval = 100
+
+[weight_broadcast]
+type = "nccl"
+
+[orchestrator]
+batch_size = 256
+rollouts_per_example = 16
+strict_async_level = false
+max_off_policy_steps = 1000000000
+prompt_average_loss = true
+
+[orchestrator.experimental]
+allow_nccl_async_level_override = true
+
+[orchestrator.train.sampling]
+temperature = 1.0
+max_completion_tokens = 6144
+
+# 20 training tasks (the rest are held out for eval). The list is illustrative —
+# update once Xuchao's "learnable subset" is finalized.
+[[orchestrator.train.env]]
+id = "environments.terminal_bench"
+name = "terminal-bench-train"
+args = { tasks = [
+  "aimo-airline-departures",
+  "analyze-access-logs",
+  "ancient-puzzle",
+  "assign-seats",
+  "bank-trans-filter",
+  "catch-me-if-you-can",
+  "count-call-stack",
+  "countdown-game",
+  "cpp-compatibility",
+  "csv-to-parquet",
+  "debug-long-program",
+  "fix-code-vulnerability",
+  "fix-git",
+  "flood-monitoring-basic",
+  "git-workflow-hack",
+  "grid-pattern-transform",
+  "heterogeneous-dates",
+  "jq-data-processing",
+  "jsonl-aggregator",
+  "log-summary",
+], task_root = "environments/terminal_bench/tasks" }
+
+[orchestrator.advantage]
+type = "default"
+normalization = "batch"
+
+[orchestrator.buffer]
+easy_threshold = 1.0
+hard_threshold = 0.0
+no_positive_resampling = true
+no_positive_resampling_threshold = 0.9
+
+[orchestrator.eval]
+interval = 50
+
+[orchestrator.eval.sampling]
+temperature = 0.6
+top_p = 0.95
+max_completion_tokens = 6144
+
+# 10 held-out test tasks for eval.
+[[orchestrator.eval.env]]
+id = "environments.terminal_bench"
+name = "terminal-bench-test"
+args = { tasks = [
+  "amuse-bouche",
+  "build-initramfs-qemu",
+  "config-and-deploy-airbyte",
+  "configure-git-webserver",
+  "convert-tsv",
+  "create-bucket",
+  "extract-elf-header",
+  "filter-large-files",
+  "find-cli-args-pre-2-2",
+  "find-restaurant-data",
+], task_root = "environments/terminal_bench/tasks" }
+
+[trainer]
+matmul_precision = "highest"
+
+[trainer.model]
+attn = "fa4"
+impl = "custom"
+optimization_dtype = "bfloat16"
+reduce_dtype = "bfloat16"
+fp32_lm_head = true
+fused_lm_head_token_chunk_size = 8192
+
+[trainer.model.ac]
+freq = 6
+
+[trainer.optim]
+lr = 5e-7
+eps = 1e-15
+weight_decay = 0.01
+
+[trainer.scheduler]
+type = "constant"
+
+[trainer.loss]
+type = "cispo"
+eps_max = 4.0
+adv_tau = 1.0
+loss_scale_mode = "sequence"
+
+[inference]
+
+[inference.parallel]
+dp = 4
+
+[inference.model]
+fp32_lm_head = true

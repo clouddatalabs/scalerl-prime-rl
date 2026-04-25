@@ -48,18 +48,18 @@ type = "nccl"
 batch_size = 256
 rollouts_per_example = 16
 strict_async_level = false
-
-[orchestrator.experimental]
-# Required when weight_broadcast.type = "nccl" and max_async_level != 1.
-# Validated on B200/EFA per ScaleRL Pipeline-RL §3.1; other hardware may need
-# `weight_broadcast.type = "filesystem"` instead.
-allow_nccl_async_level_override = true
 # Paper Pipeline-RL semantics: in-flight rollouts continue under fresh weights
 # rather than being cancelled past k updates. Upstream default is 8 (cancels);
 # 1e9 = "never cancel."
 max_off_policy_steps = 1000000000
 # ScaleRL §3.3: every prompt contributes equally to the loss step.
 prompt_average_loss = true
+
+[orchestrator.experimental]
+# Required when weight_broadcast.type = "nccl" and max_async_level != 1.
+# Validated on B200/EFA per ScaleRL Pipeline-RL §3.1; other hardware may need
+# `weight_broadcast.type = "filesystem"` instead.
+allow_nccl_async_level_override = true
 
 [orchestrator.train.sampling]
 temperature = 1.0
@@ -102,9 +102,19 @@ num_examples = 100
 rollouts_per_example = 4
 
 [trainer]
+# Set fp32 matmul precision to "highest" so torch's autocast doesn't downcast
+# the fp32 LM-head matmul we explicitly request below.
+matmul_precision = "highest"
 
 [trainer.model]
-attn = "flash_attention_3"
+# FA4 (flash_attn.cute) ring attention — landed upstream as #2307. Required
+# for reasonable B200 performance with long context. FA4 only works with the
+# custom model impl (per upstream's validator).
+attn = "fa4"
+impl = "custom"
+# Match vLLM inference dtype to avoid optimizer/inference numerical drift.
+optimization_dtype = "bfloat16"
+reduce_dtype = "bfloat16"
 # ScaleRL §3.2 / MiniMax-M1 §3.2: LM-head matmul + grad accumulator in fp32.
 # Reduces train/inference logprob mismatch from ~0.9 to >0.99 correlation.
 fp32_lm_head = true

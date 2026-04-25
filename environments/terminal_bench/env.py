@@ -1,0 +1,964 @@
+"""Harbor-format terminal-bench tasks driven by a local Docker daemon.
+
+Design notes (see also ``environments.terminal_bench/__init__.py``):
+
+- Task format is the upstream Harbor layout used by
+  ``verifiers/environments/terminus_harbor`` and
+  ``verifiers/environments/opencode_harbor``: one directory per task
+  containing ``task.toml``, ``instruction.md``, ``environment/Dockerfile``
+  (base image pinned via ``task.toml::[environment].docker_image``),
+  and ``tests/test.sh`` which writes a ``/logs/verifier/reward.txt``
+  (float -- typically 0 or 1). We deliberately reuse the same layout so
+  Phase-2 (all 11 opencode_harbor tasks) is pure task selection.
+- The upstream ``HarborEnv`` spins up a Prime Intellect cloud sandbox
+  per rollout and tunnels the agent's OpenAI traffic back to the
+  training host via frpc. That's great for cloud agents but costs
+  money, requires ``PRIME_API_KEY``, and wants outbound network -- none
+  of which we have set up on this cluster. We bypass the sandbox +
+  tunnel layer entirely:
+
+    orchestrator -> vLLM -> assistant tool_call
+                                 |
+                                 v
+                    docker exec <rollout_container> ...
+                                 |
+                                 v
+                            stdout/stderr -> next turn
+
+  Reward is still computed by copying the task's ``tests/`` directory
+  into the container and running ``bash test.sh``, matching the Harbor
+  reward semantics byte-for-byte.
+- Per-rollout state is carried through ``vf.StatefulToolEnv``'s
+  ``update_tool_args`` hook, which injects the docker container id
+  into the ``shell`` tool call without exposing it to the model. This
+  is the same pattern ``verifiers.envs.sandbox_env.SandboxEnv`` uses
+  for its ``bash`` tool; we just swap the ``prime_sandboxes`` backend
+  for async docker subprocess calls.
+- We expect a host docker daemon reachable from the process -- either
+  directly (bare host) or via ``/var/run/docker.sock`` bind-mounted
+  into the prime-rl container. The ``_DockerClient`` helper auto-detects
+  whether ``sudo -n`` is required (dev host vs prime-rl container as
+  root).
+
+Usage sketch for the orchestrator config::
+
+    [[orchestrator.env]]
+    id = "environments.terminal_bench"
+    args = { tasks = ["hello-world"], task_root = "verifiers/environments/terminus_harbor/tasks" }
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import shutil
+import tomllib
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, cast
+
+from datasets import Dataset
+
+import verifiers as vf
+from verifiers.types import State
+
+_logger = logging.getLogger(__name__)
+
+
+# Hard cap on shell / test output fed back to the model. Qwen3-8B tokenizes
+# ~3-4 chars per token; 8KiB keeps a single tool response under ~2.5k tokens
+# which fits inside seq_len=10240 with plenty of headroom for reasoning.
+_MAX_OUTPUT_CHARS = 8192
+
+# Default timeout for each shell tool call. hello-world's commands are
+# trivial but e.g. ``apt-get update`` inside test.sh is slow, so test
+# execution uses its own longer timeout (see ``_TEST_TIMEOUT_SECONDS``).
+_DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
+
+# Timeout for ``bash test.sh`` at post-rollout reward time. Covers the
+# Harbor hello-world test (apt-get + uv install + pytest ≈ 20-30s) plus
+# headroom for the heavier opencode_harbor tasks.
+_TEST_TIMEOUT_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class _TaskSpec:
+    name: str
+    dir: Path
+    instruction: str
+    docker_image: str
+
+
+def _load_task_spec(task_dir: Path) -> _TaskSpec:
+    """Parse one Harbor-format task directory into a typed spec.
+
+    Raises if required files are missing so the orchestrator preflight
+    fails loudly rather than silently skipping tasks at rollout time.
+    """
+    task_toml = task_dir / "task.toml"
+    instruction_md = task_dir / "instruction.md"
+    if not task_toml.exists() or not instruction_md.exists():
+        raise FileNotFoundError(
+            f"Harbor task at {task_dir} is missing task.toml or instruction.md"
+        )
+
+    with task_toml.open("rb") as fh:
+        config = tomllib.load(fh)
+    image = (config.get("environment") or {}).get("docker_image")
+    if not image:
+        raise ValueError(
+            f"Harbor task {task_dir.name} is missing [environment].docker_image"
+        )
+
+    instruction = instruction_md.read_text(encoding="utf-8").strip()
+    return _TaskSpec(
+        name=task_dir.name,
+        dir=task_dir,
+        instruction=instruction,
+        docker_image=image,
+    )
+
+
+class _DockerClient:
+    """Tiny async wrapper around the ``docker`` CLI.
+
+    We shell out instead of using ``docker-py`` for three reasons:
+      1. The prime-rl image doesn't ship ``docker-py``; the CLI binary
+         is on PATH everywhere we run.
+      2. ``docker exec`` / ``docker cp`` semantics are stable across
+         daemon versions; async subprocess is enough.
+      3. Keeps the failure modes obvious -- exit code + stderr is what
+         operators already know how to read.
+    """
+
+    def __init__(self, *, sudo: bool | None = None) -> None:
+        self._binary = shutil.which("docker") or "/usr/bin/docker"
+        # Prefer direct socket access when the current process can
+        # open ``/var/run/docker.sock`` (either because it's root, or
+        # because the launcher passed ``--group-add <docker-gid>``
+        # so the container user inherits host docker-group
+        # membership). Fall back to ``sudo -n`` only for dev hosts
+        # where the user is unprivileged and sudo is passwordless --
+        # the prime-rl image doesn't ship ``sudo``, so getting this
+        # wrong there would crash every rollout. We check the socket
+        # directly rather than probing with ``docker info`` to avoid
+        # ``asyncio.run`` nesting issues (this __init__ is called
+        # from inside the verifiers event loop).
+        if sudo is None:
+            sock = "/var/run/docker.sock"
+            if os.access(sock, os.R_OK | os.W_OK):
+                sudo = False
+            else:
+                sudo = True
+        self._use_sudo = sudo
+
+    def _prefix(self) -> list[str]:
+        return ["sudo", "-n", self._binary] if self._use_sudo else [self._binary]
+
+    async def run_detached(
+        self,
+        image: str,
+        *,
+        name: str,
+        start_command: list[str] | None = None,
+        extra_args: list[str] | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> None:
+        """``docker run -d --name <name> <image> <start_command>``.
+
+        Uses ``--rm`` so the container auto-cleans if we crash before
+        ``remove_force``. ``--init`` ensures zombie reaping for
+        ``tail -f``-style start commands. ``labels`` forwards to
+        ``--label`` so sweep_stale_containers can find siblings.
+        """
+        label_flags: list[str] = []
+        for k, v in (labels or {}).items():
+            label_flags += ["--label", f"{k}={v}"]
+        cmd = [
+            *self._prefix(),
+            "run", "-d", "--rm", "--init",
+            "--name", name,
+            *label_flags,
+            *(extra_args or []),
+            image,
+            *(start_command or ["tail", "-f", "/dev/null"]),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"docker run failed (exit={proc.returncode}) for image={image!r} "
+                f"name={name!r}: {stderr.decode(errors='replace').strip()[:500]}"
+            )
+
+    async def exec(
+        self,
+        container: str,
+        command: str,
+        *,
+        timeout: int,
+        working_dir: str | None = None,
+    ) -> tuple[int, str, str]:
+        """Run ``bash -lc <command>`` inside ``container``.
+
+        Returns ``(exit_code, stdout, stderr)``. Always captures; never
+        raises for non-zero exit (we want to show errors to the model).
+        Timeouts return exit_code=124 to match ``timeout(1)`` semantics.
+
+        ``working_dir`` forwards to ``docker exec -w``; omit to let the
+        container's default WORKDIR apply. We use this to root the
+        agent's shell at ``/app`` so relative paths in the task
+        instruction resolve the way Harbor's agents expect.
+        """
+        cmd = [*self._prefix(), "exec"]
+        if working_dir:
+            cmd += ["-w", working_dir]
+        cmd += [container, "bash", "-lc", command]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            # Also kill whatever's still running inside the container
+            # for this exec chain so subsequent calls aren't serialized
+            # behind a stuck process.
+            return 124, "", f"Command timed out after {timeout}s"
+        return (
+            proc.returncode or 0,
+            stdout_b.decode(errors="replace"),
+            stderr_b.decode(errors="replace"),
+        )
+
+    async def cp_into(self, src: str | os.PathLike[str], container: str, dst: str) -> None:
+        """``docker cp <src> <container>:<dst>`` (creates parent dirs if needed).
+
+        ``src`` is forwarded as a string so callers can preserve the
+        ``dir/.`` trailing form that tells docker to copy directory
+        *contents* rather than the directory itself (``pathlib.Path``
+        normalizes ``/.`` away, which is subtly wrong here). ``dst`` is
+        interpreted by the docker daemon; pass an absolute path.
+        """
+        src_str = os.fspath(src)
+
+        # docker cp refuses a missing parent dir; create it first.
+        ensure = f"mkdir -p {os.path.dirname(dst.rstrip('/')) or '/'}"
+        exit_code, _, stderr = await self.exec(container, ensure, timeout=10)
+        if exit_code != 0:
+            raise RuntimeError(
+                f"mkdir parent for {dst!r} in {container!r} failed: {stderr!r}"
+            )
+
+        cmd = [*self._prefix(), "cp", src_str, f"{container}:{dst}"]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr_b = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"docker cp {src} -> {container}:{dst} failed "
+                f"(exit={proc.returncode}): {stderr_b.decode(errors='replace').strip()[:500]}"
+            )
+
+    async def remove_force(self, container: str) -> None:
+        """Best-effort ``docker rm -f <container>``. Never raises."""
+        cmd = [*self._prefix(), "rm", "-f", container]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr_b = await proc.communicate()
+        if proc.returncode != 0:
+            # Already gone is fine; log at debug to avoid noise.
+            _logger.debug(
+                "docker rm -f %s failed (exit=%d): %s",
+                container,
+                proc.returncode,
+                stderr_b.decode(errors="replace").strip()[:200],
+            )
+
+    async def ps_by_label(self, key: str, value: str) -> list[str]:
+        """Return container IDs with ``--label <key>=<value>``.
+
+        Used at env startup to sweep stale rollout containers left
+        behind by a previous crash / scancel (we observed 3 qemu +
+        sqlite containers surviving the orchestrator's ``Cancelling
+        active tasks`` shutdown because the ``@vf.cleanup`` task was
+        cancelled mid-``test.sh``). Returns an empty list if docker
+        isn't reachable or there are no matches; never raises.
+        """
+        cmd = [
+            *self._prefix(),
+            "ps", "-aq",  # also pick up exited containers for the sweep
+            "--filter", f"label={key}={value}",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout_b, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return []
+        return [cid for cid in stdout_b.decode().split() if cid]
+
+    async def image_exists(self, image: str) -> bool:
+        """``docker image inspect`` exit=0 iff the tag is present locally."""
+        cmd = [*self._prefix(), "image", "inspect", image]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        return proc.returncode == 0
+
+    async def build(
+        self,
+        *,
+        tag: str,
+        context_dir: str | os.PathLike[str],
+        dockerfile: str | os.PathLike[str] | None = None,
+        timeout: int = 900,
+        log_path: str | os.PathLike[str] | None = None,
+    ) -> None:
+        """``docker build -t <tag> [-f <dockerfile>] <context_dir>``.
+
+        Build output is large (apt-get install chatter, package downloads,
+        multi-hundred-MB layers) so we stream it to ``log_path`` rather
+        than buffering it in the orchestrator's memory. The verifier log
+        for this env typically lives under
+        ``<run>/logs/envs/train/environments.terminal_bench/`` which
+        the operator can tail if a build stalls.
+
+        Raises on non-zero exit; stderr tail is surfaced in the exception
+        so rollout failures point at the actual missing package rather
+        than "docker run: image not found".
+        """
+        cmd = [*self._prefix(), "build", "-t", tag]
+        if dockerfile is not None:
+            cmd += ["-f", os.fspath(dockerfile)]
+        cmd += [os.fspath(context_dir)]
+
+        if log_path is not None:
+            log_file = open(log_path, "ab")
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=log_file,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                try:
+                    rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    raise RuntimeError(
+                        f"docker build for {tag!r} timed out after {timeout}s "
+                        f"(context={context_dir}); see {log_path}"
+                    )
+                if rc != 0:
+                    raise RuntimeError(
+                        f"docker build for {tag!r} failed (exit={rc}); "
+                        f"see {log_path} for the full log"
+                    )
+            finally:
+                log_file.close()
+        else:
+            # No log path -- capture to an in-memory buffer and surface
+            # the tail on failure. Fine for small/cached builds.
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                stdout_b, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise RuntimeError(
+                    f"docker build for {tag!r} timed out after {timeout}s "
+                    f"(context={context_dir})"
+                )
+            if proc.returncode != 0:
+                tail = stdout_b.decode(errors="replace").strip()[-2000:]
+                raise RuntimeError(
+                    f"docker build for {tag!r} failed (exit={proc.returncode}):\n{tail}"
+                )
+
+
+class TerminalBenchLocalEnv(vf.StatefulToolEnv):
+    """StatefulToolEnv that runs Harbor tasks in per-rollout Docker containers."""
+
+    # How long to allow ``docker build`` per task before giving up. qemu
+    # tasks download an ~800 MB Alpine ISO + install qemu/grub/telnet, so
+    # ~15 min is the realistic worst case on a cold build cache. Override
+    # via ``build_timeout_seconds`` if you're on a slow-network host.
+    _DEFAULT_BUILD_TIMEOUT_SECONDS = 15 * 60
+
+    def __init__(
+        self,
+        task_specs: list[_TaskSpec],
+        *,
+        max_turns: int = 10,
+        command_timeout_seconds: int = _DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        test_timeout_seconds: int = _TEST_TIMEOUT_SECONDS,
+        docker_client: _DockerClient | None = None,
+        build_local_images: bool = True,
+        build_timeout_seconds: int | None = None,
+        build_log_dir: str | os.PathLike[str] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(max_turns=max_turns, **kwargs)
+        self._task_specs = {spec.name: spec for spec in task_specs}
+        self._command_timeout_seconds = command_timeout_seconds
+        self._test_timeout_seconds = test_timeout_seconds
+        self._docker = docker_client or _DockerClient()
+
+        # ---- local image build plumbing ------------------------------
+        # Harbor task.toml files point at ``us-central1-docker.pkg.dev/
+        # prime-intellect-platform/prod-sandbox/alexgshaw/<task>:<date>``
+        # which requires GCR auth we don't have in this cluster. Every
+        # task ships its source ``environment/Dockerfile`` though, so
+        # when ``build_local_images`` is True we ignore the registry tag
+        # and produce ``tb-local/<task>:latest`` from the local context.
+        # A per-tag asyncio.Lock prevents parallel rollouts from racing
+        # on the same build; a ``_resolved_tags`` cache skips the
+        # ``image inspect`` probe after the first successful resolve.
+        self._build_local_images = build_local_images
+        self._build_timeout_seconds = (
+            build_timeout_seconds or self._DEFAULT_BUILD_TIMEOUT_SECONDS
+        )
+        self._build_log_dir: Path | None = (
+            Path(build_log_dir) if build_log_dir is not None else None
+        )
+        if self._build_log_dir is not None:
+            self._build_log_dir.mkdir(parents=True, exist_ok=True)
+        self._build_locks: dict[str, asyncio.Lock] = {}
+        self._resolved_tags: dict[str, str] = {}
+
+        # ``setup_state`` triggers a one-shot sweep of stale ``prime_rl_tb_env=1``
+        # containers on the first rollout. We do it lazily because
+        # ``__init__`` isn't async; doing it eagerly would need
+        # ``asyncio.run`` which the verifiers harness forbids (we're
+        # already inside its event loop). A lock guards the flag so
+        # concurrent first rollouts don't race the sweep.
+        self._stale_sweep_lock = asyncio.Lock()
+        self._stale_sweep_done = False
+
+        # ``_container_id`` is injected by ``update_tool_args`` on every
+        # call; advertising it in the model-visible signature would just
+        # tempt the policy into copying hallucinated ids between turns.
+        self.add_tool(self.shell, args_to_skip=["_container_id"])
+
+    # ----- image resolution -----------------------------------------------
+
+    def _local_image_tag(self, spec: _TaskSpec) -> str:
+        # Deterministic, namespace-isolated tag -- ``tb-local/...`` keeps
+        # our images visually grouped in ``docker images`` and avoids
+        # colliding with anything users might have pulled manually.
+        return f"tb-local/{spec.name}:latest"
+
+    def _dockerfile_path(self, spec: _TaskSpec) -> Path | None:
+        candidate = spec.dir / "environment" / "Dockerfile"
+        return candidate if candidate.is_file() else None
+
+    async def _resolve_image(self, spec: _TaskSpec) -> str:
+        """Return a ``docker run``-able tag for ``spec``.
+
+        Fast path: tag already resolved this process lifetime.
+        Build path: local Dockerfile exists, tag is missing locally,
+        we're allowed to build -> ``docker build`` under a per-tag lock.
+        Fallback: no local Dockerfile -> trust ``task.toml::docker_image``
+        (still subject to daemon auth when ``docker run`` pulls it).
+        """
+        if spec.name in self._resolved_tags:
+            return self._resolved_tags[spec.name]
+
+        dockerfile = self._dockerfile_path(spec)
+        if not self._build_local_images or dockerfile is None:
+            # No local build option; use the upstream tag as-is. This is
+            # the right behaviour for e.g. hello-world where task.toml
+            # already points at ``python:3.11-slim`` which is public.
+            self._resolved_tags[spec.name] = spec.docker_image
+            return spec.docker_image
+
+        local_tag = self._local_image_tag(spec)
+        lock = self._build_locks.setdefault(spec.name, asyncio.Lock())
+        async with lock:
+            # Re-check inside the lock in case a peer built while we
+            # were waiting.
+            if spec.name in self._resolved_tags:
+                return self._resolved_tags[spec.name]
+            if await self._docker.image_exists(local_tag):
+                self._resolved_tags[spec.name] = local_tag
+                return local_tag
+
+            log_path: Path | None = None
+            if self._build_log_dir is not None:
+                log_path = self._build_log_dir / f"{spec.name}.build.log"
+
+            _logger.info(
+                "terminal_bench_local: building image tag=%s context=%s "
+                "(log=%s timeout=%ds)",
+                local_tag,
+                dockerfile.parent,
+                log_path,
+                self._build_timeout_seconds,
+            )
+            await self._docker.build(
+                tag=local_tag,
+                context_dir=dockerfile.parent,
+                dockerfile=dockerfile,
+                timeout=self._build_timeout_seconds,
+                log_path=log_path,
+            )
+            self._resolved_tags[spec.name] = local_tag
+            return local_tag
+
+    # ----- per-rollout setup ------------------------------------------------
+
+    async def setup_state(self, state: State) -> State:
+        # Per-sample Harbor task name lives in ``info["task_name"]`` --
+        # see ``load_environment`` for why we don't reuse ``state["task"]``
+        # (that's the env id, used by PrimeRL's buffer for routing).
+        info = state.get("info") or {}
+        if isinstance(info, str):
+            # Defensive: ``Environment.run_rollout`` already json-decodes
+            # info, but a stale client path could leave it as a string.
+            import json as _json
+
+            try:
+                info = _json.loads(info)
+            except Exception:
+                info = {}
+        task_name = (info or {}).get("task_name") or ""
+        spec = self._task_specs.get(task_name)
+        if spec is None:
+            raise ValueError(
+                f"Unknown terminal_bench_local task: {task_name!r} "
+                f"(info={info!r}, state.task={state.get('task')!r}). "
+                f"Known: {sorted(self._task_specs)}"
+            )
+
+        # One-shot sweep on the first rollout: bulk-remove any
+        # prime_rl_tb_env=1 containers left behind by a prior crash
+        # (scancel, OOM, etc.). Doing this here rather than in the
+        # worker boot path keeps env construction synchronous and
+        # avoids reaching for the docker socket during import.
+        if not self._stale_sweep_done:
+            async with self._stale_sweep_lock:
+                if not self._stale_sweep_done:
+                    stale = await self._docker.ps_by_label("prime_rl_tb_env", "1")
+                    if stale:
+                        _logger.warning(
+                            "terminal_bench_local: sweeping %d stale containers "
+                            "from previous run: %s",
+                            len(stale),
+                            stale[:10],
+                        )
+                        for cid in stale:
+                            await self._docker.remove_force(cid)
+                    self._stale_sweep_done = True
+
+        # Resolve the image *before* we mint a container name -- a build
+        # failure shouldn't leak a "tb-*" name into logs that suggests
+        # the rollout got further than it did.
+        image = await self._resolve_image(spec)
+
+        # Use a short uuid suffix so parallel rollouts of the same task
+        # don't collide on container names. ``tb-`` prefix makes these
+        # greppable with ``docker ps | grep ^tb-``.
+        container = f"tb-{spec.name}-{uuid.uuid4().hex[:8]}"
+
+        _logger.info(
+            "terminal_bench_local: launching container name=%s image=%s task=%s",
+            container,
+            image,
+            spec.name,
+        )
+        try:
+            await self._docker.run_detached(
+                image,
+                name=container,
+                # ``prime_rl_tb_env`` lets us bulk-rm orphaned containers
+                # via ``docker rm -f $(docker ps -aq --filter
+                # label=prime_rl_tb_env=1)`` after a crash. The sweep runs
+                # automatically when a fresh env worker boots (see
+                # ``TerminalBenchLocalEnv.__init__``).
+                labels={"prime_rl_tb_env": "1", "prime_rl_tb_task": spec.name},
+            )
+        except Exception as e:
+            # Leave state in a safe shape so cleanup can no-op. Re-raise
+            # so the orchestrator marks the rollout as errored (zero
+            # reward) instead of spinning forever.
+            state["tb_container_id"] = None
+            state["tb_task_dir"] = str(spec.dir)
+            state["tb_setup_error"] = str(e)
+            raise
+
+        state["tb_container_id"] = container
+        state["tb_task_dir"] = str(spec.dir)
+        state["tb_reward"] = 0.0
+        state["tb_reward_computed"] = False
+
+        # Post-sandbox setup mirrors ``HarborEnv.prepare_harbor_task``:
+        # ensure the agent workdir and verifier log dir exist, since
+        # Harbor tasks assume both (task instructions say "create
+        # hello.txt" expecting cwd=/app, and test.sh writes reward
+        # to /logs/verifier). Doing this once at rollout start means
+        # the model's first shell call can't race this setup.
+        exit_code, _, stderr = await self._docker.exec(
+            container,
+            f"mkdir -p {_AGENT_WORKDIR} /logs/verifier",
+            timeout=10,
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                f"Post-create setup (mkdir agent dirs) failed in {container}: {stderr!r}"
+            )
+
+        return await super().setup_state(state)
+
+    # ----- per-turn tool execution ------------------------------------------
+
+    def update_tool_args(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        messages: vf.Messages,
+        state: vf.State,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """Inject the rollout's container id into every ``shell`` call."""
+        updated = dict(tool_args)
+        if tool_name == "shell":
+            updated["_container_id"] = state.get("tb_container_id")
+        return updated
+
+    async def shell(self, command: str, _container_id: str | None = None) -> str:
+        """Run a shell command inside the task sandbox.
+
+        The sandbox is a Linux container pre-populated with the task's
+        base image. Use standard POSIX shell syntax. Relative paths
+        resolve from the container's WORKDIR (typically ``/app``). The
+        container persists across turns so files and installed packages
+        are carried forward.
+
+        Args:
+            command: The shell command to execute, e.g.
+                ``echo "Hello, world!" > /app/hello.txt`` or
+                ``ls -la /app``. Commands are executed via
+                ``bash -lc``, so ``&&``, pipes, and heredocs work.
+
+        Returns:
+            A plain-text block ``exit_code=<n>\\n<stdout>\\nstderr:\\n<stderr>``
+            truncated to ~8KiB. An empty result shows as ``(no output)``.
+        """
+        if not _container_id:
+            # Defensive: setup_state should have errored long before we
+            # get here, but keep the tool loop crash-free.
+            return "Error: sandbox is not available for this rollout."
+
+        exit_code, stdout, stderr = await self._docker.exec(
+            _container_id,
+            command,
+            timeout=self._command_timeout_seconds,
+            working_dir=_AGENT_WORKDIR,
+        )
+        return _format_shell_result(exit_code, stdout, stderr)
+
+    # ----- post-rollout scoring --------------------------------------------
+
+    @vf.cleanup
+    async def finalize_rollout(self, state: State) -> None:
+        """Run Harbor ``tests/test.sh`` for the reward, then destroy the container.
+
+        ``@vf.cleanup`` fires once per rollout regardless of stop reason
+        (including model errors or timeouts). Guarded with
+        ``tb_reward_computed`` so idempotent.
+        """
+        container = state.get("tb_container_id")
+        if not container:
+            # Setup failed; nothing to score or clean up.
+            return
+        if not state.get("tb_reward_computed"):
+            try:
+                state["tb_reward"] = await self._compute_reward(state)
+            except Exception as e:
+                _logger.warning(
+                    "terminal_bench_local: reward computation failed for container=%s: %s",
+                    container,
+                    e,
+                )
+                state["tb_reward"] = 0.0
+            finally:
+                state["tb_reward_computed"] = True
+        await self._docker.remove_force(container)
+
+    async def _compute_reward(self, state: State) -> float:
+        container = cast(str, state["tb_container_id"])
+        task_dir = Path(cast(str, state["tb_task_dir"]))
+
+        tests_dir = task_dir / "tests"
+        if not tests_dir.is_dir():
+            _logger.warning(
+                "terminal_bench_local: task at %s has no tests/ dir; reward=0",
+                task_dir,
+            )
+            return 0.0
+
+        # Harbor expects tests at /tests and reward output at
+        # /logs/verifier/reward.txt; pre-create both paths.
+        prep = "mkdir -p /tests /logs/verifier && rm -rf /tests/* 2>/dev/null || true"
+        exit_code, _, stderr = await self._docker.exec(container, prep, timeout=30)
+        if exit_code != 0:
+            raise RuntimeError(f"prep /tests failed: {stderr!r}")
+
+        # ``docker cp <dir>/. <container>:<dst>`` copies dir *contents*
+        # (trailing /.), which is what we want because test.sh expects
+        # to live directly under /tests. Built as a raw string so the
+        # trailing ``/.`` survives -- ``pathlib.Path`` would normalise
+        # it away and we'd end up copying the directory itself into
+        # /tests/tests/, making test.sh unreachable.
+        await self._docker.cp_into(f"{tests_dir}/.", container, "/tests")
+
+        exit_code, stdout, stderr = await self._docker.exec(
+            container,
+            "cd /tests && bash test.sh",
+            timeout=self._test_timeout_seconds,
+        )
+        # test.sh can exit non-zero even on a valid 0-reward run if the
+        # pytest harness returns non-zero; the reward file is the source
+        # of truth. Log the diagnostic output for postmortems.
+        if exit_code != 0:
+            _logger.info(
+                "terminal_bench_local: test.sh exit=%d in %s; stdout=%.200s stderr=%.200s",
+                exit_code,
+                container,
+                stdout,
+                stderr,
+            )
+
+        # Prefer reward.txt (a plain float) over reward.json (Harbor's
+        # alternative). Matches HarborEnv.compute_reward upstream.
+        _, reward_txt, _ = await self._docker.exec(
+            container,
+            "if [ -s /logs/verifier/reward.txt ]; then cat /logs/verifier/reward.txt; "
+            "elif [ -s /logs/verifier/reward.json ]; then cat /logs/verifier/reward.json; fi",
+            timeout=10,
+        )
+        raw = (reward_txt or "").strip()
+        if not raw:
+            _logger.warning(
+                "terminal_bench_local: no reward.txt/json produced in %s; reward=0",
+                container,
+            )
+            return 0.0
+        try:
+            return float(raw)
+        except ValueError:
+            try:
+                return float(json.loads(raw).get("reward", 0.0))
+            except Exception as e:
+                _logger.warning(
+                    "terminal_bench_local: could not parse reward %r in %s: %s",
+                    raw[:200],
+                    container,
+                    e,
+                )
+                return 0.0
+
+
+def _format_shell_result(exit_code: int, stdout: str, stderr: str) -> str:
+    """Canonical tool-response shape: exit code + truncated stdout/stderr."""
+    parts = [f"exit_code={exit_code}"]
+    out = stdout.rstrip()
+    err = stderr.rstrip()
+    if out:
+        parts.append(_truncate(out))
+    if err:
+        parts.append("stderr:\n" + _truncate(err))
+    if len(parts) == 1:
+        parts.append("(no output)")
+    return "\n".join(parts)
+
+
+def _truncate(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    head = text[: limit - 64]
+    return f"{head}\n...[truncated {len(text) - len(head)} chars]"
+
+
+# ---------------------------------------------------------------------------
+# Rubric: reward = the float produced by test.sh (already stored in state by
+# the cleanup hook). We keep it as a plain Rubric rather than a JudgeRubric
+# since the harness is authoritative -- no LLM judge needed.
+# ---------------------------------------------------------------------------
+
+
+async def _harbor_reward(state: vf.State, **kwargs) -> float:
+    return float(state.get("tb_reward") or 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Entry point wired into [[orchestrator.env]].id = "environments.terminal_bench"
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_TASK_ROOT = Path("verifiers/environments/terminus_harbor/tasks")
+
+# All shell tool calls run in /app by default, matching Harbor's
+# ``agent_workdir = "/app"`` convention. Task instructions that say
+# "create hello.txt" assume this cwd; without it we'd land at /.
+_AGENT_WORKDIR = "/app"
+
+_SYSTEM_PROMPT = (
+    "You are a careful shell agent operating inside a Linux container.\n"
+    f"Your working directory is {_AGENT_WORKDIR}; relative paths resolve from there.\n"
+    "Use the `shell` tool to run commands; you can run multiple commands across\n"
+    "turns. Each command is executed via `bash -lc`, so pipes, redirects, and\n"
+    "heredocs work.\n"
+    "\n"
+    "Budget your reasoning: plan briefly, then ACT by calling the `shell` tool\n"
+    "within the first few hundred thinking tokens. You can refine across turns\n"
+    "based on observed output; over-planning before any tool call wastes your\n"
+    "token budget. When you believe the task is complete, reply with a brief\n"
+    "natural-language summary and stop calling tools; that signals that\n"
+    "scoring should run."
+)
+
+
+def load_environment(
+    tasks: list[str] | None = None,
+    task_root: str | os.PathLike[str] = _DEFAULT_TASK_ROOT,
+    max_turns: int = 10,
+    command_timeout_seconds: int = _DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    test_timeout_seconds: int = _TEST_TIMEOUT_SECONDS,
+    system_prompt: str = _SYSTEM_PROMPT,
+    rollouts_per_task_in_dataset: int = 1,
+    build_local_images: bool = True,
+    build_timeout_seconds: int | None = None,
+    build_log_dir: str | os.PathLike[str] | None = None,
+) -> vf.Environment:
+    """Build a ``TerminalBenchLocalEnv`` for one or more Harbor tasks.
+
+    Args:
+        tasks: Task directory names to include (relative to
+            ``task_root``). If None, every subdirectory that has both
+            ``task.toml`` and ``instruction.md`` is included.
+        task_root: Path (absolute or relative to the prime-rl repo root)
+            pointing at a Harbor-format ``tasks/`` dir. The default
+            points at the single ``hello-world`` task that ships with
+            ``verifiers/environments/terminus_harbor``.
+        max_turns: Hard cap on assistant turns per rollout.
+        command_timeout_seconds: Timeout for individual ``shell`` calls.
+        test_timeout_seconds: Timeout for ``bash test.sh`` at scoring
+            time. Defaults to 300s which covers the hello-world
+            ``apt-get update`` + ``uv install`` + ``pytest`` chain.
+        system_prompt: Chat system message pushed ahead of every task.
+        rollouts_per_task_in_dataset: Number of duplicate dataset rows
+            per task. The orchestrator's own ``rollouts_per_example``
+            already controls variance; this is only useful if you want
+            the dataset itself to contain duplicates (e.g. ``batch_size``
+            larger than ``len(tasks)`` with ``shuffle=False``). Default
+            1 is the right choice for the phase-1 hello-world smoke.
+        build_local_images: When True (default) and ``environment/
+            Dockerfile`` exists under the task dir, ignore
+            ``task.toml::docker_image`` (which typically points at a
+            private Prime Intellect GCR) and build a local image
+            ``tb-local/<task>:latest`` from the in-tree Dockerfile. Set
+            False only if you've pre-pulled or built the upstream tags.
+        build_timeout_seconds: Per-task ``docker build`` timeout.
+            Defaults to ``TerminalBenchLocalEnv._DEFAULT_BUILD_TIMEOUT_SECONDS``
+            (15 min) which covers the qemu tasks on a cold cache.
+        build_log_dir: When set, per-task build output is streamed to
+            ``<dir>/<task>.build.log`` instead of being captured in
+            memory. Recommended for production; pass the orchestrator
+            run's envs log dir so builds are greppable from the run.
+    """
+    root = Path(task_root)
+    if not root.is_absolute():
+        # Resolve relative to the prime-rl repo root so the config file
+        # can stay portable across CPU/GPU/local launchers.
+        repo_root = Path(os.environ.get("RESEARCH_ROOT", Path.cwd())).resolve()
+        root = (repo_root / root).resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Harbor task root not found: {root}")
+
+    if tasks is None:
+        task_dirs = [d for d in sorted(root.iterdir()) if d.is_dir()]
+    else:
+        task_dirs = [root / name for name in tasks]
+
+    specs: list[_TaskSpec] = []
+    for task_dir in task_dirs:
+        specs.append(_load_task_spec(task_dir))
+    if not specs:
+        raise ValueError(f"No Harbor tasks loaded from {root}")
+
+    # Each dataset row maps to one prompt. ``info["task_name"]`` carries
+    # the Harbor task identifier used by ``setup_state`` to look up the
+    # spec. We intentionally do NOT set the top-level ``"task"`` column:
+    # PrimeRL's orchestrator/buffer uses that as the *env id* for
+    # routing to the correct env server (see ``prime_rl.orchestrator.
+    # buffer.Buffer`` and ``Environment._ensure_task`` which fills it
+    # with ``self.env_id`` when absent). Overloading it with per-sample
+    # names -- as the pre-fix version of this file did -- made every
+    # rollout land with ``state["task"] == "environments.terminal_bench"``
+    # inside ``setup_state`` instead of the real task name. The other
+    # environments (tool_use_demo, resolve_trajectory, chat_smoke) all
+    # follow the same convention.
+    rows: list[dict[str, Any]] = []
+    for idx, spec in enumerate(specs):
+        for _ in range(max(1, rollouts_per_task_in_dataset)):
+            rows.append(
+                {
+                    "prompt": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": spec.instruction},
+                    ],
+                    "answer": "",  # No ground-truth string; reward is from test.sh.
+                    "info": {
+                        "sample_id": f"tb-{spec.name}-{idx:02d}",
+                        "task_name": spec.name,
+                    },
+                }
+            )
+    dataset = Dataset.from_list(rows)
+
+    rubric = vf.Rubric(funcs=[_harbor_reward], weights=[1.0])
+
+    env = TerminalBenchLocalEnv(
+        task_specs=specs,
+        dataset=dataset,
+        eval_dataset=dataset,
+        rubric=rubric,
+        max_turns=max_turns,
+        command_timeout_seconds=command_timeout_seconds,
+        test_timeout_seconds=test_timeout_seconds,
+        build_local_images=build_local_images,
+        build_timeout_seconds=build_timeout_seconds,
+        build_log_dir=build_log_dir,
+    )
+    return env

@@ -63,4 +63,6 @@ print(' optim_dtype:             ', cfg.trainer.model.optimization_dtype)
 "
 echo "================================="
 
-uv run rl @ configs/scalerl_math/rl.toml
+# Use the venv's `rl` entry-point directly. `uv run` is unreliable here because
+# `source .venv/bin/activate` does not always rewrite PATH cleanly under slurm.
+"$REPO_ROOT/.venv/bin/rl" @ configs/scalerl_math/rl.toml
