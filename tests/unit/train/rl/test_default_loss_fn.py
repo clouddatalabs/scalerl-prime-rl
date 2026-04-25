@@ -192,6 +192,47 @@ def test_default_loss_does_not_propagate_inf_inference_logprob_at_masked_positio
     assert torch.isfinite(out.loss), f"loss leaked NaN/Inf via importance_ratio: {out.loss}"
 
 
+def test_default_loss_does_not_propagate_nan_advantage():
+    """A single NaN advantage at a trainable position must not NaN the loss.
+
+    `apply_batch_advantage_normalization` raises on non-finite advantages
+    but ONLY under `normalization == "batch"`. The `"none"` / `"group"` /
+    custom advantage paths can produce NaN (env contract violation,
+    divide-by-zero in a length-shaping fn) and the loss-side safe-mask
+    must defend belt-and-suspenders.
+    """
+    inputs = _inputs(
+        trainer_lp=[0.0, 0.0, 0.0],
+        inference_lp=[0.0, 0.0, 0.0],
+        # NaN advantage at trainable position 1.
+        advantages=[0.5, float("nan"), 0.5],
+        loss_mask=[True, True, True],
+    )
+    cfg = DefaultLossConfig(dppo_mask_high=10.0, dppo_mask_low=10.0,
+                            kl_tau=1e-3, adv_tau=1.0)
+    out = default_loss_fn(inputs, cfg)
+    assert torch.isfinite(out.loss), (
+        f"loss leaked NaN at trainable position with NaN advantage: {out.loss}"
+    )
+
+
+def test_cispo_loss_does_not_propagate_nan_advantage():
+    """Same NaN-advantage defense for cispo. Same reachability story."""
+    from prime_rl.configs.trainer import CISPOLossConfig
+    from prime_rl.trainer.rl.loss import cispo_loss_fn
+
+    inputs = _inputs(
+        trainer_lp=[0.0, 0.0, 0.0],
+        inference_lp=[0.0, 0.0, 0.0],
+        advantages=[0.5, float("nan"), 0.5],
+        loss_mask=[True, True, True],
+    )
+    out = cispo_loss_fn(inputs, CISPOLossConfig(eps_max=4.0, adv_tau=1.0))
+    assert torch.isfinite(out.loss), (
+        f"cispo loss leaked NaN at trainable position with NaN advantage: {out.loss}"
+    )
+
+
 def test_cispo_loss_does_not_propagate_nan_at_trainable_position():
     """CISPO must mirror default_loss_fn's `torch.isfinite` AND-gate at
     trainable positions. The clamp `truncated_ratio = clamp(rho, max=eps_max)`

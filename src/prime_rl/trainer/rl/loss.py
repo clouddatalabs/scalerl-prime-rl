@@ -198,10 +198,19 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     # terms.
     finite_ratio = torch.isfinite(importance_ratio)
     finite_log_ratio = torch.isfinite(log_importance_ratio)
+    # Also gate `advantages` for finiteness — `apply_batch_advantage_normalization`
+    # raises on non-finite advantages but ONLY under `normalization == "batch"`.
+    # `normalization in {"none","group"}` and any custom advantage path can let
+    # NaN through (a NaN reward from an env contract violation → NaN baseline →
+    # NaN advantage). Without this gate, `safe_advantages = where(keep, NaN, 0)
+    # = NaN`, then `pg_loss = mask * NaN * finite = NaN`, NaN flows into the
+    # batch loss, and `.backward()` poisons every parameter's gradient under
+    # FSDP. Mirror the symmetry the cispo path also has.
+    finite_adv = torch.isfinite(advantages)
     safe_importance_ratio = torch.where(
         keep_mask & finite_ratio, importance_ratio, torch.zeros_like(importance_ratio)
     )
-    safe_advantages = torch.where(keep_mask, advantages, torch.zeros_like(advantages))
+    safe_advantages = torch.where(keep_mask & finite_adv, advantages, torch.zeros_like(advantages))
     pg_loss = keep_mask * safe_advantages * safe_importance_ratio
     safe_log_importance_ratio_sq = torch.where(
         loss_mask & finite_log_ratio, log_importance_ratio**2, torch.zeros_like(log_importance_ratio)
@@ -264,13 +273,22 @@ def cispo_loss_fn(inputs: LossInputs, loss_config: CISPOLossConfig) -> LossOutpu
     # path so cispo is symmetric with default_loss_fn's defense rather than
     # only half of it.
     # Combined finite-AND-trainable mask — a position contributes only if it
-    # is trainable AND every factor (ratio AND trainer_logprobs) is finite
-    # there. Otherwise `safe_truncated_ratio == 0` but `safe_trainer_logprobs ==
-    # ±inf` would still reach the multiply and `0 * ±inf = NaN` poisons the
-    # batch. Gating every factor by the same combined mask fixes that.
+    # is trainable AND every factor (ratio AND trainer_logprobs AND advantages)
+    # is finite there. Otherwise `safe_truncated_ratio == 0` but
+    # `safe_trainer_logprobs == ±inf` (or `safe_advantages == NaN`) would
+    # still reach the multiply and `0 * ±inf = NaN` poisons the batch.
+    # Gating every factor by the same combined mask fixes that.
+    #
+    # `advantages` finiteness is the key one: `apply_batch_advantage_normalization`
+    # raises on non-finite advantages but ONLY when `normalization=="batch"`.
+    # Custom advantage paths and `normalization in {"none","group"}` can let
+    # NaN through (env contract violation, divide-by-zero in custom advantage
+    # function), and without this gate a single NaN advantage NaNs the entire
+    # batch's loss → NaN gradients propagate via FSDP all-reduce.
     finite_ratio = torch.isfinite(truncated_ratio)
     finite_lp = torch.isfinite(inputs.trainer_logprobs)
-    safe_mask = inputs.loss_mask & finite_ratio & finite_lp
+    finite_adv = torch.isfinite(advantages)
+    safe_mask = inputs.loss_mask & finite_ratio & finite_lp & finite_adv
     safe_trainer_logprobs = torch.where(
         safe_mask, inputs.trainer_logprobs, torch.zeros_like(inputs.trainer_logprobs)
     )
