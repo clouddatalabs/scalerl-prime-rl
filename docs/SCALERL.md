@@ -132,8 +132,14 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
   - `huggingface.co` (Qwen3-8B and dataset weights)
   - `hub.primeintellect.ai` (the `[envs]` extra resolves verifiers
     environments through Prime Intellect's index)
-  - For Terminal-Bench only: `ghcr.io/laude-institute/...` (TB task base
-    images pulled on first rollout per task).
+  - For Terminal-Bench only: `ghcr.io/laude-institute/...` AND
+    `docker.io` (the rollout host builds each task's
+    `environment/Dockerfile` locally with `build_local_images=True`; 26
+    of 28 task base images come from `ghcr.io`, but 2 train tasks
+    (`bank-trans-filter`, `flood-monitoring-basic`) `FROM python:slim`
+    on Docker Hub. A registry whitelist that omits `docker.io` causes
+    those task builds to fail and the rollouts then write
+    `reward=0` — indistinguishable from model failure.
 
   If your compute nodes can't reach any of these, pre-stage on the login
   node: `hf download Qwen/Qwen3-8B`, `bash scripts/fix-flash-attn-cute.sh`,
