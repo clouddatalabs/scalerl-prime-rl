@@ -109,10 +109,13 @@ args = { tasks = [
 matmul_precision = "highest"
 
 [trainer.model]
-# FA3 + HF impl — dense Qwen3 is not registered in the custom impl yet (only
-# the MoE variants), so impl="custom"+attn="fa4" fails for Qwen/Qwen3-8B. Switch
-# back to fa4+custom once dense Qwen3 lands in AutoModelForCausalLMPrimeRL.
-attn = "flash_attention_3"
+# FA4 via the HF AttentionInterface bridge (`_fa4_attention_forward` in
+# trainer/model.py) — works with stock dense Qwen3 (impl="hf"). FA3 is not an
+# option on B200: the flash_attn_3==3.0.0 wheel from pytorch-cu128-test ships
+# Hopper sm_90 kernels only and crashes with "no kernel image is available
+# for execution on the device" on Blackwell. FA4 + impl="custom" is the
+# alternative path but only registers MoE Qwen3 variants today.
+attn = "fa4"
 impl = "hf"
 optimization_dtype = "bfloat16"
 reduce_dtype = "bfloat16"
