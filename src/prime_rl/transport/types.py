@@ -34,6 +34,19 @@ class TrainingSample(msgspec.Struct, array_like=True, gc=False, omit_defaults=Tr
     example_id: str | None = None
     prompt_average_loss: bool = False
     env_name: str | None = None
+    # True iff `completion_logprobs` were reconstructed from chat-template render
+    # (no real generator logprobs). Set by `pretokenize_rollout_trajectory` when the
+    # chat client did not preserve token data. Importance-ratio losses (CISPO,
+    # DefaultLoss) MUST refuse to train on these — `rho = exp(trainer_lp - 0)`
+    # is not the IS ratio. SFT can train on them (it does not consume the field).
+    inference_logprobs_synthesized: bool = False
+    # Scheduler-assigned group_id for this rollout. Each scheduler call to
+    # `_schedule_next_request` increments group_id, so duplicate samples of
+    # the same `(env_name, example_id)` (which is allowed under sampling-with-
+    # replacement on small training pools) get distinct group_ids. The trainer
+    # uses this for prompt-level loss averaging so duplicates count as
+    # separate prompt slots — compute_advantages treats them that way too.
+    group_id: int | None = None
 
 
 class TrainingBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):

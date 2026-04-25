@@ -1008,9 +1008,8 @@ def _fa4_attention_forward(
     Mirrors the transformers FA2 adapter closely enough for PrimeRL's packed
     RL batches, but keeps the implementation local so we do not need to patch
     the installed transformers package. Tracks transformers 5.x's
-    `_flash_attention_forward` dense-model interface. Ported from baker's
-    internal prime-rl fork (which uses the same FA4 git rev abd9943b that
-    we pin in pyproject.toml).
+    `_flash_attention_forward` dense-model interface and uses the FA4 git
+    rev `abd9943b` pinned in pyproject.toml.
     """
     from transformers.modeling_flash_attention_utils import (
         _is_packed_sequence,

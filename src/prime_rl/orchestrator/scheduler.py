@@ -449,6 +449,16 @@ class Scheduler:
                             )
                         else:
                             rollout["env_name"] = env_name
+                            # Tag with the scheduler-assigned group_id so the trainer's
+                            # prompt-average path can key by group rather than by
+                            # (env_name, example_id). With sampling-with-replacement on
+                            # a small training pool (e.g. TB's 18 prompts → 48 groups
+                            # per step), `(env_name, example_id)` collapses duplicate
+                            # samples of the same prompt into one prompt for the
+                            # prompt-avg denominator while compute_advantages still
+                            # treats them as separate groups — the two paths disagree
+                            # about num_prompts.
+                            rollout["group_id"] = group_id
                             valid_rollouts.append(rollout)
 
                     if has_failures and env.requires_group_scoring:

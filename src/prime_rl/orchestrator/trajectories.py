@@ -204,7 +204,21 @@ def pretokenize_rollout_trajectory(
     tokenizer: PreTrainedTokenizer,
     processor=None,
 ) -> bool:
-    """Populate missing step tokens from prompt/completion messages."""
+    """Populate missing step tokens from prompt/completion messages.
+
+    Steps where the chat client did NOT preserve token IDs / logprobs (the
+    string-client path) get reconstructed token IDs from the chat-template
+    render plus SYNTHETIC `completion_logprobs = [0.0]*N`. That's safe for
+    SFT (which does not consume inference logprobs at all) but silently
+    corrupts CISPO / DefaultLoss importance-ratio math:
+    rho = exp(trainer_lp - 0) = exp(trainer_lp), not the real IS ratio.
+
+    To make the corruption visible, mark every reconstructed step with
+    `_logprobs_synthesized=True`. Downstream paths (interleave_rollout,
+    TrainingSample, prepare_sample) propagate the flag to the rollout level,
+    and the trainer raises before training if an importance-ratio loss
+    would consume synthesized logprobs.
+    """
     logger = get_logger()
     tools = _convert_tools_to_oai_format(output.get("tool_defs", []))
 
@@ -222,6 +236,9 @@ def pretokenize_rollout_trajectory(
 
         reconstructed.pop("prompt_prefix_len")
         reconstructed.pop("original_prompt_len")
+        # Mark this step as carrying synthesized (zero) completion_logprobs so
+        # importance-ratio losses can refuse to train on it.
+        reconstructed["_logprobs_synthesized"] = True
         step["tokens"] = reconstructed
 
     return True
@@ -281,6 +298,7 @@ def interleave_rollout(
                 "completion_mask": [bool(i) for i in tokens["completion_mask"]],
                 "completion_logprobs": list(tokens["completion_logprobs"]),
                 "routed_experts": tokens.get("routed_experts"),
+                "_logprobs_synthesized": bool(tokens.get("_logprobs_synthesized", False)),
             }
 
         logger.warning(f"Missing rollout tokens for example {output['example_id']} step {step_idx}.")
@@ -306,6 +324,7 @@ def interleave_rollout(
             len(tokens["prompt_ids"]) + len(tokens["completion_ids"]),
         )
         prompt_ids = list(tokens["prompt_ids"])
+        gid = output.get("group_id")
         return TrainingSample(
             prompt_ids=prompt_ids,
             prompt_mask=[bool(i) for i in tokens["prompt_mask"]],
@@ -317,6 +336,8 @@ def interleave_rollout(
             advantage=None,
             routed_experts=routed_experts,
             mm_token_type_ids=None,
+            inference_logprobs_synthesized=bool(tokens.get("_logprobs_synthesized", False)),
+            group_id=int(gid) if gid is not None else None,
         )
 
     def extend_sample(sample: TrainingSample, prefix_len: int, step_idx: int) -> None:
@@ -351,6 +372,11 @@ def interleave_rollout(
             sample.routed_experts.extend(step_routed[prefix_len:])
             expected_len = len(sample.prompt_ids) + len(sample.completion_ids)
             sample.routed_experts = _align_routed_experts(sample.routed_experts, expected_len)
+
+        # Sample is "synthesized" if ANY contributing step's logprobs were
+        # reconstructed. The whole sample is then unsafe for IS-ratio losses.
+        if tokens.get("_logprobs_synthesized", False):
+            sample.inference_logprobs_synthesized = True
 
     # Track [prefix_tokens, sample, last_step_idx] per active sample
     active_samples: list[tuple[list[int], TrainingSample, int]] = []

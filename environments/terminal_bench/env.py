@@ -53,6 +53,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import shutil
 import tomllib
 import uuid
@@ -271,8 +272,14 @@ class _DockerClient:
         """
         src_str = os.fspath(src)
 
-        # docker cp refuses a missing parent dir; create it first.
-        ensure = f"mkdir -p {os.path.dirname(dst.rstrip('/')) or '/'}"
+        # docker cp refuses a missing parent dir; create it first. Quote
+        # the path because it's interpolated into a `bash -lc` command —
+        # all current callers pass constant `dst` values, but a future
+        # caller plumbing a model-controlled or task-toml-supplied path
+        # would otherwise be one shell-injection away from RCE on the
+        # rollout container.
+        parent = os.path.dirname(dst.rstrip("/")) or "/"
+        ensure = f"mkdir -p {shlex.quote(parent)}"
         exit_code, _, stderr = await self.exec(container, ensure, timeout=10)
         if exit_code != 0:
             raise RuntimeError(
@@ -473,14 +480,27 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         self._build_locks: dict[str, asyncio.Lock] = {}
         self._resolved_tags: dict[str, str] = {}
 
-        # ``setup_state`` triggers a one-shot sweep of stale ``prime_rl_tb_env=1``
-        # containers on the first rollout. We do it lazily because
-        # ``__init__`` isn't async; doing it eagerly would need
-        # ``asyncio.run`` which the verifiers harness forbids (we're
-        # already inside its event loop). A lock guards the flag so
-        # concurrent first rollouts don't race the sweep.
+        # ``setup_state`` triggers a one-shot sweep of stale containers from
+        # THIS run on the first rollout. We do it lazily because ``__init__``
+        # isn't async; doing it eagerly would need ``asyncio.run`` which the
+        # verifiers harness forbids (we're already inside its event loop). A
+        # lock guards the flag so concurrent first rollouts don't race the
+        # sweep.
+        #
+        # The sweep filters by `prime_rl_tb_run_id` (per-run-unique) — NOT the
+        # generic `prime_rl_tb_env=1` tag — so two concurrent runs on the same
+        # host don't `docker rm -f` each other's live rollout containers. The
+        # run id is `SLURM_JOB_ID` if set (canonical SLURM context), otherwise
+        # PID + start time (good enough for ad-hoc launches).
         self._stale_sweep_lock = asyncio.Lock()
         self._stale_sweep_done = False
+        slurm_id = os.environ.get("SLURM_JOB_ID")
+        if slurm_id:
+            self._run_id = f"slurm-{slurm_id}"
+        else:
+            import time as _time
+
+            self._run_id = f"pid-{os.getpid()}-{int(_time.time())}"
 
         # ``_container_id`` is injected by ``update_tool_args`` on every
         # call; advertising it in the model-visible signature would just
@@ -558,12 +578,16 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         # Per-sample Harbor task name lives in ``info["task_name"]`` --
         # see ``load_environment`` for why we don't reuse ``state["task"]``
         # (that's the env id, used by PrimeRL's buffer for routing).
-        # `Environment.run_rollout` always json-decodes `info` to a dict
-        # before this hook runs; trust the contract and read the key
-        # directly. A wrong-type `info` will surface here as a clear
-        # AttributeError on `.get`, not a silent empty-dict downgrade.
-        info = state.get("info") or {}
-        task_name = info.get("task_name") or ""
+        # `Environment.run_rollout` populates `info` to a dict before this
+        # hook runs; trust the contract and read keys directly. Any wrong-
+        # type / missing-key surfaces as a clear KeyError/TypeError instead
+        # of the prior `or {}` -> `or ""` -> `Unknown task: ''` chain.
+        info = state["info"]
+        if not isinstance(info, dict):
+            raise TypeError(
+                f"setup_state: state['info'] must be dict, got {type(info).__name__}"
+            )
+        task_name = info["task_name"]
         spec = self._task_specs.get(task_name)
         if spec is None:
             raise ValueError(
@@ -572,20 +596,25 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
                 f"Known: {sorted(self._task_specs)}"
             )
 
-        # One-shot sweep on the first rollout: bulk-remove any
-        # prime_rl_tb_env=1 containers left behind by a prior crash
-        # (scancel, OOM, etc.). Doing this here rather than in the
-        # worker boot path keeps env construction synchronous and
-        # avoids reaching for the docker socket during import.
+        # One-shot sweep on the first rollout: bulk-remove containers from
+        # THIS run only (label `prime_rl_tb_run_id={self._run_id}`). Doing
+        # this here rather than in the worker boot path keeps env construction
+        # synchronous and avoids reaching for the docker socket during import.
+        # We deliberately do NOT sweep the generic `prime_rl_tb_env=1` label
+        # because two concurrent runs on the same host would otherwise
+        # `docker rm -f` each other's live rollout containers.
         if not self._stale_sweep_done:
             async with self._stale_sweep_lock:
                 if not self._stale_sweep_done:
-                    stale = await self._docker.ps_by_label("prime_rl_tb_env", "1")
+                    stale = await self._docker.ps_by_label(
+                        "prime_rl_tb_run_id", self._run_id
+                    )
                     if stale:
                         _logger.warning(
                             "terminal_bench_local: sweeping %d stale containers "
-                            "from previous run: %s",
+                            "from this run (run_id=%s): %s",
                             len(stale),
+                            self._run_id,
                             stale[:10],
                         )
                         for cid in stale:
@@ -615,12 +644,17 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
             await self._docker.run_detached(
                 image,
                 name=container,
-                # ``prime_rl_tb_env`` lets us bulk-rm orphaned containers
-                # via ``docker rm -f $(docker ps -aq --filter
-                # label=prime_rl_tb_env=1)`` after a crash. The sweep runs
-                # automatically when a fresh env worker boots (see
-                # ``TerminalBenchLocalEnv.__init__``).
-                labels={"prime_rl_tb_env": "1", "prime_rl_tb_task": spec.name},
+                # `prime_rl_tb_env=1` is the discoverability label (find any
+                # tb container on this host); `prime_rl_tb_run_id={run}` is
+                # the per-run-unique label the startup sweep filters by, so
+                # concurrent runs on the same host don't kill each other.
+                # `prime_rl_tb_task` is the task name for human-greppable
+                # `docker ps` output.
+                labels={
+                    "prime_rl_tb_env": "1",
+                    "prime_rl_tb_run_id": self._run_id,
+                    "prime_rl_tb_task": spec.name,
+                },
             )
         except Exception as e:
             # Leave state in a safe shape so cleanup can no-op. Re-raise
@@ -852,6 +886,21 @@ def _truncate(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
 
 
 async def _harbor_reward(state: vf.State, **kwargs) -> float:
+    """Read the float written by `finalize_rollout`.
+
+    If the reward path failed (`tb_reward_setup_error` set), raise instead of
+    returning 0.0. A 0.0 reward feeds NPR's pass-rate Welford update and the
+    advantage's group baseline as a real "model failed" signal — biasing the
+    policy against tasks whose plumbing is flaky rather than tasks the model
+    actually fails. Raising here lets verifiers' run_rollout mark the
+    rollout's `error` field, which the scheduler already reschedules on.
+    """
+    setup_error = state.get("tb_reward_setup_error")
+    if setup_error:
+        raise RuntimeError(
+            f"terminal_bench_local: reward computation failed (rollout error, "
+            f"NOT a real zero reward): {setup_error}"
+        )
     return float(state.get("tb_reward") or 0.0)
 
 

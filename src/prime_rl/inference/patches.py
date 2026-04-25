@@ -21,8 +21,16 @@ def promote_parallel_lm_head_to_fp32(model) -> int:
     Called from `_patched_process_weights_after_loading` so the cast
     happens after vLLM has loaded weights (and any prior dtype-conversion
     plugins have run). Returns the number of LM-head modules promoted.
-    Logs the count so a `=0` result with the env var set is observable
-    rather than a silent debugging dead-end.
+
+    Tied-embedding refusal: when `tie_word_embeddings=True`, the input
+    `VocabParallelEmbedding`'s weight tensor is the SAME tensor as the
+    `ParallelLMHead`'s weight. Casting it to fp32 in place would feed
+    fp32 weights to the embedding's `forward` against a non-fp32 input
+    and either crash with a dtype mismatch or silently produce garbage.
+    The trainer-side path is safe (chunked loop casts hidden+weight to
+    fp32 inside the matmul), but the vLLM `_patched_apply` here only
+    upcasts the LM-head call site. Refuse loudly until the embedding
+    side is plumbed through too.
     """
     import logging
 
@@ -30,6 +38,17 @@ def promote_parallel_lm_head_to_fp32(model) -> int:
 
     if not vllm_fp32_lm_head_enabled():
         return 0
+
+    config = getattr(model, "config", None)
+    if config is not None and getattr(config, "tie_word_embeddings", False):
+        raise RuntimeError(
+            "fp32_lm_head=True is not supported with tie_word_embeddings=True. "
+            "The input embedding shares the LM-head weight; promoting the weight "
+            "to fp32 would feed fp32 weights to the embedding's forward against "
+            "non-fp32 input. Either disable PRIME_RL_VLLM_FP32_LM_HEAD or load a "
+            "model with tied embeddings disabled (Qwen3-8B, the shipped POC, has "
+            "tie_word_embeddings=False)."
+        )
 
     promoted = 0
     for module in model.modules():
@@ -51,6 +70,19 @@ def promote_parallel_lm_head_to_fp32(model) -> int:
         # leaving the rest of the model in its original dtype.
         module._prime_rl_fp32_lm_head = True
         promoted += 1
+
+    if promoted == 0:
+        # No ParallelLMHead found, but the env var was set. Either vLLM's
+        # module hierarchy moved (version drift) or the model class doesn't
+        # use ParallelLMHead. Either way the FP32 LM-head ingredient is
+        # silently disabled — fail loud rather than ship a recipe regression.
+        raise RuntimeError(
+            "fp32_lm_head: no ParallelLMHead modules found on the loaded model. "
+            "PRIME_RL_VLLM_FP32_LM_HEAD is set but the patch promoted zero modules — "
+            "either vLLM moved/renamed ParallelLMHead (check version pin) or this "
+            "model uses a different LM-head class. Disable PRIME_RL_VLLM_FP32_LM_HEAD "
+            "or update the patch to cover the actual LM-head module."
+        )
 
     logging.getLogger(__name__).info("prime-rl: promoted %d ParallelLMHead module(s) to fp32", promoted)
     return promoted

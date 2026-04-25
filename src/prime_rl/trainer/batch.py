@@ -290,8 +290,16 @@ def apply_prompt_average_sequence_weights(
 
     Token counts come from `_trainable_completion_tokens`, which excludes
     non-trainable completion tokens and tokens dropped by `prepare_sample`'s
-    seq_len truncation. Group key is (env_name, example_id) so multi-env
-    batches don't collide on `example_id` (which is only unique within an env).
+    seq_len truncation.
+
+    Group key: prefer the scheduler-assigned `group_id`. Each call to
+    `Scheduler._schedule_next_request` increments next_group_id by one, so a
+    prompt sampled twice in the same step (which happens whenever
+    `batch_size / rollouts_per_example > num_unique_examples`, e.g. TB's 18
+    prompts × 48 groups) gets distinct group_ids. compute_advantages already
+    treats those as separate groups; matching the prompt-avg path here
+    keeps the two consistent. Fall back to `(env_name, example_id)` when
+    `group_id` is None (older serialized batches, custom callers).
 
     Empty samples (zero trainable tokens after truncation) get weight 0 — they
     contribute nothing under any choice of weight, so this just makes that
@@ -310,17 +318,32 @@ def apply_prompt_average_sequence_weights(
             "mixing prompt-avg and other reductions in the same step yields wrong gradients."
         )
 
-    by_prompt: dict[tuple[str, str], list[int]] = {}
+    # If any rollout has a group_id, every rollout must — partial assignment
+    # would silently mix the two keying schemes and miscount num_prompts.
+    have_gid = [getattr(r, "group_id", None) is not None for r in rollouts]
+    if any(have_gid) and not all(have_gid):
+        raise ValueError(
+            "prompt_average_loss requires consistent group_id assignment: some rollouts "
+            "have group_id set and others don't. Either every rollout has a scheduler-assigned "
+            "group_id or none do (legacy fallback to (env_name, example_id))."
+        )
+    use_gid = bool(have_gid and all(have_gid))
+
+    by_prompt: dict[tuple[str, ...], list[int]] = {}
     for i, rollout in enumerate(rollouts):
-        if rollout.example_id is None:
-            raise ValueError("example_id is required when prompt_average_loss is enabled")
-        env_name = getattr(rollout, "env_name", None)
-        if not env_name:
-            raise ValueError(
-                "env_name is required on every sample when prompt_average_loss is enabled "
-                "(needed to disambiguate example_id across envs)"
-            )
-        by_prompt.setdefault((str(env_name), str(rollout.example_id)), []).append(i)
+        if use_gid:
+            key: tuple[str, ...] = (str(rollout.group_id),)
+        else:
+            if rollout.example_id is None:
+                raise ValueError("example_id is required when prompt_average_loss is enabled")
+            env_name = getattr(rollout, "env_name", None)
+            if not env_name:
+                raise ValueError(
+                    "env_name is required on every sample when prompt_average_loss is enabled "
+                    "(needed to disambiguate example_id across envs)"
+                )
+            key = (str(env_name), str(rollout.example_id))
+        by_prompt.setdefault(key, []).append(i)
 
     num_prompts = len(by_prompt)
     if num_prompts == 0:

@@ -201,6 +201,16 @@ def cispo_loss_fn(inputs: LossInputs, loss_config: CISPOLossConfig) -> LossOutpu
         # as a sanity gauge — too high (e.g. > ~10%) suggests the recipe drifted
         # off-policy beyond what the truncation bound was tuned for.
         "ratio_truncated": _safe_mean((importance_ratio > loss_config.eps_max).float(), inputs.loss_mask),
+        # Lower-tail companion: fraction of trainable tokens whose ratio
+        # collapsed to ~0 (rho < 1/eps_max). CISPO's upper-only clamp means
+        # those tokens are effectively zero-gradient (REINFORCE × 0); without
+        # this metric, async_level=8 + slow weight broadcast can silently
+        # down-weight a large fraction of the batch with no dashboard
+        # signal — `ratio_truncated` only fires on the upper tail.
+        "ratio_collapsed": _safe_mean(
+            (importance_ratio < (1.0 / loss_config.eps_max)).float(),
+            inputs.loss_mask,
+        ),
     }
     return LossOutputs(loss=loss, metrics=metrics)
 
