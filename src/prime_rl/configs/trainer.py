@@ -653,6 +653,13 @@ class CheckpointConfig(BaseConfig):
     ] = False
 
 
+# ScaleRL §3.3 / DAPO "Token-Level Policy Gradient Loss" — knob describing how each
+# packed sequence's loss is scaled before reduction. "token" is the upstream behavior
+# (sum / total_trainable_tokens); "sequence" / "none" defer scaling to per-sequence
+# weights set by the packer (e.g. prompt-level averaging).
+LossScaleMode: TypeAlias = Literal["token", "sequence", "none"]
+
+
 class DefaultLossConfig(BaseModel):
     """Config for the default loss."""
 
@@ -663,12 +670,46 @@ class DefaultLossConfig(BaseModel):
     adv_tau: Annotated[float, Field(ge=0, description="The tau for advantages.")] = 1.0
     teacher_tau: Annotated[float, Field(ge=0, description="The tau for teacher logprobs.")] = 0.0
     kl_tau: Annotated[float, Field(ge=0, description="The tau for KL divergence.")] = 1e-3
+    loss_scale_mode: Annotated[
+        LossScaleMode,
+        Field(description="How to scale the per-sequence loss before reduction. See LossScaleMode."),
+    ] = "token"
+
+
+class CISPOLossConfig(BaseModel):
+    """Canonical Minimax-CISPO loss (ScaleRL §3.2 / MiniMax-M1 §3.1).
+
+    Loss form (per token):  -sg(min(rho, eps_max)) * adv * log_pi_theta(y_t)
+    where rho = exp(trainer_logprobs - inference_logprobs) is the IS ratio,
+    sg() is stop-gradient (the ratio is a detached coefficient on log pi),
+    and the upper-only truncation keeps low-prob "fork" tokens in the loss
+    rather than masking them out the way DAPO/PPO would.
+
+    Pair with `loss_scale_mode = "sequence"` (or `"none"` if the packer
+    pre-encodes prompt-level averaging in sequence_loss_weights).
+    """
+
+    type: Literal["cispo"] = "cispo"
+
+    eps_max: Annotated[
+        float,
+        Field(gt=0, description="Upper truncation cap on the IS ratio. ScaleRL ablation: insensitive in {4, 5, 8}."),
+    ] = 4.0
+    adv_tau: Annotated[float, Field(ge=0, description="Advantage scale factor (matches DefaultLossConfig.adv_tau).")] = 1.0
+    loss_scale_mode: Annotated[
+        LossScaleMode,
+        Field(description="Use 'sequence' or 'none' with prompt-level averaging; 'token' for batch-token mean."),
+    ] = "sequence"
 
 
 class SFTLossConfig(BaseModel):
     """Config for SFT-style masked negative log-likelihood loss."""
 
     type: Literal["sft"] = "sft"
+    loss_scale_mode: Annotated[
+        LossScaleMode,
+        Field(description="SFT typically uses 'token' (NLL averaged across trainable tokens)."),
+    ] = "token"
 
 
 class CustomLossConfig(BaseModel):
@@ -678,9 +719,16 @@ class CustomLossConfig(BaseModel):
 
     import_path: Annotated[str, Field(description="Import path to the loss function (e.g., 'my_module.my_loss')")]
     kwargs: Annotated[dict[str, Any], Field(default_factory=dict, description="Kwargs to pass to the loss function")]
+    loss_scale_mode: Annotated[
+        LossScaleMode,
+        Field(description="Forwarded to compute_loss; defaults to 'token'."),
+    ] = "token"
 
 
-LossConfig: TypeAlias = Annotated[DefaultLossConfig | SFTLossConfig | CustomLossConfig, Field(discriminator="type")]
+LossConfig: TypeAlias = Annotated[
+    DefaultLossConfig | CISPOLossConfig | SFTLossConfig | CustomLossConfig,
+    Field(discriminator="type"),
+]
 
 
 class FakeDataLoaderConfig(BaseConfig):

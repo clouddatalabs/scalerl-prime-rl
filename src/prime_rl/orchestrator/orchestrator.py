@@ -529,6 +529,12 @@ async def orchestrate(config: OrchestratorConfig):
             for sample in samples:
                 sample.advantage = rollout["advantage"]
                 sample.reward = rollout["reward"]
+                # Tag with example_id + prompt_average_loss so the trainer's packer can
+                # compute prompt-level loss weights (ScaleRL §3.3). The flag is per-sample
+                # so a future config could selectively turn it on per-env, but today it's
+                # a single orchestrator-level switch.
+                sample.example_id = str(rollout["example_id"])
+                sample.prompt_average_loss = self.config.prompt_average_loss
                 sample_decode_tokens = sum(sample.completion_mask)
                 sample_prefill_tokens = len(sample.prompt_ids) + len(sample.completion_mask) - sample_decode_tokens
                 rollout_decode_tokens += sample_decode_tokens

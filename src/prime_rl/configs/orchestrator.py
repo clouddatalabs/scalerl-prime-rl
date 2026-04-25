@@ -957,6 +957,20 @@ class OrchestratorConfig(BaseConfig):
     # Rollout filters (monitor by default, enforce optionally)
     filters: list[FilterConfig] = [GibberishFilterConfig(), RepetitionFilterConfig(), ZeroAdvantageFilterConfig()]
 
+    prompt_average_loss: Annotated[
+        bool,
+        Field(
+            description=(
+                "ScaleRL §3.3 / DAPO 'Token-Level Policy Gradient Loss' — normalize the RL loss so "
+                "each prompt's G rollouts contribute the same total weight to the step. The orchestrator "
+                "tags each TrainingSample with example_id + prompt_average_loss=True; the trainer's "
+                "packer turns those into per-sequence weights `sample_tokens / (total_prompt_tokens * "
+                "num_prompts)`. Pair with loss_scale_mode='sequence' or 'none' on the trainer.loss "
+                "config — see prime_rl.trainer.batch.apply_prompt_average_sequence_weights."
+            )
+        ),
+    ] = False
+
     # The logging configuration
     log: LogConfig = LogConfig()
 

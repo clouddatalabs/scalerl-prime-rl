@@ -26,6 +26,12 @@ class TrainingSample(msgspec.Struct, array_like=True, gc=False, omit_defaults=Tr
     # mm_token_type_ids: token type ids per token [batch seq], int64 (0=text, 1=image, 2=video)
     mm_token_type_ids: list[int] | None = None
 
+    # Stable per-prompt id used by the trainer to compute prompt-level loss weights when
+    # OrchestratorConfig.prompt_average_loss is True. Fields appended at the END so
+    # msgspec array_like=True backward-compat with old serialized batches survives.
+    example_id: str | None = None
+    prompt_average_loss: bool = False
+
 
 class TrainingBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
     """A batch of training examples with metadata for transport."""
@@ -56,3 +62,9 @@ class MicroBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
     image_grid_thw: list[list[int]] | None = None
     # mm_token_type_ids: token type ids per token [batch seq], int64 (0=text, 1=image, 2=video)
     mm_token_type_ids: list[int] | None = None
+
+    # Per-sequence loss weights (one float per packed sample) used when the loss
+    # function's loss_scale_mode is "sequence" / "none" (e.g. ScaleRL prompt-level
+    # averaging). Default `[]` keeps msgspec backward-compat with old serialized
+    # batches — readers fall through the `not weights` branch in compute_loss.
+    sequence_loss_weights: list[float] = []

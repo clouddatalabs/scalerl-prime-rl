@@ -6,7 +6,14 @@ from beartype import beartype as typechecker
 from jaxtyping import Bool, Float, Int, jaxtyped
 from torch import Tensor
 
-from prime_rl.configs.trainer import CustomLossConfig, DefaultLossConfig, LossConfig, SFTLossConfig
+from prime_rl.configs.trainer import (
+    CISPOLossConfig,
+    CustomLossConfig,
+    DefaultLossConfig,
+    LossConfig,
+    LossScaleMode,
+    SFTLossConfig,
+)
 from prime_rl.utils.utils import import_object
 
 
@@ -163,6 +170,37 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     return LossOutputs(loss=loss, metrics=metrics)
 
 
+def cispo_loss_fn(inputs: LossInputs, loss_config: CISPOLossConfig) -> LossOutputs:
+    """Canonical Minimax-CISPO loss — REINFORCE with stop-gradient, upper-truncated IS weight.
+
+    Per token (trainable mask only):
+        L_t = -sg(min(rho_t, eps_max)) * adv * log pi_theta(y_t)
+
+    rho_t = pi_train / pi_gen (ratio of fresh trainer logprobs to logprobs the inference
+    engine actually emitted at sampling time). The stop-gradient detaches the ratio so
+    only log pi_theta carries gradient. No lower clip, no token-level masking — that's
+    the whole point versus PPO/DAPO.
+
+    Returns the per-sample sum; the batch-level reduction (token-mean / sequence-weight)
+    happens in compute_loss.
+    """
+    importance_ratio = torch.exp(inputs.trainer_logprobs - inputs.inference_logprobs)
+    truncated_ratio = torch.clamp(importance_ratio, max=loss_config.eps_max).detach()
+
+    advantages = loss_config.adv_tau * inputs.advantages
+    pg_per_token = inputs.loss_mask * truncated_ratio * advantages * inputs.trainer_logprobs
+    loss = -pg_per_token.sum()
+
+    metrics = {
+        "importance_ratio": _safe_mean(importance_ratio, inputs.loss_mask),
+        # Fraction of trainable tokens whose ratio hit the eps_max ceiling. Useful as
+        # a sanity gauge — too high (e.g. > ~10%) suggests the recipe drifted off-policy
+        # beyond what the truncation bound was tuned for.
+        "ratio_truncated": _safe_mean((importance_ratio > loss_config.eps_max).float(), inputs.loss_mask),
+    }
+    return LossOutputs(loss=loss, metrics=metrics)
+
+
 def sft_loss_fn(inputs: LossInputs) -> LossOutputs:
     """SFT-style masked negative log-likelihood over trainable tokens."""
     trainer_logprobs = inputs.trainer_logprobs
@@ -176,7 +214,11 @@ def sft_loss_fn(inputs: LossInputs) -> LossOutputs:
 
 
 def setup_loss_fn(loss_config: LossConfig) -> LossFn:
-    """Setup the loss function based on config."""
+    """Setup the loss function based on config.
+
+    The returned callable carries `.loss_scale_mode` so train.py can pick the right
+    reduction in compute_loss without a second config read.
+    """
     if isinstance(loss_config, CustomLossConfig):
         custom_fn = import_object(loss_config.import_path)
         kwargs = loss_config.kwargs
@@ -184,14 +226,24 @@ def setup_loss_fn(loss_config: LossConfig) -> LossFn:
         def loss_fn(inputs: LossInputs) -> LossOutputs:
             return custom_fn(inputs, **kwargs)
 
+        loss_fn.loss_scale_mode = loss_config.loss_scale_mode
         return loss_fn
 
     if isinstance(loss_config, SFTLossConfig):
+        sft_loss_fn.loss_scale_mode = loss_config.loss_scale_mode
         return sft_loss_fn
+
+    if isinstance(loss_config, CISPOLossConfig):
+        def loss_fn(inputs: LossInputs) -> LossOutputs:
+            return cispo_loss_fn(inputs, loss_config)
+
+        loss_fn.loss_scale_mode = loss_config.loss_scale_mode
+        return loss_fn
 
     def loss_fn(inputs: LossInputs) -> LossOutputs:
         return default_loss_fn(inputs, loss_config)
 
+    loss_fn.loss_scale_mode = loss_config.loss_scale_mode
     return loss_fn
 
 
@@ -203,6 +255,8 @@ def compute_loss(
     loss_mask: list[Bool[Tensor, " seq_i"]],
     loss_fn: LossFn,
     loss_scale: int,
+    sequence_loss_weights: list[float] | None = None,
+    loss_scale_mode: LossScaleMode | None = None,
 ) -> tuple[Float[Tensor, ""], dict[str, Any]]:
     """
     Compute loss for packed sequences (batch size = 1, multiple sequences packed along sequence dimension).
@@ -214,7 +268,15 @@ def compute_loss(
         advantages: Advantages for each sequence
         loss_mask: Loss mask for each sequence
         loss_fn: Per-sequence loss function
-        loss_scale: Scale factor to normalize the loss
+        loss_scale: Scale factor for the "token" path (typically total trainable tokens).
+        sequence_loss_weights: Optional per-sequence weights. When supplied alongside
+            `loss_scale_mode in {"sequence", "none"}` the loss reduces as
+            `sum_i w_i * loss_i`, with the orchestrator/packer responsible for
+            encoding the desired normalization in the weights (e.g. ScaleRL
+            prompt-level averaging via apply_prompt_average_sequence_weights).
+        loss_scale_mode: How to combine per-sequence losses. Defaults to
+            `getattr(loss_fn, "loss_scale_mode", "token")` so call sites that
+            don't pass it inherit the loss-fn's preference.
 
     Returns:
         Tuple of (scaled_loss, aggregated_metrics)
@@ -225,8 +287,18 @@ def compute_loss(
     if teacher_logprobs is None:
         teacher_logprobs = [None] * len(trainer_logprobs)
 
-    for t_logp, i_logp, teach_logp, adv, mask in zip(
-        trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask
+    if loss_scale_mode is None:
+        loss_scale_mode = getattr(loss_fn, "loss_scale_mode", "token")
+
+    weights = sequence_loss_weights if sequence_loss_weights else None
+    if weights is not None and len(weights) != len(trainer_logprobs):
+        raise ValueError(
+            f"sequence_loss_weights length {len(weights)} does not match "
+            f"number of packed sequences {len(trainer_logprobs)}"
+        )
+
+    for idx, (t_logp, i_logp, teach_logp, adv, mask) in enumerate(
+        zip(trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask)
     ):
         inputs = LossInputs(
             trainer_logprobs=t_logp,
@@ -238,14 +310,23 @@ def compute_loss(
 
         result = loss_fn(inputs)
 
-        total_loss = total_loss + result.loss
+        sample_loss = result.loss
+        if weights is not None and loss_scale_mode in ("sequence", "none"):
+            sample_loss = sample_loss * float(weights[idx])
+
+        total_loss = total_loss + sample_loss
 
         for k, v in result.metrics.items():
             if k not in all_metrics:
                 all_metrics[k] = []
             all_metrics[k].append(v)
 
-    scaled_loss = total_loss / loss_scale
+    if loss_scale_mode == "token":
+        scaled_loss = total_loss / loss_scale
+    else:
+        # "sequence" / "none": weights already encode normalization. Avoid the
+        # token-count divisor — the packer chose the scale.
+        scaled_loss = total_loss
 
     aggregated: dict[str, Any] = {}
     for k, v in all_metrics.items():

@@ -27,6 +27,9 @@ class TensorMicroBatch(TypedDict):
 
     # Batch level
     lora_num_tokens: Int[Tensor, "n_loras"]
+    # Per-packed-sequence loss weights (length == number of samples packed into this micro
+    # batch). Empty list when the packer chose the neutral path (loss_scale_mode="token").
+    sequence_loss_weights: list[float]
 
     # MoE router replay
     routed_experts: Int[Tensor, "batch seq layers topk"] | None
@@ -201,6 +204,7 @@ class DataLoader:
             loss_mask=torch.tensor(micro_batch.loss_mask, dtype=torch.bool).unsqueeze(0),
             temperatures=torch.tensor(micro_batch.temperatures, dtype=torch.float).unsqueeze(0),
             lora_num_tokens=torch.tensor(micro_batch.lora_num_tokens, dtype=torch.int32),
+            sequence_loss_weights=list(micro_batch.sequence_loss_weights),
             # Multimodal fields - no batch dimension for these as they are variable-sized
             pixel_values=torch.frombuffer(bytearray(micro_batch.pixel_values), dtype=torch.float32).reshape(
                 micro_batch.pixel_values_shape

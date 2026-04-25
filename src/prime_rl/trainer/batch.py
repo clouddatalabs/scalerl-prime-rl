@@ -76,6 +76,9 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
         pixel_values=training_example.pixel_values,
         pixel_values_shape=training_example.pixel_values_shape,
         image_grid_thw=training_example.image_grid_thw,
+        # Default to a neutral 1.0 weight per packed sequence; overwritten by
+        # apply_prompt_average_sequence_weights when prompt_average_loss is set.
+        sequence_loss_weights=[1.0],
     )
 
 
@@ -134,6 +137,7 @@ def packed_samples_into_micro_bs(
                         bin_content.mm_token_type_ids = []
                     bin_content.mm_token_type_ids.extend(sample.mm_token_type_ids)
                 bin_content.position_ids.extend(sample.position_ids)
+                bin_content.sequence_loss_weights.extend(sample.sequence_loss_weights)
                 bin_content.lora_num_tokens[idx] += len(sample.input_ids)
                 break
         else:
@@ -183,6 +187,9 @@ def _make_dummy_batch(source: MicroBatch) -> MicroBatch:
     dummy = copy.deepcopy(source)
     dummy.advantages = [0.0] * len(dummy.input_ids)
     dummy.loss_mask = [False] * len(dummy.input_ids)
+    # Zero the sequence weights so the dummy contributes nothing to the loss when
+    # loss_scale_mode is "sequence" / "none".
+    dummy.sequence_loss_weights = [0.0] * len(dummy.sequence_loss_weights)
     return dummy
 
 
@@ -193,6 +200,46 @@ def _pad_group_for_distribution(group: list[MicroBatch], num_train_workers: int)
         dummy = _make_dummy_batch(group[0])
         group.extend([dummy] * num_padding)
     return group
+
+
+def apply_prompt_average_sequence_weights(rollouts: list[TrainingSample]) -> list[float] | None:
+    """Compute ScaleRL §3.3 prompt-level loss averaging weights.
+
+    Returns a list of per-rollout weights (parallel to `rollouts`) where
+        w_i = sample_tokens_i / (total_prompt_tokens * num_prompts)
+    so that summing `w_i * loss_i` over the batch yields the average over prompts
+    of the within-prompt-token mean loss — every prompt contributes equally,
+    every token within a prompt contributes equally.
+
+    Returns None when no rollouts have prompt_average_loss set (caller leaves the
+    default neutral 1.0 weight in place). Raises if the flag is set inconsistently
+    across the batch — mixing schemes would silently yield wrong gradients.
+    """
+    if not any(rollout.prompt_average_loss for rollout in rollouts):
+        return None
+    if not all(rollout.prompt_average_loss for rollout in rollouts):
+        raise ValueError(
+            "prompt_average_loss must be set consistently for every sample in a batch; "
+            "mixing prompt-avg and other reductions in the same step yields wrong gradients."
+        )
+
+    by_example: dict[str, list[int]] = {}
+    for i, rollout in enumerate(rollouts):
+        if rollout.example_id is None:
+            raise ValueError("example_id is required when prompt_average_loss is enabled")
+        by_example.setdefault(rollout.example_id, []).append(i)
+
+    num_prompts = len(by_example)
+    if num_prompts == 0:
+        raise ValueError("prompt_average_loss requires at least one prompt in the batch")
+
+    weights = [0.0] * len(rollouts)
+    for indices in by_example.values():
+        sample_tokens = [len(rollouts[i].completion_ids) for i in indices]
+        total = sum(sample_tokens) or 1  # guard fully-empty prompts
+        for i, n in zip(indices, sample_tokens):
+            weights[i] = n / (total * num_prompts)
+    return weights
 
 
 def prepare_batch(
@@ -212,7 +259,12 @@ def prepare_batch(
     a text-only batch, the all-gather will hang. We separate micro batches by modality
     and distribute them so that at each step index, all ranks see the same modality.
     """
+    prompt_weights = apply_prompt_average_sequence_weights(rollouts)
     all_samples = [(idx, prepare_sample(rollout, seq_len)) for idx, rollout in zip(idxs, rollouts)]
+    # Overwrite the default neutral 1.0 weight with the prompt-avg weight when set.
+    if prompt_weights is not None:
+        for (_, micro_batch), w in zip(all_samples, prompt_weights):
+            micro_batch.sequence_loss_weights = [float(w)]
 
     micro_batches = packed_samples_into_micro_bs(all_samples, seq_len, num_loras)
     micro_batches = [pad_micro_batch(micro_batch, pad_to_multiple_of) for micro_batch in micro_batches]

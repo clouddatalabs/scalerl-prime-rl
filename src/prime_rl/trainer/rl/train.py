@@ -445,6 +445,10 @@ def train(config: TrainerConfig):
                 loss_mask=loss_mask.squeeze().split(response_lengths),
                 loss_fn=loss_fn,
                 loss_scale=loss_scale,
+                # Per-sequence weights set by the orchestrator/packer (e.g. ScaleRL
+                # prompt-level averaging). When loss_scale_mode is "token" (the upstream
+                # default) the weights are ignored — see prime_rl.trainer.rl.loss.compute_loss.
+                sequence_loss_weights=micro_batch.get("sequence_loss_weights") or None,
             )
 
             # Backward pass
