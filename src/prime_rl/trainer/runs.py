@@ -519,14 +519,21 @@ def _validate_orch_lora_against_trainer(
             "the trainer is configured with LoRA. Add `[model.lora]` (rank "
             "and alpha may be omitted to inherit the trainer's values).",
         )
-    if orch_config.model.lora.rank is None:
-        orch_config.model.lora.rank = trainer_lora.rank
-    if orch_config.model.lora.alpha is None:
-        orch_config.model.lora.alpha = trainer_lora.alpha
-    if orch_config.model.lora.rank > trainer_lora.rank:
+    # Read explicit per-config values BEFORE applying defaults — the
+    # trainer-equality checks below need to see what the operator actually
+    # wrote, not what the inheritance pass filled in. Mutating the config
+    # before a possible False return also leaves a half-edited config in
+    # the caller's hands; checking first keeps the contract pure: validate,
+    # THEN inherit, THEN return.
+    requested_rank = orch_config.model.lora.rank
+    requested_alpha = orch_config.model.lora.alpha
+    effective_rank = requested_rank if requested_rank is not None else trainer_lora.rank
+    effective_alpha = requested_alpha if requested_alpha is not None else trainer_lora.alpha
+
+    if effective_rank > trainer_lora.rank:
         return (
             False,
-            f"model.lora.rank ({orch_config.model.lora.rank}) exceeds trainer max rank ({trainer_lora.rank})",
+            f"model.lora.rank ({effective_rank}) exceeds trainer max rank ({trainer_lora.rank})",
         )
     # Per-run alpha must match the trainer's (the single-run path's
     # `auto_setup_lora` already enforces this; multi-run was strictly
@@ -536,10 +543,10 @@ def _validate_orch_lora_against_trainer(
     # config — which vLLM consumes at adapter-load time — disagrees,
     # train and inference apply different scales and the adapter
     # silently mistrains.
-    if orch_config.model.lora.alpha != trainer_lora.alpha:
+    if effective_alpha != trainer_lora.alpha:
         return (
             False,
-            f"model.lora.alpha ({orch_config.model.lora.alpha}) does not match "
+            f"model.lora.alpha ({effective_alpha}) does not match "
             f"trainer.model.lora.alpha ({trainer_lora.alpha}). The trainer "
             "applies alpha/rank as the LoRA scaling factor; vLLM reads alpha "
             "from the saved adapter config at load time. Disagreement here "
@@ -547,6 +554,12 @@ def _validate_orch_lora_against_trainer(
             "different factors). Either omit alpha from the orchestrator "
             "config to inherit, or set it equal to trainer.model.lora.alpha.",
         )
+    # Apply inherited defaults only on the success path so a False return
+    # never leaves the caller with a half-mutated config.
+    if requested_rank is None:
+        orch_config.model.lora.rank = trainer_lora.rank
+    if requested_alpha is None:
+        orch_config.model.lora.alpha = trainer_lora.alpha
     return True, ""
 
 

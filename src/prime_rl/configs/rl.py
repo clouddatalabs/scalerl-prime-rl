@@ -572,19 +572,40 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def auto_setup_logs(self):
-        """Auto-setup shared log config for trainer and orchestrator."""
+        """Auto-setup shared log config for trainer and orchestrator.
+
+        `json_logging` was previously propagated unconditionally — an explicit
+        `[trainer.log] json_logging = true` paired with a top-level `[log]`
+        block that left `json_logging` at its False default would silently
+        flip the trainer back to False. Gate on `model_fields_set` to honor
+        explicit per-component values.
+        """
         if self.log is not None:
             if self.log.level is not None:
-                self.trainer.log.level = self.log.level
-                self.orchestrator.log.level = self.log.level
-            self.trainer.log.json_logging = self.log.json_logging
-            self.orchestrator.log.json_logging = self.log.json_logging
+                if "level" not in self.trainer.log.model_fields_set:
+                    self.trainer.log.level = self.log.level
+                if "level" not in self.orchestrator.log.model_fields_set:
+                    self.orchestrator.log.level = self.log.level
+            if "json_logging" in self.log.model_fields_set:
+                if "json_logging" not in self.trainer.log.model_fields_set:
+                    self.trainer.log.json_logging = self.log.json_logging
+                if "json_logging" not in self.orchestrator.log.model_fields_set:
+                    self.orchestrator.log.json_logging = self.log.json_logging
 
         return self
 
     @model_validator(mode="after")
     def auto_setup_ckpt(self):
-        """Auto-setup shared checkpoint config for trainer and orchestrator."""
+        """Auto-setup shared checkpoint config for trainer and orchestrator.
+
+        Each propagation path is gated on the per-component `model_fields_set`
+        so the shorthand only fills in subconfig values the operator did NOT
+        set explicitly. Mirrors `auto_setup_seq_len` / `auto_setup_max_steps`
+        / `auto_setup_async_level` — silent overwrite of an explicit
+        per-component value would be a foot-gun (the operator picked a
+        different value, the auto-derive disagrees, and the run silently
+        goes with the shorthand).
+        """
         if self.ckpt is not None:
             # Create checkpoint configs if not specified
             if self.trainer.ckpt is None:
@@ -593,27 +614,35 @@ class RLConfig(BaseConfig):
                 self.orchestrator.ckpt = OrchestratorCheckpointConfig()
 
             # If specified, override checkpoint output directory
-            if self.ckpt.output_dir is not None:
+            if self.ckpt.output_dir is not None and "output_dir" not in self.trainer.ckpt.model_fields_set:
                 self.trainer.ckpt.output_dir = self.ckpt.output_dir
 
             # If specified, use the same ckpt interval
             if self.ckpt.interval is not None:
-                self.trainer.ckpt.interval = self.ckpt.interval
-                self.orchestrator.ckpt.interval = self.ckpt.interval
+                if "interval" not in self.trainer.ckpt.model_fields_set:
+                    self.trainer.ckpt.interval = self.ckpt.interval
+                if "interval" not in self.orchestrator.ckpt.model_fields_set:
+                    self.orchestrator.ckpt.interval = self.ckpt.interval
 
             # If resuming training, ensure orchestrator resume from the same step
             if self.ckpt.resume_step is not None:
-                self.trainer.ckpt.resume_step = self.ckpt.resume_step
-                self.orchestrator.ckpt.resume_step = self.ckpt.resume_step
+                if "resume_step" not in self.trainer.ckpt.model_fields_set:
+                    self.trainer.ckpt.resume_step = self.ckpt.resume_step
+                if "resume_step" not in self.orchestrator.ckpt.model_fields_set:
+                    self.orchestrator.ckpt.resume_step = self.ckpt.resume_step
 
             # If specified, propagate keep policy
             if self.ckpt.keep_last is not None:
-                self.trainer.ckpt.keep_last = self.ckpt.keep_last
-                self.orchestrator.ckpt.keep_last = self.ckpt.keep_last
+                if "keep_last" not in self.trainer.ckpt.model_fields_set:
+                    self.trainer.ckpt.keep_last = self.ckpt.keep_last
+                if "keep_last" not in self.orchestrator.ckpt.model_fields_set:
+                    self.orchestrator.ckpt.keep_last = self.ckpt.keep_last
 
             if self.ckpt.keep_interval is not None:
-                self.trainer.ckpt.keep_interval = self.ckpt.keep_interval
-                self.orchestrator.ckpt.keep_interval = self.ckpt.keep_interval
+                if "keep_interval" not in self.trainer.ckpt.model_fields_set:
+                    self.trainer.ckpt.keep_interval = self.ckpt.keep_interval
+                if "keep_interval" not in self.orchestrator.ckpt.model_fields_set:
+                    self.orchestrator.ckpt.keep_interval = self.ckpt.keep_interval
 
         validate_shared_ckpt_config(self.trainer, self.orchestrator)
 
@@ -621,29 +650,45 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def auto_setup_wandb(self):
-        """Auto-setup shared W&B config for trainer and orchestrator."""
+        """Auto-setup shared W&B config for trainer and orchestrator.
+
+        `SharedWandbConfig.project` defaults to a truthy string ("prime-rl"),
+        not None — so the previous `if self.wandb.project:` guard fired any
+        time the operator wrote `[wandb]` (even just to set `name`), silently
+        overwriting an explicit `[trainer.wandb] project = "..."`. Gate every
+        propagation on `model_fields_set` so the shorthand only fills in
+        subconfig values the operator did NOT set explicitly.
+        """
         if self.wandb is not None:
             if not self.trainer.wandb:
                 self.trainer.wandb = WandbConfig()
             if not self.orchestrator.wandb:
                 self.orchestrator.wandb = WandbWithExtrasConfig()
 
-            if self.wandb.project:
-                self.trainer.wandb.project = self.wandb.project
-                self.orchestrator.wandb.project = self.wandb.project
+            if "project" in self.wandb.model_fields_set:
+                if "project" not in self.trainer.wandb.model_fields_set:
+                    self.trainer.wandb.project = self.wandb.project
+                if "project" not in self.orchestrator.wandb.model_fields_set:
+                    self.orchestrator.wandb.project = self.wandb.project
 
             if self.wandb.shared:
                 if self.wandb.name:
-                    self.trainer.wandb.name = self.wandb.name
-                    self.orchestrator.wandb.name = self.wandb.name
+                    if "name" not in self.trainer.wandb.model_fields_set:
+                        self.trainer.wandb.name = self.wandb.name
+                    if "name" not in self.orchestrator.wandb.model_fields_set:
+                        self.orchestrator.wandb.name = self.wandb.name
             else:
                 if self.wandb.name:
-                    self.trainer.wandb.name = f"{self.wandb.name}-trainer"
-                    self.orchestrator.wandb.name = f"{self.wandb.name}-orchestrator"
+                    if "name" not in self.trainer.wandb.model_fields_set:
+                        self.trainer.wandb.name = f"{self.wandb.name}-trainer"
+                    if "name" not in self.orchestrator.wandb.model_fields_set:
+                        self.orchestrator.wandb.name = f"{self.wandb.name}-orchestrator"
 
-            if self.wandb.offline:
-                self.trainer.wandb.offline = self.wandb.offline
-                self.orchestrator.wandb.offline = self.wandb.offline
+            if "offline" in self.wandb.model_fields_set:
+                if "offline" not in self.trainer.wandb.model_fields_set:
+                    self.trainer.wandb.offline = self.wandb.offline
+                if "offline" not in self.orchestrator.wandb.model_fields_set:
+                    self.orchestrator.wandb.offline = self.wandb.offline
 
         validate_shared_wandb_config(self.trainer, self.orchestrator)
 
