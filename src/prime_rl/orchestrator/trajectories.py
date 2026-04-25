@@ -213,11 +213,13 @@ def pretokenize_rollout_trajectory(
     corrupts CISPO / DefaultLoss importance-ratio math:
     rho = exp(trainer_lp - 0) = exp(trainer_lp), not the real IS ratio.
 
-    To make the corruption visible, mark every reconstructed step with
-    `_logprobs_synthesized=True`. Downstream paths (interleave_rollout,
-    TrainingSample, prepare_sample) propagate the flag to the rollout level,
-    and the trainer raises before training if an importance-ratio loss
-    would consume synthesized logprobs.
+    Mark every reconstructed step with `_logprobs_synthesized=True` so the
+    flag propagates to TrainingSample.inference_logprobs_synthesized.
+    Enforcement of "don't combine synthesized logprobs with IS-ratio losses"
+    is at config-load time via `validate_is_ratio_loss_with_external_rollout_string_client`
+    in configs/rl.py — that's the load-bearing guard. The flag here is for
+    observability (warning log on first occurrence) and for future runtime
+    consumers that want a per-rollout signal.
     """
     logger = get_logger()
     tools = _convert_tools_to_oai_format(output.get("tool_defs", []))
@@ -240,6 +242,16 @@ def pretokenize_rollout_trajectory(
         # importance-ratio losses can refuse to train on it.
         reconstructed["_logprobs_synthesized"] = True
         step["tokens"] = reconstructed
+        logger.warning(
+            "pretokenize_rollout_trajectory: step %d for example %s reconstructed token IDs "
+            "WITHOUT real generator logprobs (chat client did not preserve token data). "
+            "completion_logprobs = [0.0]*N; this is SAFE for SFT but corrupts CISPO/Default "
+            "importance ratios. The config-level validator should have rejected this "
+            "combination at load time — if you see this warning, please verify your "
+            "rollout-path config.",
+            step_idx,
+            output["example_id"],
+        )
 
     return True
 

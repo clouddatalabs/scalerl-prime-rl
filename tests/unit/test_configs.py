@@ -353,6 +353,57 @@ def test_rl_config_accepts_prompt_average_loss_with_sequence_scale_mode():
     assert config.trainer.loss.loss_scale_mode == "sequence"
 
 
+def test_rl_config_rejects_cispo_with_teacher_model():
+    """CISPO does not consume teacher logprobs — configuring a teacher with
+    `loss.type='cispo'` would silently pay the teacher-prefill compute cost."""
+    with pytest.raises(ValidationError, match="cispo.*teacher_model"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "orchestrator": {
+                    "prompt_average_loss": True,
+                    "teacher_model": {"client": {}, "model": {}},
+                },
+                "trainer": {"loss": {"type": "cispo", "loss_scale_mode": "sequence"}},
+            }
+        )
+
+
+def test_rl_config_rejects_sft_with_teacher_model():
+    """SFT does not consume teacher logprobs either — same footgun as CISPO."""
+    with pytest.raises(ValidationError, match="sft.*teacher_model"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "orchestrator": {
+                    "teacher_model": {"client": {}, "model": {}},
+                },
+                "trainer": {"loss": {"type": "sft", "loss_scale_mode": "token"}},
+            }
+        )
+
+
+def test_rl_config_rejects_fp32_lm_head_with_fp8_weight_transfer():
+    """fp32_lm_head + NCCL FP8 weight transfer is self-defeating: the
+    LM-head weights would be quantized to FP8 before vLLM's promote-to-fp32
+    path runs, baking in the noise the fp32 LM-head exists to prevent.
+    """
+    with pytest.raises(ValidationError, match="fp32_lm_head"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "weight_broadcast": {
+                    "type": "nccl",
+                    "quantize_in_weight_transfer": True,
+                },
+                "trainer": {
+                    "model": {"fp32_lm_head": True, "impl": "custom"},
+                },
+                "inference": {"model": {"fp32_lm_head": True}},
+            }
+        )
+
+
 def test_adamw_config_eps_bounds():
     """Tightened from `gt=0` to `Field(ge=1e-30, le=1e-3)` to reject
     sub-fp32-representable values that would silently train at effectively

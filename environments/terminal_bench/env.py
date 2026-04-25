@@ -498,9 +498,9 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         if slurm_id:
             self._run_id = f"slurm-{slurm_id}"
         else:
-            import time as _time
-
-            self._run_id = f"pid-{os.getpid()}-{int(_time.time())}"
+            # uuid (not pid+integer-second time) so two ad-hoc launches in
+            # the same wall-clock second on the same host don't collide.
+            self._run_id = f"adhoc-{uuid.uuid4().hex[:16]}"
 
         # ``_container_id`` is injected by ``update_tool_args`` on every
         # call; advertising it in the model-visible signature would just

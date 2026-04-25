@@ -6,7 +6,9 @@
 #
 # Environment overrides (all optional):
 #   REPO_ROOT       — clone path (default: $HOME/scalerl-prime-rl)
-#   OUTPUT_ROOT     — slurm log + run output dir (default: $REPO_ROOT/outputs/smoke)
+#   OUTPUT_ROOT     — slurm stdout/stderr LOG dir only (default: $REPO_ROOT/outputs/smoke).
+#                     Run outputs (checkpoints, rollouts, run_default/) go to
+#                     `[output_dir]` from the TOML, NOT here.
 #   HF_HOME         — HuggingFace cache (default: $REPO_ROOT/hf-cache)
 #
 # To run on a partition other than `gpu`, override at submit time:
@@ -146,10 +148,31 @@ PYBIN="$REPO_ROOT/.venv/bin/python"
 
 # Preflight: GPUs visible, model weights cached, FA4 stub not shadowing FA4.
 GPU_COUNT="$(nvidia-smi -L 2>/dev/null | wc -l || echo 0)"
-if [ "$GPU_COUNT" -lt 8 ]; then
-    echo "ERROR: nvidia-smi reports $GPU_COUNT GPUs but the math smoke config wants" >&2
-    echo "       num_train_gpus=4 + num_infer_gpus=4 = 8 GPUs on one node." >&2
-    echo "       Override [deployment] in the config or run on an 8-GPU node." >&2
+# Read the actual GPU requirement from the resolved config so this works on
+# custom configs that use different splits. Falls back to 8 if the parse
+# fails (matches both shipped POC configs: 4 train + 4 infer = 8).
+GPU_REQUIRED="$("$PYBIN" - <<EOF 2>/dev/null
+import tomllib, sys
+try:
+    with open("$SCALERL_CONFIG", "rb") as f:
+        cfg = tomllib.load(f)
+    d = cfg.get("deployment", {})
+    if d.get("type", "single_node") == "single_node":
+        n = int(d.get("num_train_gpus", 4)) + int(d.get("num_infer_gpus", 4))
+    else:
+        # Multi-node uses gpus_per_node × (num_train_nodes + num_infer_nodes)
+        n = int(d.get("gpus_per_node", 8)) * (
+            int(d.get("num_train_nodes", 1)) + int(d.get("num_infer_nodes", 1))
+        )
+    print(n)
+except Exception:
+    print(8)
+EOF
+)"
+GPU_REQUIRED="${GPU_REQUIRED:-8}"
+if [ "$GPU_COUNT" -lt "$GPU_REQUIRED" ]; then
+    echo "ERROR: nvidia-smi reports $GPU_COUNT GPUs but $SCALERL_CONFIG requires $GPU_REQUIRED." >&2
+    echo "       Override [deployment] in the config or run on a node with enough GPUs." >&2
     exit 1
 fi
 

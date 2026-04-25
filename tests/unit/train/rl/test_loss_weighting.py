@@ -18,6 +18,7 @@ def _make_sample(
     prompt_average_loss: bool = True,
     advantage: float = 1.0,
     env_name: str = "env_a",
+    group_id: int | None = None,
 ) -> TrainingSample:
     # `prompt_mask = [False]*3` matches the simple-trajectory tokenization path
     # (orchestrator/trajectories.py:168), so the trainable tokens are just the
@@ -35,6 +36,7 @@ def _make_sample(
         example_id=example_id,
         prompt_average_loss=prompt_average_loss,
         env_name=env_name,
+        group_id=group_id,
     )
 
 
@@ -181,6 +183,61 @@ def test_apply_prompt_average_sequence_weights_requires_example_id():
     sample.example_id = None
     with pytest.raises(ValueError, match="example_id is required"):
         apply_prompt_average_sequence_weights([sample], seq_len=4096)
+
+
+def test_apply_prompt_average_sequence_weights_keys_by_group_id_when_present():
+    """When the scheduler tags rollouts with group_id, prompt-avg keys by it
+    rather than by `(env_name, example_id)`. Two samples of the same prompt
+    with distinct group_ids must count as TWO buckets, not one — fixes the
+    Terminal-Bench duplicate-prompt collapse where 18 unique prompts × 48
+    sampled groups was producing num_prompts=18 instead of 48.
+    """
+    # Same example_id "A" appears in three groups (gid=0, 1, 2); same example
+    # "B" appears in one group (gid=3). Expected: 4 buckets total.
+    rollouts = [
+        _make_sample(example_id="A", completion_len=10, group_id=0),
+        _make_sample(example_id="A", completion_len=10, group_id=1),
+        _make_sample(example_id="A", completion_len=10, group_id=2),
+        _make_sample(example_id="B", completion_len=10, group_id=3),
+    ]
+    weights = apply_prompt_average_sequence_weights(rollouts, seq_len=4096)
+    assert weights is not None
+    # 4 prompts, 10 trainable tokens each → per-sample weight = 1/(10*4) = 0.025
+    assert weights == pytest.approx([0.025, 0.025, 0.025, 0.025])
+
+    # Sanity: under the OLD `(env_name, example_id)` keying, the three "A"
+    # samples would collapse into one bucket → num_prompts=2, per-sample
+    # weight for A = 1/(30*2) = 1/60 ≈ 0.0167, B = 1/(10*2) = 0.05. The new
+    # weights diverge from this — pin both directions.
+    old_a = 1.0 / (30 * 2)
+    assert abs(weights[0] - old_a) > 1e-3, (
+        "weights collapsed to old (env_name, example_id) keying"
+    )
+
+
+def test_apply_prompt_average_sequence_weights_rejects_partial_group_id():
+    """Mixing some-group_id-some-not is a contract violation — surface it."""
+    rollouts = [
+        _make_sample(example_id="A", completion_len=5, group_id=0),
+        _make_sample(example_id="B", completion_len=5, group_id=None),
+    ]
+    with pytest.raises(ValueError, match="consistent group_id assignment"):
+        apply_prompt_average_sequence_weights(rollouts, seq_len=4096)
+
+
+def test_apply_prompt_average_sequence_weights_falls_back_when_no_group_id():
+    """Legacy path: when no rollout has a group_id, fall back to the
+    `(env_name, example_id)` key (preserves old serialized batches)."""
+    rollouts = [
+        _make_sample(example_id="A", completion_len=10, group_id=None),
+        _make_sample(example_id="A", completion_len=10, group_id=None),
+        _make_sample(example_id="B", completion_len=10, group_id=None),
+    ]
+    weights = apply_prompt_average_sequence_weights(rollouts, seq_len=4096)
+    assert weights is not None
+    # 2 unique (env_name, example_id) buckets; A has 20 tokens, B has 10.
+    # Per-sample weight A = 1/(20*2) = 0.025, B = 1/(10*2) = 0.05.
+    assert weights == pytest.approx([0.025, 0.025, 0.05])
 
 
 def test_apply_prompt_average_sequence_weights_excludes_non_trainable_completion_tokens():

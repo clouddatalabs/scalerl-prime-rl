@@ -448,6 +448,26 @@ def test_buffer_config_rejects_easy_threshold_equal_to_npr_threshold():
         )
 
 
+def test_buffer_config_rejects_online_difficulty_filtering_with_npr():
+    """online_difficulty_filtering and no_positive_resampling are policy-
+    overlapping ScaleRL deviations. Reject the combination so the user
+    picks ONE eviction mechanism (paper-faithful is NPR alone)."""
+    with pytest.raises(ValueError, match="online_difficulty_filtering=True with"):
+        BufferConfig(
+            online_difficulty_filtering=True,
+            no_positive_resampling=True,
+            no_positive_resampling_threshold=0.9,
+        )
+
+
+def test_buffer_config_accepts_online_difficulty_filtering_alone():
+    """OD-filtering on its own (no NPR) validates — it's a non-paper but
+    not-shadowing-anything choice."""
+    cfg = BufferConfig(online_difficulty_filtering=True)
+    assert cfg.online_difficulty_filtering is True
+    assert cfg.no_positive_resampling is False
+
+
 def test_buffer_no_positive_resampling_skipped_for_easy_promoted(dummy_envs, make_rollouts):
     """Sanity for the `easy <= NPR` shadowing case: with the schema ordering
     above (easy_threshold > NPR_threshold), an example whose avg_reward exceeds

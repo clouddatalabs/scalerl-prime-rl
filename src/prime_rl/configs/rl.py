@@ -461,6 +461,43 @@ class RLConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
+    def validate_is_ratio_loss_with_external_rollout_string_client(self):
+        """Reject IS-ratio losses (CISPO, default with importance ratios) when
+        the rollout path produces synthesized zero logprobs.
+
+        With `orchestrator.use_token_client=False` (chat-client), local vLLM
+        (`teacher_rollout_model is None`) returns real per-token logprobs via
+        the orchestrator's `return_token_ids=true` extra_body — see
+        `OrchestratorConfig.resolve_env_config`. But an external
+        OpenAI-compatible rollout service (`teacher_rollout_model` set) does
+        NOT preserve token logprobs through the chat-completions API, and
+        `pretokenize_rollout_trajectory` reconstructs them as `[0.0]*N`. CISPO's
+        `rho = exp(trainer_lp - 0)` is then exp(trainer_lp), not the IS ratio
+        the recipe needs — silent paper-fidelity regression.
+
+        SFT does not consume inference_logprobs (already validated by
+        `validate_sft_no_teacher`), so this guard fires only on cispo/default.
+        """
+        if self.trainer.loss.type not in {"cispo", "default"}:
+            return self
+        if self.orchestrator.use_token_client:
+            return self
+        if self.orchestrator.teacher_rollout_model is None:
+            return self
+        raise ValueError(
+            f"trainer.loss.type='{self.trainer.loss.type}' with "
+            "orchestrator.use_token_client=False AND an external "
+            "[orchestrator.teacher_rollout_model] is unsafe: the chat-client "
+            "path will reconstruct completion_logprobs as [0.0]*N for any rollout "
+            "where the external service didn't return token-level logprobs, and "
+            "CISPO/Default importance ratios computed against zero inference_logprobs "
+            "are not the recipe IS ratios. Either use use_token_client=True (TITO "
+            "client preserves real logprobs), drop the external "
+            "teacher_rollout_model and use local vLLM (which sets return_token_ids=true), "
+            "or switch to loss.type='sft' (does not consume inference_logprobs)."
+        )
+
+    @model_validator(mode="after")
     def validate_fp32_lm_head_no_fp8_transfer(self):
         """fp32_lm_head + quantize_in_weight_transfer=true silently undoes
         the §3.2 ingredient.
@@ -472,19 +509,27 @@ class RLConfig(BaseConfig):
         """
         if not self.trainer.model.fp32_lm_head:
             return self
-        wb = getattr(self.trainer, "weight_broadcast", None)
-        if wb is None:
-            return self
-        if getattr(wb, "type", None) == "nccl" and getattr(wb, "quantize_in_weight_transfer", False):
-            raise ValueError(
-                "trainer.model.fp32_lm_head=True with "
-                "trainer.weight_broadcast.quantize_in_weight_transfer=True is "
-                "self-defeating: NCCL FP8 weight transfer would quantize the "
-                "LM-head weights to FP8 before vLLM's promote-to-fp32 path runs, "
-                "baking in the quantization noise that fp32 LM-head exists to "
-                "prevent (ScaleRL §3.2 / MiniMax-M1 §3.2). Either disable "
-                "fp32_lm_head or set quantize_in_weight_transfer=False."
-            )
+        # Check both the top-level `[weight_broadcast]` (the user's TOML
+        # source-of-truth) and the post-propagation `trainer.weight_broadcast`
+        # — `auto_setup_weight_broadcast` copies the RLConfig-level value into
+        # both trainer and orchestrator, but the top-level field is what the
+        # user actually sets.
+        for wb in (
+            getattr(self, "weight_broadcast", None),
+            getattr(self.trainer, "weight_broadcast", None),
+        ):
+            if wb is None:
+                continue
+            if getattr(wb, "type", None) == "nccl" and getattr(wb, "quantize_in_weight_transfer", False):
+                raise ValueError(
+                    "trainer.model.fp32_lm_head=True with "
+                    "weight_broadcast.quantize_in_weight_transfer=True is "
+                    "self-defeating: NCCL FP8 weight transfer would quantize the "
+                    "LM-head weights to FP8 before vLLM's promote-to-fp32 path runs, "
+                    "baking in the quantization noise that fp32 LM-head exists to "
+                    "prevent (ScaleRL §3.2 / MiniMax-M1 §3.2). Either disable "
+                    "fp32_lm_head or set quantize_in_weight_transfer=False."
+                )
         return self
 
     @model_validator(mode="after")

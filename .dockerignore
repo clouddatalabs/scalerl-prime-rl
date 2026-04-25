@@ -1,0 +1,47 @@
+# Docker build context exclusions.
+#
+# Keeps the build context lean: the Dockerfile only consumes pyproject.toml,
+# uv.lock, README.md, src/, configs/, scripts/, environments/, examples/,
+# benchmarks/scripts. Anything else under the repo root just inflates upload
+# time and final image size.
+
+# Python build / venv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Tooling
+.git/
+.gitignore
+.gitleaks.toml
+
+# Outputs / runtime
+outputs/
+hf-cache/
+slurm-logs/
+wandb/
+*.log
+.pydantic_config
+
+# Tests are not needed in the runtime image (Dockerfile builds a runtime stage,
+# not a test stage). CI runs tests separately on host.
+tests/
+
+# Reports / docs not consumed by the runtime image.
+reports/
+*.md
+!README.md
+
+# Environment / secrets
+.env

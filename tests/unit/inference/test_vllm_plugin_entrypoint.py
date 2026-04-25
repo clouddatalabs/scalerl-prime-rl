@@ -73,3 +73,136 @@ def test_vllm_fp32_lm_head_enabled_env_parsing():
             os.environ.pop("PRIME_RL_VLLM_FP32_LM_HEAD", None)
         else:
             os.environ["PRIME_RL_VLLM_FP32_LM_HEAD"] = saved
+
+
+# `promote_parallel_lm_head_to_fp32` raise paths — three §3.2 footguns that
+# silently disable the FP32 LM-head ingredient if the patch regresses.
+
+
+class _FakeFloatLMHead:
+    """Stand-in for vLLM's ParallelLMHead with a floating-point weight."""
+
+    def __init__(self, dtype):
+        import torch
+
+        self.weight = torch.zeros(4, 8, dtype=dtype)
+        self.bias = None
+
+    def modules(self):
+        return [self]
+
+
+class _FakeIntLMHead(_FakeFloatLMHead):
+    def __init__(self):
+        import torch
+
+        # Quantized vocab heads pack weights as int8/int4. Casting to fp32
+        # silently produces garbage — `promote_parallel_lm_head_to_fp32`
+        # must refuse loudly.
+        self.weight = torch.zeros(4, 8, dtype=torch.int8)
+        self.bias = None
+
+
+class _FakeModel:
+    """Top-level model object exposing a config + module iterator."""
+
+    def __init__(self, head, *, tie_word_embeddings=False):
+        self.config = type("Cfg", (), {"tie_word_embeddings": tie_word_embeddings})()
+        self._head = head
+
+    def modules(self):
+        # `promote_parallel_lm_head_to_fp32` filters by isinstance(_, ParallelLMHead);
+        # we monkeypatch ParallelLMHead in the test to be the fake's class so the
+        # filter passes.
+        return [self._head]
+
+
+def _stub_parallel_lm_head_class(monkeypatch, cls):
+    """Replace vllm's ParallelLMHead symbol with `cls` for the duration of the test."""
+    import sys
+    import types
+
+    fake_module = types.ModuleType("vllm.model_executor.layers.vocab_parallel_embedding")
+    fake_module.ParallelLMHead = cls
+    monkeypatch.setitem(sys.modules, "vllm.model_executor.layers.vocab_parallel_embedding", fake_module)
+
+
+def test_promote_parallel_lm_head_to_fp32_no_op_when_disabled(monkeypatch):
+    """env-var off → function returns 0 without touching modules."""
+    import os
+
+    from prime_rl.inference.patches import promote_parallel_lm_head_to_fp32
+
+    monkeypatch.delenv("PRIME_RL_VLLM_FP32_LM_HEAD", raising=False)
+    _stub_parallel_lm_head_class(monkeypatch, _FakeFloatLMHead)
+    head = _FakeFloatLMHead(__import__("torch").float16)
+    model = _FakeModel(head)
+    assert promote_parallel_lm_head_to_fp32(model) == 0
+
+
+def test_promote_parallel_lm_head_to_fp32_promotes_floating_point_head(monkeypatch):
+    """Happy path: float16 weight → cast to fp32, sentinel set."""
+    import os
+
+    import torch
+
+    from prime_rl.inference.patches import promote_parallel_lm_head_to_fp32
+
+    monkeypatch.setenv("PRIME_RL_VLLM_FP32_LM_HEAD", "1")
+    _stub_parallel_lm_head_class(monkeypatch, _FakeFloatLMHead)
+    head = _FakeFloatLMHead(torch.bfloat16)
+    model = _FakeModel(head)
+    n = promote_parallel_lm_head_to_fp32(model)
+    assert n == 1
+    assert head.weight.dtype == torch.float32
+    assert getattr(head, "_prime_rl_fp32_lm_head", False) is True
+
+
+def test_promote_parallel_lm_head_to_fp32_refuses_quantized_head(monkeypatch):
+    """Quantized (integer-dtype) head → loud refusal."""
+    import pytest
+
+    from prime_rl.inference.patches import promote_parallel_lm_head_to_fp32
+
+    monkeypatch.setenv("PRIME_RL_VLLM_FP32_LM_HEAD", "1")
+    _stub_parallel_lm_head_class(monkeypatch, _FakeIntLMHead)
+    head = _FakeIntLMHead()
+    model = _FakeModel(head)
+    with pytest.raises(RuntimeError, match="quantized ParallelLMHead"):
+        promote_parallel_lm_head_to_fp32(model)
+
+
+def test_promote_parallel_lm_head_to_fp32_refuses_tied_embeddings(monkeypatch):
+    """Tied-embedding model → loud refusal (input embedding shares LM-head weight)."""
+    import pytest
+    import torch
+
+    from prime_rl.inference.patches import promote_parallel_lm_head_to_fp32
+
+    monkeypatch.setenv("PRIME_RL_VLLM_FP32_LM_HEAD", "1")
+    _stub_parallel_lm_head_class(monkeypatch, _FakeFloatLMHead)
+    head = _FakeFloatLMHead(torch.bfloat16)
+    model = _FakeModel(head, tie_word_embeddings=True)
+    with pytest.raises(RuntimeError, match="tie_word_embeddings"):
+        promote_parallel_lm_head_to_fp32(model)
+
+
+def test_promote_parallel_lm_head_to_fp32_raises_when_zero_promoted(monkeypatch):
+    """No ParallelLMHead found but env var is on → raise instead of silently
+    shipping a recipe regression. Catches vLLM module-hierarchy drift.
+    """
+    import pytest
+
+    from prime_rl.inference.patches import promote_parallel_lm_head_to_fp32
+
+    monkeypatch.setenv("PRIME_RL_VLLM_FP32_LM_HEAD", "1")
+    _stub_parallel_lm_head_class(monkeypatch, _FakeFloatLMHead)
+
+    class _NoHeadModel:
+        config = type("Cfg", (), {"tie_word_embeddings": False})()
+
+        def modules(self):
+            return []
+
+    with pytest.raises(RuntimeError, match="no ParallelLMHead modules found"):
+        promote_parallel_lm_head_to_fp32(_NoHeadModel())
