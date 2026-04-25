@@ -153,6 +153,24 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
   applies, the rollouts crash early with a clear error from
   `environments/terminal_bench/env.py` naming the failed
   `/var/run/docker.sock` access and the missing `sudo` fallback.
+- **For Terminal-Bench (in-container egress):** every TB rollout container
+  runs an upstream-Harbor `tests/run-tests.sh` that bootstraps its test
+  harness with `apt-get update`, `apt-get install -y curl`, and
+  `curl -LsSf https://astral.sh/uv/.../install.sh`. The rollout containers
+  themselves need outbound network to **Debian/Ubuntu apt mirrors** and
+  `astral.sh`. On clusters where Docker's default bridge is air-gapped or
+  behind a strict egress proxy, those installs fail and `test.sh` writes
+  `reward = 0` — indistinguishable from "model failed". Either open egress
+  for the rollout containers, or pre-bake the test deps into each task's
+  base image and modify `tests/run-tests.sh` to skip the install step.
+- **`/dev/shm` size for vLLM.** vLLM's tensor-parallel paths and
+  `inference.parallel.dp = 4` use shared memory; the Docker default of
+  64 MiB is insufficient. On bare-metal SLURM hosts this is usually fine
+  (defaults to half of RAM); on cluster runtimes that constrain `/dev/shm`
+  (Pyxis/Enroot, Slurm cgroup with `ConstrainDevices=yes`, container
+  sandboxes) you need at least **8 GiB**. Symptoms: `vLLM` hangs at
+  initialization or OOM with an opaque error. Pass `--shm-size=8g` (or
+  larger) to your container runtime.
 
 **Resume.** Resubmit the same sbatch with `SCALERL_RESUME=1`:
 ```bash

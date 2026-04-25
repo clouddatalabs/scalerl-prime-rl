@@ -37,6 +37,13 @@
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --partition=gpu
+# Many shared SLURM clusters reject submissions with no time limit or default to
+# a MaxTime policy of 1–4h. The math smoke needs ~30–60 min to reach the first
+# checkpoint at [ckpt] interval = 100; TB rollouts need several minutes/step
+# until task base images are warm in the Docker layer cache, so multiply
+# accordingly. Override at submit time with `sbatch -t HH:MM:SS ...` if your
+# cluster's QoS forbids 12h jobs.
+#SBATCH --time=12:00:00
 
 set -euo pipefail
 
