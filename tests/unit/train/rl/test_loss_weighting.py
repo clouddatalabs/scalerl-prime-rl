@@ -705,3 +705,32 @@ def test_setup_loss_fn_custom_loss_attaches_loss_scale_mode():
     )
     loss_fn = setup_loss_fn(cfg)
     assert getattr(loss_fn, "loss_scale_mode") == "none"
+
+
+def test_compute_loss_empty_packed_batch_returns_real_device_zero():
+    """An empty packed batch must return a 0-d Tensor on a real device, not
+    a Python float. Otherwise `loss.backward()` would crash with
+    `AttributeError: 'float' object has no attribute 'backward'`, and on
+    multi-rank DP the crash is asymmetric — other ranks have data and NCCL
+    deadlocks rather than fails cleanly.
+    """
+    loss_fn = setup_loss_fn(CustomLossConfig(
+        import_path="tests.unit.train.rl.test_loss_weighting._identity_custom_loss",
+        loss_scale_mode="token",
+    ))
+    loss, metrics = compute_loss(
+        trainer_logprobs=[],
+        inference_logprobs=[],
+        teacher_logprobs=None,
+        advantages=[],
+        loss_mask=[],
+        loss_fn=loss_fn,
+        loss_scale=1,
+    )
+    assert isinstance(loss, torch.Tensor), f"expected Tensor, got {type(loss)!r}"
+    assert loss.dim() == 0
+    assert loss.device.type in {"cpu", "cuda"}
+    # Smoke: backward() must work on a 0-d float tensor with grad path.
+    loss.requires_grad_(True)
+    loss.backward()
+    assert metrics == {}

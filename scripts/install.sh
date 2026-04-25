@@ -88,12 +88,32 @@ main() {
         source $HOME/.local/bin/env
     fi
 
+    # Pre-flight: CUTLASS / FA4 build from source on first sync; fail loud and
+    # actionable if the toolchain is missing rather than crash mid-sync 5
+    # minutes in with an opaque traceback.
+    log_info "Checking build toolchain..."
+    missing=()
+    for tool in nvcc gcc git curl; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing+=("$tool")
+        fi
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        log_warn "Missing required build tools: ${missing[*]}"
+        log_warn "Install on Debian/Ubuntu via 'INSTALL_BASE_PACKAGES=1 bash $0' (apt)"
+        log_warn "or your cluster's package manager. CUDA toolkit (nvcc) must"
+        log_warn "match the torch CUDA version pinned in pyproject.toml (12.8)."
+        exit 1
+    fi
+
     log_info "Syncing virtual environment..."
     # `--extra all` (the aggregate extra defined in pyproject.toml) excludes
     # `flash-attn-3` because its wheels ship Hopper sm_90 kernels only and
     # crash on B200 with "no kernel image available." `uv sync --all-extras`
     # would enumerate every named extra and pull FA3 in.
-    uv sync --extra all
+    # `--locked` matches what Dockerfile.cuda does — without it the host install
+    # can drift from uv.lock if any of the git-pinned deps moved upstream.
+    uv sync --extra all --locked
 
     log_info "Installing pre-commit hooks..."
     uv run pre-commit install

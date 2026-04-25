@@ -103,6 +103,11 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
 - 8 GPUs visible to one node (config splits 4 train / 4 inference).
 - SLURM with a partition you pass via `sbatch -p <name>` (the sbatch defaults
   to `gpu`). Run `sinfo` on the login node first to find the right name.
+  The shipped sbatch requests `--gres=gpu:8 --exclusive`; clusters that type
+  their gres (e.g. `gpu:b200:8`, `gpu:h100:8`) need an override at submit
+  time: `sbatch --gres=gpu:b200:8 -p <partition> ... scripts/scalerl_smoke.sbatch`.
+  Verify with `sinfo -o '%G'` (or your scheduler's gres listing) on the
+  login node first.
 - **NVIDIA Blackwell (B200) GPUs.** The configs are pinned to flash-attn-cute
   (FA4) which builds Blackwell sm_100 kernels; FA3 is deliberately excluded
   by the `[all]` extra (FA3 wheels ship Hopper sm_90 only and crash on B200
@@ -160,8 +165,13 @@ will error out at startup. Lower `[ckpt] interval` if early crashes are
 likely, or accept restarting from step 0.
 
 **Restart from step 0 after an early crash.** `RLConfig` rejects re-using a
-populated `output_dir` without `SCALERL_RESUME=1`, but if you crashed before
-any checkpoint exists, the resume path also errors. The unblocking sequence:
+populated `output_dir` only when it contains checkpoints (see
+`validate_output_dir` in `src/prime_rl/utils/pathing.py`); a populated
+`output_dir` with rollouts/logs but no checkpoint is silently overwritten —
+`clean_future_steps(resume_step=-1)` wipes it during the next launch. If
+you crashed pre-first-checkpoint, the cleanest unblocking sequence is to
+remove the directory yourself so the next run starts from a known empty
+state:
 ```bash
 rm -rf outputs/scalerl_math   # or outputs/scalerl_terminal_bench
 # unset SCALERL_RESUME (or skip exporting it)
