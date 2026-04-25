@@ -644,7 +644,12 @@ class RLConfig(BaseConfig):
         AND injects silent bias into any IS-based loss. Fail loud at config load.
 
         See snowflake_poc_critique.md §3.
+
+        Skipped when [inference] is omitted (e.g. externally managed inference pools or
+        num_infer_nodes=0 fake-data runs); there is nothing to make consistent with.
         """
+        if self.inference is None:
+            return self
         trainer_fp32 = self.trainer.model.fp32_lm_head
         inference_fp32 = self.inference.model.fp32_lm_head
         if trainer_fp32 != inference_fp32:
@@ -706,6 +711,36 @@ class RLConfig(BaseConfig):
 
         validate_shared_weight_broadcast(self.trainer, self.orchestrator, self.inference)
 
+        return self
+
+    @model_validator(mode="after")
+    def validate_root_nccl_async_override(self):
+        """Re-check the NCCL + max_async_level > 1 guardrail at the root level.
+
+        The trainer and orchestrator subconfigs each enforce this on their own, but
+        `auto_setup_weight_broadcast` reassigns their `weight_broadcast` after their
+        validators have already run. A root config with `[weight_broadcast].type = "nccl"`,
+        `max_async_level = 8`, and no override on either subconfig would otherwise sneak
+        through. See snowflake_poc_critique.md §5.
+        """
+        broadcast = self.trainer.weight_broadcast
+        if broadcast is None or broadcast.type != "nccl":
+            return self
+        async_level = max(self.trainer.max_async_level, self.orchestrator.max_async_level)
+        if async_level <= 1:
+            return self
+        override = (
+            self.orchestrator.experimental.allow_nccl_async_level_override
+            or self.trainer.experimental.allow_nccl_async_level_override
+        )
+        if not override:
+            raise ValueError(
+                "NCCL weight broadcast with max_async_level > 1 is rejected by default. "
+                "ScaleRL Pipeline-RL §3.1 requires it; set "
+                "`[orchestrator.experimental] allow_nccl_async_level_override = true` "
+                "to opt in (validated on B200/EFA). For other hardware prefer "
+                "`[weight_broadcast] type = \"filesystem\"`."
+            )
         return self
 
     @model_validator(mode="after")
