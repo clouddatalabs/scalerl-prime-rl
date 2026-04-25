@@ -51,10 +51,14 @@ def promote_parallel_lm_head_to_fp32(model) -> int:
         )
 
     # Belt-and-suspenders: even when `tie_word_embeddings=False` is declared,
-    # some vLLM load paths can still alias the LM-head's weight storage to the
-    # input embedding's. Detect that by storage identity before casting; the
-    # `tie_word_embeddings` check above only catches the declared case.
-    embedding_weight_id = None
+    # some vLLM load paths can still alias the LM-head's weight STORAGE to the
+    # input embedding's (e.g. `nn.Parameter(embed.weight.data)` — separate
+    # `Parameter` wrappers but shared storage). Compare `data_ptr()` rather
+    # than `id()` — `id(p)` is the address of the Python `Parameter` object
+    # and would miss the distinct-wrapper-shared-storage case while
+    # redundantly catching what the `tie_word_embeddings` flag above already
+    # rejects.
+    embedding_weight_data_ptr = None
     get_embeddings = getattr(model, "get_input_embeddings", None)
     if callable(get_embeddings):
         try:
@@ -62,7 +66,10 @@ def promote_parallel_lm_head_to_fp32(model) -> int:
         except Exception:
             emb = None
         if emb is not None and hasattr(emb, "weight"):
-            embedding_weight_id = id(emb.weight)
+            try:
+                embedding_weight_data_ptr = emb.weight.data_ptr()
+            except (RuntimeError, AttributeError):
+                embedding_weight_data_ptr = None
 
     promoted = 0
     for module in model.modules():
@@ -76,14 +83,14 @@ def promote_parallel_lm_head_to_fp32(model) -> int:
                 f"(weight dtype={module.weight.dtype}). Disable PRIME_RL_VLLM_FP32_LM_HEAD "
                 "or load an unquantized model."
             )
-        if embedding_weight_id is not None and id(module.weight) == embedding_weight_id:
+        if embedding_weight_data_ptr is not None and module.weight.data_ptr() == embedding_weight_data_ptr:
             raise RuntimeError(
                 "fp32_lm_head: detected ParallelLMHead.weight aliased to the input "
-                "embedding's weight tensor (storage id matches). The declared "
+                "embedding's weight tensor (data_ptr matches). The declared "
                 "tie_word_embeddings flag is False, but vLLM's load path still "
-                "aliased the storage. Promoting in place would propagate fp32 "
-                "weights into the embedding forward and produce dtype-mismatch or "
-                "silent garbage. Disable PRIME_RL_VLLM_FP32_LM_HEAD."
+                "shares the underlying storage. Promoting in place would propagate "
+                "fp32 weights into the embedding forward and produce dtype-mismatch "
+                "or silent garbage. Disable PRIME_RL_VLLM_FP32_LM_HEAD."
             )
         if module.weight.dtype != torch.float32:
             module.weight.data = module.weight.data.float()

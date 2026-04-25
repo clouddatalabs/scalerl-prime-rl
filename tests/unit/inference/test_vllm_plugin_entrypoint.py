@@ -189,14 +189,18 @@ def test_promote_parallel_lm_head_to_fp32_refuses_tied_embeddings(monkeypatch):
 
 def test_promote_parallel_lm_head_to_fp32_refuses_storage_aliased_embedding(monkeypatch):
     """Belt-and-suspenders: even when `tie_word_embeddings=False` is *declared*,
-    some vLLM load paths still alias `ParallelLMHead.weight` to the input
-    embedding's storage. Promoting in place would push fp32 weights into the
-    embedding's bf16 forward and produce dtype-mismatch or silent garbage —
-    defeating the §3.2 logprob parity ingredient. Storage-id check (`id()`
-    comparison) catches this case the declared-flag check misses.
+    some vLLM load paths still alias `ParallelLMHead.weight`'s STORAGE to the
+    input embedding's. Promoting in place would push fp32 weights into the
+    embedding's bf16 forward and produce dtype-mismatch or silent garbage.
+
+    Critical distinction: this test constructs DISTINCT `nn.Parameter` wrappers
+    that share the underlying storage (`data_ptr()` matches), to exercise the
+    real-world failure mode. A wrapper-identity check (`id(weight) == id(emb.weight)`)
+    would miss this; the storage-identity check (`data_ptr()`) catches it.
     """
     import pytest
     import torch
+    from torch import nn
 
     from prime_rl.inference.patches import promote_parallel_lm_head_to_fp32
 
@@ -205,12 +209,16 @@ def test_promote_parallel_lm_head_to_fp32_refuses_storage_aliased_embedding(monk
 
     head = _FakeFloatLMHead(torch.bfloat16)
 
-    class _ModelWithAliasedEmbedding:
+    class _ModelWithAliasedStorage:
         def __init__(self, head_):
             self.config = type("Cfg", (), {"tie_word_embeddings": False})()
             self._head = head_
-            # Same tensor object as the LM-head weight — the alias case.
-            self._embedding = type("Emb", (), {"weight": head_.weight})()
+            # Distinct Parameter wrapper, shared storage — the realistic
+            # vLLM-load-path footgun the comment describes.
+            shared = nn.Parameter(head_.weight.data)
+            assert shared is not head_.weight, "expected distinct wrappers"
+            assert shared.data_ptr() == head_.weight.data_ptr(), "expected shared storage"
+            self._embedding = type("Emb", (), {"weight": shared})()
 
         def modules(self):
             return [self._head]
@@ -218,7 +226,7 @@ def test_promote_parallel_lm_head_to_fp32_refuses_storage_aliased_embedding(monk
         def get_input_embeddings(self):
             return self._embedding
 
-    model = _ModelWithAliasedEmbedding(head)
+    model = _ModelWithAliasedStorage(head)
     with pytest.raises(RuntimeError, match="aliased to the input embedding"):
         promote_parallel_lm_head_to_fp32(model)
 
