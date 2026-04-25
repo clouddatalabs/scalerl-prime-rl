@@ -75,6 +75,23 @@ source .venv/bin/activate
 export PATH="$REPO_ROOT/.venv/bin:$PATH"
 PYBIN="$REPO_ROOT/.venv/bin/python"
 
+# Repair flash-attn-cute (FA4) namespace collision if `uv sync --all-extras`
+# happened to install `flash-attn` after `flash-attn-cute`. Both ship a
+# `flash_attn/cute/` sub-package; the one from `flash-attn` is a tiny stub
+# that shadows the real FA4 module. The trainer hard-fails at model setup
+# with a clear error message in that case, so detect-and-repair here is
+# cheaper than a failed B200 launch. Idempotent — exits 0 immediately when
+# the real module is already in place.
+if ! "$PYBIN" -c "
+import sys
+import flash_attn.cute.interface as fa4
+with open(fa4.__file__) as f:
+    sys.exit(0 if sum(1 for _ in f) > 1000 else 1)
+" 2>/dev/null; then
+    echo "=== flash-attn-cute namespace repair (uv sync ordering) ==="
+    bash "$REPO_ROOT/scripts/fix-flash-attn-cute.sh"
+fi
+
 # Print effective config (helpful for postmortem) before launching.
 echo "=== effective ScaleRL config ==="
 "$PYBIN" -c "
