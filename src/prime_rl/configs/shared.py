@@ -60,31 +60,39 @@ class SlurmConfig(BaseConfig):
 
     @model_validator(mode="after")
     def reject_placeholder_values(self):
-        # The shipped multi-node config (`configs/scalerl_terminal_bench/
-        # rl_multinode.toml`) ships ALL-CAPS placeholder strings like
-        # `partition = "GPU_PARTITION"` for operators to fill in. An
-        # operator who edits the train/test task lists but skips the
-        # SLURM block hits a `sbatch: error: invalid partition` rejection
-        # at submission with no doc-pointer to the placeholder. A simple
-        # validator that rejects all-uppercase placeholder values catches
-        # the typical copy-paste-and-submit case at config load. Real
-        # SLURM partition / account names are typically lowercase or
-        # CamelCase (e.g. "gpu", "h100", "AccountA") and pass.
+        # Multi-node template configs ship placeholder strings for
+        # operators to fill in (e.g. `partition = "your-gpu-partition"`,
+        # `account = "your-slurm-account"`). An operator who edits the
+        # task lists but skips the SLURM block hits a confusing
+        # `sbatch: error: invalid partition` rejection at submission
+        # with no doc-pointer to the placeholder. Catch the typical
+        # copy-paste-and-submit case at config load by matching the
+        # documented placeholder shapes:
+        #   - `your-*` / `YOUR_*` prefixes (the conventional "fill me in")
+        #   - ALL_CAPS_WITH_UNDERSCORES (the legacy placeholder shape)
+        #   - `<...>` angle-bracket markers
+        # Real partition / account names rarely match any of these
+        # shapes (they're typically `gpu`, `h100`, `compute`, `prod-a`,
+        # etc.).
         for field_name in ("partition", "account", "nodelist", "exclude"):
             value = getattr(self, field_name)
             if value is None:
                 continue
-            # Heuristic: ALL-CAPS-with-underscores and ≥2 letters is the
-            # placeholder shape. Real partition names like "GPU" alone
-            # are unusual but plausible — require an underscore or a
-            # `YOUR_` prefix to flag.
-            if "_" in value and value == value.upper() and any(c.isalpha() for c in value):
+            value_lower = value.lower()
+            looks_placeholder = (
+                value_lower.startswith("your-")
+                or value_lower.startswith("your_")
+                or (value.startswith("<") and value.endswith(">"))
+                or ("_" in value and value == value.upper() and any(c.isalpha() for c in value))
+            )
+            if looks_placeholder:
                 raise ValueError(
                     f"slurm.{field_name} = {value!r} looks like an unfilled "
-                    f"ALL_CAPS placeholder from a template. Replace with your "
-                    "cluster's actual partition / account / nodelist before "
-                    "submitting (or set to None / omit if your cluster doesn't "
-                    "require it)."
+                    "placeholder from a template (matches `your-*`/`YOUR_*`, "
+                    "ALL_CAPS_WITH_UNDERSCORES, or `<...>` angle-bracket shapes). "
+                    "Replace with your cluster's actual partition / account / "
+                    "nodelist before submitting (or set to None / omit if your "
+                    "cluster doesn't require it)."
                 )
         return self
 

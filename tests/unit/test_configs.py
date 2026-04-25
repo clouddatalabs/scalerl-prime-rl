@@ -60,6 +60,20 @@ def _expected_class_for(config_file: Path):
     return None
 
 
+# Configs that ship placeholder values for the operator to fill in
+# (e.g. `[slurm] partition = "your-gpu-partition"`). The
+# `SlurmConfig.reject_placeholder_values` validator rejects these by
+# design — that's the load-time fail-loud the validator exists for. The
+# test harness must NOT treat that rejection as a regression; instead,
+# it asserts the expected ValidationError fires AND that filling in the
+# placeholders produces a loadable config.
+_TEMPLATE_CONFIGS: dict[Path, dict] = {
+    _REPO_ROOT / "configs/scalerl_terminal_bench/rl_multinode.toml": {
+        "slurm": {"partition": "compute", "account": "myaccount"}
+    },
+}
+
+
 @pytest.mark.parametrize("config_file", get_config_files(), ids=lambda x: x.as_posix())
 def test_load_configs(config_file: Path):
     """Tests that all config files can be loaded by their expected class
@@ -67,6 +81,28 @@ def test_load_configs(config_file: Path):
     """
     expected = _expected_class_for(config_file)
     if expected is not None:
+        if config_file in _TEMPLATE_CONFIGS:
+            # Template configs ship placeholder values that
+            # `SlurmConfig.reject_placeholder_values` REJECTS BY DESIGN —
+            # that's the load-time fail-loud the validator exists for.
+            # Verify (a) the rejection actually fires, and (b) filling in
+            # the placeholders produces a loadable config. Catches both
+            # "operator forgot to edit" and "validator regression that
+            # silently lets placeholders through".
+            import tomli as _tomli
+
+            with open(config_file, "rb") as f:
+                data = _tomli.load(f)
+            with pytest.raises(ValidationError, match="placeholder"):
+                expected.model_validate(data)
+            # Patch placeholders with realistic values; the patched
+            # config must validate cleanly. Mutate-merge: only override
+            # the keys we list.
+            patched = data
+            for section, fields in _TEMPLATE_CONFIGS[config_file].items():
+                patched.setdefault(section, {}).update(fields)
+            expected.model_validate(patched)
+            return
         # Strict pin: typo in a ScaleRL config that shifts the parse from
         # RLConfig to a subset class would silently pass under any-of-five.
         cli(expected, args=["@", config_file.as_posix()])
