@@ -3,7 +3,14 @@ from typing import Generator
 import torch
 from torch.nn import Module
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
+# Module-level import (NOT `from .utils import process_weights_after_loading`).
+# `inference/patches.py:monkey_patch_vllm_fp32_lm_head` patches by attribute
+# rebind on `model_loader.utils.process_weights_after_loading`; a `from`-import
+# captures the original function at import time and silently bypasses the
+# patch — the FP32 LM-head promotion (§3.2 train/inference logprob parity)
+# would silently regress on the NCCL weight-transfer reload path. Keep the
+# lookup dynamic.
+from vllm.model_executor.model_loader import utils as model_loader_utils
 
 logger = init_logger("vllm.inference.vllm.worker_weight_transfer")
 
@@ -13,7 +20,7 @@ def load_weights_checkpoint(model: Module, state_iter: Generator[tuple[str, torc
 
 
 def postprocess_weights_checkpoint(model: Module, model_config, device: torch.device) -> None:
-    process_weights_after_loading(model, model_config, device)
+    model_loader_utils.process_weights_after_loading(model, model_config, device)
 
 
 def build_expert_map(model: Module) -> dict[str, torch.Tensor]:

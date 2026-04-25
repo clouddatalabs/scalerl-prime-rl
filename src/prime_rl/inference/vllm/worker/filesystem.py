@@ -2,7 +2,13 @@ from typing import TYPE_CHECKING
 
 from torch.nn import Module
 from vllm.model_executor.model_loader import DefaultModelLoader, get_model_loader
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
+# Module-level import (NOT `from .utils import process_weights_after_loading`).
+# `inference/patches.py:monkey_patch_vllm_fp32_lm_head` patches by attribute
+# rebind on `model_loader.utils.process_weights_after_loading`; a `from`-import
+# captures the original function at import time and silently bypasses the
+# patch — the FP32 LM-head promotion (§3.2 train/inference logprob parity)
+# would silently regress on the filesystem reload path. Keep the lookup dynamic.
+from vllm.model_executor.model_loader import utils as model_loader_utils
 
 # This is to get type hints for the Worker class but not actually extend it at runtime as this is required by vLLM worker extension
 if TYPE_CHECKING:
@@ -46,4 +52,4 @@ class FileSystemWeightUpdateWorker(Worker):
 
         # Process weights after loading (important for some models)
         device = next(model.parameters()).device
-        process_weights_after_loading(model, self.model_runner.model_config, device)
+        model_loader_utils.process_weights_after_loading(model, self.model_runner.model_config, device)

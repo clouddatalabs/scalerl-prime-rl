@@ -234,8 +234,9 @@ submits its own sbatch internally — invoke it directly as:
 ```bash
 uv run rl @ configs/scalerl_terminal_bench/rl_multinode.toml
 ```
-See `docs/slurm.md` for the full `[slurm]` knob list (rendezvous host/port,
-`exclude_nodes`, `qos`, etc.). Multi-node NCCL weight broadcast still
+See `docs/slurm.md` for the full `[slurm]` knob list (`partition`,
+`account`, `time`, `nodelist`, `exclude`, `pre_run_command`, etc.).
+Multi-node NCCL weight broadcast still
 requires the experimental override (already on in the shipped configs);
 on hardware without EFA set `SCALERL_NO_EFA=1` in your `.env` and switch
 `[weight_broadcast] type = "filesystem"` (then drop the override).
