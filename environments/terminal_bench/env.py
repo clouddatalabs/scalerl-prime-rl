@@ -279,9 +279,21 @@ class _DockerClient:
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
+            # Carry the FULL decoded stderr in the exception. The
+            # downstream `_is_buildkit_corruption` marker check runs
+            # against `str(e)`; truncating before the marker landed
+            # past 500 chars (verbose docker engine versions, NCCL/EFA
+            # shim preamble) would silently disable run-time recovery.
+            # For human readability we truncate inside the format string
+            # only; the full text is appended afterwards as a separate
+            # "FULL STDERR:" tail so log scanners can grep markers
+            # regardless of the leading short message.
+            full_stderr = stderr.decode(errors="replace").strip()
+            short = full_stderr[:500]
             raise RuntimeError(
                 f"docker run failed (exit={proc.returncode}) for image={image!r} "
-                f"name={name!r}: {stderr.decode(errors='replace').strip()[:500]}"
+                f"name={name!r}: {short}"
+                + (f"\nFULL STDERR: {full_stderr}" if len(full_stderr) > 500 else "")
             )
 
     async def exec(
@@ -409,6 +421,70 @@ class _DockerClient:
         if proc.returncode != 0:
             return []
         return [cid for cid in stdout_b.decode().split() if cid]
+
+    async def ps_leaked_by_label(
+        self, key: str, value: str, *, exclude_run_id: str, max_age_seconds: int
+    ) -> list[str]:
+        """Return container IDs labeled ``key=value`` that are NOT from
+        ``exclude_run_id`` AND are older than ``max_age_seconds``. Used at
+        env startup to reap rollout containers that were leaked when a
+        prior slurm job got `scancel`-ed mid-rollout. Those containers run
+        ``tail -f /dev/null`` as PID 1, so ``--rm`` never fires; they pile
+        up across cancelled jobs and exhaust docker0's veth/MAC table
+        ("exchange full" failure on `docker run` for new containers).
+
+        Concurrent active runs are protected by the age guard: the
+        ``max_age_seconds`` threshold is set well above the longest
+        plausible single rollout (the TB test timeout is ~10 min
+        per task). Anything older is by definition orphaned.
+
+        ``exclude_run_id`` is OUR run id — included only as belt-and-
+        suspenders since the age guard already protects fresh own-run
+        containers.
+        """
+        # `--format` lets us pull the label + created timestamp without
+        # a second `docker inspect` call. `{{.RunningFor}}` is human
+        # text ("3 minutes ago"); we want a parseable seconds-since-epoch.
+        # `docker ps -a --format` supports `{{.CreatedAt}}` (RFC3339-ish).
+        cmd = [
+            *self._prefix(),
+            "ps", "-a",
+            "--filter", f"label={key}={value}",
+            "--format", '{{.ID}}|{{.Label "prime_rl_tb_run_id"}}|{{.CreatedAt}}',
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout_b, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return []
+
+        import datetime as _dt
+
+        leaked: list[str] = []
+        now_ts = _dt.datetime.now().timestamp()
+        for line in stdout_b.decode().splitlines():
+            parts = line.strip().split("|", 2)
+            if len(parts) != 3:
+                continue
+            cid, run_id, created_at = parts
+            if not cid or run_id == exclude_run_id:
+                continue
+            # docker ps emits "2026-04-25 20:54:33 +0000 UTC" — Python
+            # strptime can't handle the trailing "UTC" alphabetic, but
+            # the leading datetime + offset is parseable. Truncate.
+            try:
+                ts_str = " ".join(created_at.split()[:3])  # "<date> <time> <offset>"
+                created = _dt.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S %z")
+                age = now_ts - created.timestamp()
+            except (ValueError, IndexError):
+                # Unparseable timestamp — be conservative, skip.
+                continue
+            if age > max_age_seconds:
+                leaked.append(cid)
+        return leaked
 
     async def image_exists(self, image: str) -> bool:
         """``docker image inspect`` exit=0 iff the tag is present locally."""
@@ -830,6 +906,36 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
                             stale[:10],
                         )
                         for cid in stale:
+                            await self._docker.remove_force(cid)
+
+                    # Leak sweep across foreign run_ids — TB rollout
+                    # containers run `tail -f /dev/null` as PID 1, so
+                    # `--rm` never fires; a `scancel` mid-rollout leaves
+                    # them alive forever. They pile up across cancelled
+                    # jobs and exhaust docker0's veth/MAC table ("docker
+                    # run ... bridge docker0 failed: exchange full" — we
+                    # observed this after job 705/709 leaks accumulated
+                    # on the same compute node). Time-gate the sweep
+                    # well above the per-task test timeout so concurrent
+                    # active runs don't race their own live rollouts.
+                    leak_max_age = max(
+                        2 * self._test_timeout_seconds, 30 * 60
+                    )
+                    leaked = await self._docker.ps_leaked_by_label(
+                        "prime_rl_tb_env", "1",
+                        exclude_run_id=self._run_id,
+                        max_age_seconds=leak_max_age,
+                    )
+                    if leaked:
+                        _logger.warning(
+                            "terminal_bench_local: sweeping %d ORPHAN "
+                            "containers from cancelled prior runs "
+                            "(age > %ds, foreign run_id): %s",
+                            len(leaked),
+                            leak_max_age,
+                            leaked[:10],
+                        )
+                        for cid in leaked:
                             await self._docker.remove_force(cid)
                     self._stale_sweep_done = True
 
