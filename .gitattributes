@@ -1,0 +1,7 @@
+# Imported Terminal-Bench Harbor task fixtures (solution scripts, generated
+# CSVs, instruction.md, Dockerfiles, etc.) preserve the exact bytes of the
+# upstream task definitions. Trailing whitespace and missing-final-newline
+# can carry semantic meaning for `cat`/`diff`-driven tests, and cleanup risks
+# changing rollout outputs. Exempt this subtree from `git diff --check` so
+# CI / review gates pass without rewriting upstream fixtures.
+environments/terminal_bench/tasks/** -whitespace
