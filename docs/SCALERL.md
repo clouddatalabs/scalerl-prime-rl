@@ -24,15 +24,21 @@ upstream defaults are preserved.
 ingredient per the paper's leave-one-out ablation; monitor truncation rate first and add only if
 rollouts exceed budget more than ~5% of the time.
 
-## Smoke run (Hendrycks Math, single-node)
+## Configs
 
-```bash
-sbatch scripts/scalerl_smoke.sbatch
-```
+Two reference configs ship with the recipe wired up:
 
-This runs Qwen3-8B on the `math-env` (verifiers' built-in PrimeIntellect/Hendrycks-Math env) with
-the full ScaleRL recipe (CISPO, prompt-level avg, batch-level normalization, FP32 LM-head,
-NPR @ 0.9, `max_async_level=8`). See `configs/scalerl_math/rl.toml`.
+- **`configs/scalerl_math/rl.toml`** — internal smoke. Qwen3-8B on the `math-env` (verifiers'
+  built-in `PrimeIntellect/Hendrycks-Math` env). Submit with
+  `sbatch scripts/scalerl_smoke.sbatch`.
+- **`configs/scalerl_terminal_bench/rl.toml`** — Snowflake POC handoff config. Qwen3-8B on
+  the in-tree Terminal-Bench Harbor tasks (`environments/terminal_bench/`). 30 tasks
+  shipped, split 20 train / 10 test. Requires a Docker daemon reachable from the rollout
+  process (host or `/var/run/docker.sock` bind-mounted into the container).
+
+Both configs exercise the full ScaleRL knob set (CISPO, prompt-level averaging, batch-level
+advantage normalization, FP32 LM-head on both sides, NPR @ 0.9, `max_async_level=8` with the
+NCCL experimental override).
 
 ## Recipe references
 
