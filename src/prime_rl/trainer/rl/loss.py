@@ -333,6 +333,25 @@ def compute_loss(
             f"sequence_loss_weights length {len(weights)} does not match "
             f"number of packed sequences {len(trainer_logprobs)}"
         )
+    # Refuse empty weights under sequence/none modes when there ARE samples to
+    # weight. Empty `[]` is the packer's "no weights ever set" sentinel; if it
+    # reaches a sequence/none reduction with non-empty samples the loop below
+    # would silently fall through `if weights is not None` and emit an
+    # un-normalized dp-scaled raw sum — the unweighted objective the
+    # prompt-average cross-validator was added to prevent. The packer fills
+    # `[1.0]` per-sample by default, so production should never hit this.
+    if (
+        loss_scale_mode in ("sequence", "none")
+        and weights is None
+        and len(trainer_logprobs) > 0
+    ):
+        raise ValueError(
+            "compute_loss: `loss_scale_mode='sequence'/'none'` requires "
+            "non-empty `sequence_loss_weights` (one float per packed sample). "
+            "Empty weights would produce an unweighted dp-scaled raw sum. "
+            "The packer should populate weights via "
+            "apply_prompt_average_sequence_weights or default `[1.0]*N`."
+        )
     # Reject non-trivial weights under token mode: the loop below would
     # silently ignore them (only `sequence`/`none` consume the weights),
     # producing a token-mean reduction the caller didn't ask for. The
@@ -387,9 +406,14 @@ def compute_loss(
         # `aggregate = global_sum / dp_world_size` — i.e. effective LR shrinks
         # 1/dp_world_size in multi-rank DP. Multiplying by dp_world_size here
         # cancels the FSDP divisor so `aggregate_grad == sum_global(w_i * grad_i)`.
-        # Token-mode is unaffected: it divides by local trainable tokens, which
-        # roughly equals `global_tokens / dp_world_size` under balanced packing,
-        # so the dp factor cancels naturally there.
+        # Token-mode is approximately unaffected: each rank divides by its
+        # local trainable tokens, which only equals `global_tokens / dp_world_size`
+        # under perfectly balanced packing. The packer pads micro-batch *count*
+        # per rank, not token count, so per-rank token counts can drift; what
+        # token-mode actually computes after the FSDP all-reduce is
+        # `mean_rank(local_loss / local_tokens)`, which approximates but does
+        # not exactly equal `global_loss / global_tokens`. Same as upstream;
+        # call out if you ever change loss_scale here.
         if not isinstance(fsdp_world_size, int) or fsdp_world_size < 1:
             raise ValueError(
                 "compute_loss(loss_scale_mode='sequence'/'none') requires a "

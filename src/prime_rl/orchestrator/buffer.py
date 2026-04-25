@@ -348,7 +348,12 @@ class Buffer:
                     "This usually means you resumed with an env mix that does not contain all previous examples."
                 )
 
-        if any(saved_excluded):
+        # Only restore the NPR exclusion pool when NPR is currently enabled.
+        # Otherwise an operator who flips no_positive_resampling=False on
+        # resume would silently strand previously-excluded prompts forever:
+        # they'd land in `excluded_examples` and `update_pass_rate` would
+        # short-circuit at the disabled guard before re-admitting them.
+        if any(saved_excluded) and self.config.no_positive_resampling:
             num_moved = move_saved_pool(saved_excluded, "excluded")
             self.logger.debug(
                 f"Restored {num_moved}/{len(saved_excluded)} no-positive-resampling exclusion(s) from checkpoint."
@@ -358,6 +363,13 @@ class Buffer:
                     f"Could not restore {len(saved_excluded) - num_moved} no-positive-resampling exclusion(s); "
                     "the resume dataset does not contain those examples."
                 )
+        elif any(saved_excluded):
+            self.logger.warning(
+                f"Discarding {len(saved_excluded)} saved NPR exclusion(s) because "
+                "no_positive_resampling is disabled on this resume — keeping them "
+                "would strand the prompts (update_pass_rate short-circuits when "
+                "NPR is off)."
+            )
 
         if any(saved_pass_rate_stats):
             restored = 0

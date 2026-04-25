@@ -90,7 +90,12 @@ sbatch -p <partition> --export=ALL scripts/scalerl_smoke.sbatch
 # (For the math smoke, unset SCALERL_CONFIG — sbatch defaults to scalerl_math.)
 
 # 6. Tail the log. Smoke configs train for 500 steps; first step is ~3 min
-#    cold, steady-state ~30-60s/step on 4xB200 with FA4 + compiled vLLM.
+#    cold, steady-state ~30-60s/step on 4xB200 with FA4 + compiled vLLM
+#    for the math config. NOTE: the Terminal-Bench config spins one Docker
+#    container per rollout (Harbor format), so steady-state per-step time is
+#    dominated by container startup and test execution, not GPU — expect
+#    several minutes/step until the per-task base images are warm in the
+#    Docker layer cache. The training process is not hung.
 tail -f "$PWD/slurm-logs/<jobid>.log"
 ```
 
@@ -207,13 +212,26 @@ Two reference configs ship with the recipe wired up:
 - **`configs/scalerl_terminal_bench/rl.toml`** — Snowflake POC handoff config. Qwen3-8B on
   the in-tree Terminal-Bench Harbor tasks (`environments/terminal_bench/`). 28 usable
   committed tasks split 18 train / 10 test. (Two task names — `fix-code-vulnerability`
-  and `sqlite-with-gcov` — are committed as symlinks pointing outside the repo and are
-  excluded from the runtime config.) Requires a Docker daemon reachable from the rollout
-  process (host or `/var/run/docker.sock` bind-mounted into the container).
+  Requires a Docker daemon reachable from the rollout process (host or
+  `/var/run/docker.sock` bind-mounted into the container).
 
 Both configs exercise the full ScaleRL knob set (CISPO, prompt-level averaging, batch-level
 advantage normalization, FP32 LM-head on both sides, NPR @ 0.9, `max_async_level=8` with the
 NCCL experimental override).
+
+## CI on this fork
+
+Only the `style.yaml` workflow runs on push/PR to this fork. Every other workflow
+(`cpu_tests`, `gpu_tests`, `nightly_tests`, `release`, `sync-docs`, `devx_tag`) is gated on
+`github.repository == 'PrimeIntellect-ai/prime-rl'` so the fork doesn't (a) try to invoke
+upstream secrets it doesn't have or (b) push tags / docs into upstream's namespace. To run
+the test suite locally before pushing:
+
+```bash
+uv run pytest -m 'not gpu' tests/unit -q
+```
+
+The `style.yaml` ruff job will still lint every push.
 
 ## Recipe references
 

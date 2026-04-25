@@ -3,8 +3,7 @@
 # Snowflake-side reproduction target. Same recipe as configs/scalerl_math/rl.toml
 # but pointed at the in-tree Terminal-Bench tasks (Harbor format) under
 # environments/terminal_bench/tasks/. 28 usable committed tasks split 18 train
-# / 10 test (two task names — `fix-code-vulnerability` and `sqlite-with-gcov` —
-# are symlinks pointing outside the repo and are excluded from the runtime config).
+# / 10 test.
 #
 # Preconditions:
 #   - Docker daemon reachable from rollout process (host or sock-mounted into container).

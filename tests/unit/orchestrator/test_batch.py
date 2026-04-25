@@ -134,3 +134,74 @@ def test_prepare_sample_none_routed_experts():
 
     micro_batch = prepare_sample(sample, seq_len=8)
     assert micro_batch.routed_experts is None
+
+
+def _make_synthesized_sample(synthesized: bool) -> TrainingSample:
+    return TrainingSample(
+        prompt_ids=[1, 2],
+        prompt_mask=[False, False],
+        completion_ids=[3, 4],
+        completion_mask=[True, True],
+        completion_logprobs=[-0.1, -0.2],
+        completion_temperatures=[1.0, 1.0],
+        advantage=1.0,
+        inference_logprobs_synthesized=synthesized,
+    )
+
+
+def test_prepare_sample_carries_synthesized_flag_true():
+    sample = _make_synthesized_sample(True)
+    micro_batch = prepare_sample(sample, seq_len=8)
+    assert micro_batch.inference_logprobs_synthesized is True
+
+
+def test_prepare_sample_carries_synthesized_flag_false():
+    sample = _make_synthesized_sample(False)
+    micro_batch = prepare_sample(sample, seq_len=8)
+    assert micro_batch.inference_logprobs_synthesized is False
+
+
+def test_packed_micro_batch_or_merges_synth_flag():
+    """One synthesized sample contaminates the packed bin's flag.
+
+    Critical because compute_loss in trainer/rl/train.py refuses to run
+    importance-ratio losses when ANY contributing sample carries
+    `inference_logprobs_synthesized=True`. If pack-time OR-merge regresses,
+    a contaminated sample packed alongside clean ones silently slips past the
+    runtime guard and CISPO trains on `rho = exp(trainer_lp - 0)` for those
+    tokens.
+    """
+    from prime_rl.trainer.batch import packed_samples_into_micro_bs
+
+    clean_sample = prepare_sample(_make_synthesized_sample(False), seq_len=4)
+    synth_sample = prepare_sample(_make_synthesized_sample(True), seq_len=4)
+
+    # Pack two clean → expect not synthesized.
+    packed = packed_samples_into_micro_bs(
+        [(0, prepare_sample(_make_synthesized_sample(False), seq_len=4)),
+         (0, prepare_sample(_make_synthesized_sample(False), seq_len=4))],
+        max_seq_len=16,
+        num_loras=1,
+    )
+    assert len(packed) == 1
+    assert packed[0].inference_logprobs_synthesized is False
+
+    # Pack clean+synth → expect synthesized (OR-merge).
+    packed = packed_samples_into_micro_bs(
+        [(0, clean_sample), (0, synth_sample)],
+        max_seq_len=16,
+        num_loras=1,
+    )
+    assert len(packed) == 1, "samples should fit one bin"
+    assert packed[0].inference_logprobs_synthesized is True
+
+    # Reverse order — order-independent.
+    clean_sample2 = prepare_sample(_make_synthesized_sample(False), seq_len=4)
+    synth_sample2 = prepare_sample(_make_synthesized_sample(True), seq_len=4)
+    packed = packed_samples_into_micro_bs(
+        [(0, synth_sample2), (0, clean_sample2)],
+        max_seq_len=16,
+        num_loras=1,
+    )
+    assert len(packed) == 1
+    assert packed[0].inference_logprobs_synthesized is True

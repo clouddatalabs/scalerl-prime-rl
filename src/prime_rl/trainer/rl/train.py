@@ -68,6 +68,33 @@ from ring_flash_attn import substitute_hf_flash_attn
 from torchtitan.distributed.utils import clip_grad_norm_
 
 
+def _assert_synthesized_logprobs_compatible_with_loss(*, loss_type: str, synthesized: bool) -> None:
+    """Refuse importance-ratio losses against zero-fill inference_logprobs.
+
+    Static validators (`validate_external_rollout_mode` in configs/rl.py)
+    reject the canonical `teacher_rollout_model` + CISPO combination at
+    config load, but a user pointing `[orchestrator.client] base_url` at an
+    external service WITHOUT setting `teacher_rollout_model` bypasses them.
+    This runtime check is the load-bearing second line of defense; CISPO /
+    DefaultLoss compute `rho = exp(trainer_lp - inference_lp)` and a
+    zero-fill `inference_lp` collapses that to `exp(trainer_lp)`, which is
+    not the IS ratio the recipe needs. SFT does not consume
+    `inference_logprobs` and is exempt.
+
+    Hot-path: called once per micro-batch, before the forward pass, so a
+    misconfigured run fails fast instead of burning compute.
+    """
+    if loss_type in {"cispo", "default"} and synthesized:
+        raise RuntimeError(
+            f"trainer.rl.train: micro-batch contains synthesized (zero-fill) "
+            f"inference_logprobs but loss.type={loss_type!r} consumes "
+            "importance ratios. `rho = exp(trainer_lp - 0)` is not the IS ratio "
+            "the recipe needs. Either switch to use_token_client=True (TITO "
+            "client preserves real logprobs), use loss.type='sft', or fix the "
+            "rollout-path config so completion_logprobs come from the generator."
+        )
+
+
 @clean_exit
 def train(config: TrainerConfig):
     # Setup world and logger
@@ -330,6 +357,11 @@ def train(config: TrainerConfig):
         cp_size = parallel_dims.cp
 
         for micro_step, micro_batch in enumerate(micro_batches):
+            _assert_synthesized_logprobs_compatible_with_loss(
+                loss_type=config.loss.type,
+                synthesized=micro_batch["inference_logprobs_synthesized"],
+            )
+
             input_ids = micro_batch["input_ids"].to("cuda")
             position_ids = micro_batch["position_ids"].to("cuda")
             advantages = micro_batch["advantages"].to("cuda")
@@ -432,26 +464,6 @@ def train(config: TrainerConfig):
             out["entropy"] = shift_tensor_right(
                 out["entropy"], pad_value=torch.log(torch.tensor(float(vocab_size))).item()
             )
-
-            # IS-ratio loss + synthesized inference_logprobs is silent corruption.
-            # The config-load validator
-            # (`validate_is_ratio_loss_with_external_rollout_string_client`) catches the
-            # `teacher_rollout_model is set` case at startup, but a user pointing
-            # `[orchestrator.client] base_url` at an external service WITHOUT setting
-            # `teacher_rollout_model` bypasses that validator. Catch it here at the
-            # last minute. SFT runs are unaffected — they don't consume `inference_logprobs`.
-            if (
-                config.loss.type in {"cispo", "default"}
-                and micro_batch.get("inference_logprobs_synthesized", False)
-            ):
-                raise RuntimeError(
-                    f"trainer.rl.train: micro-batch contains synthesized (zero-fill) "
-                    f"inference_logprobs but loss.type={config.loss.type!r} consumes "
-                    "importance ratios. `rho = exp(trainer_lp - 0)` is not the IS ratio "
-                    "the recipe needs. Either switch to use_token_client=True (TITO "
-                    "client preserves real logprobs), use loss.type='sft', or fix the "
-                    "rollout-path config so completion_logprobs come from the generator."
-                )
 
             # Compute loss
             response_lengths = get_response_lengths(position_ids)

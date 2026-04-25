@@ -97,14 +97,18 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
         # Default to a neutral 1.0 weight per packed sequence; overwritten by
         # apply_prompt_average_sequence_weights when prompt_average_loss is set.
         sequence_loss_weights=[1.0],
-        # Carry forward the synthesized-logprobs flag so compute_loss can
-        # refuse importance-ratio losses against zero-fill inference_logprobs
-        # (the load-bearing config validator may have been bypassed if the
-        # operator points `[orchestrator.client]` at an external service
-        # without setting `teacher_rollout_model`).
-        inference_logprobs_synthesized=bool(
-            getattr(training_example, "inference_logprobs_synthesized", False)
-        ),
+        # Carry forward the synthesized-logprobs flag so the train-loop's
+        # runtime check can refuse importance-ratio losses against zero-fill
+        # inference_logprobs. Static `validate_external_rollout_mode` rejects
+        # the canonical `teacher_rollout_model + CISPO` combination at config
+        # load, but a user pointing `[orchestrator.client]` at an external
+        # service WITHOUT setting `teacher_rollout_model` bypasses the static
+        # check; the runtime guard in trainer/rl/train.py is the load-bearing
+        # second line of defense, and it depends on this carry-forward. Read
+        # strictly — the field is a non-optional bool on TrainingSample, so a
+        # getattr fallback would silently disable the guard if the schema ever
+        # changed.
+        inference_logprobs_synthesized=training_example.inference_logprobs_synthesized,
     )
 
 

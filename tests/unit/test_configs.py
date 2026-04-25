@@ -227,6 +227,19 @@ def test_nccl_async_level_default_one_still_validates():
     assert config.experimental.allow_nccl_async_level_override is False
 
 
+def test_paper_faithful_empty_batch_defaults_off():
+    """Default keeps the engineering retry/crash guardrail."""
+    config = OrchestratorConfig.model_validate({})
+    assert config.experimental.paper_faithful_empty_batch is False
+
+
+def test_paper_faithful_empty_batch_opt_in():
+    config = OrchestratorConfig.model_validate(
+        {"experimental": {"paper_faithful_empty_batch": True}}
+    )
+    assert config.experimental.paper_faithful_empty_batch is True
+
+
 _RL_BASE = {
     "trainer": {},
     "orchestrator": {},

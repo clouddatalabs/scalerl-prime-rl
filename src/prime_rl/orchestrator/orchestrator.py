@@ -411,14 +411,21 @@ async def orchestrate(config: OrchestratorConfig):
         # Update prev_ckpt_step for next iteration
         prev_ckpt_step = ckpt_step
 
-        # Schedule generating the training batch. Retry on empty-after-filter
-        # batches so the trainer never receives an empty batch.
+        # Schedule generating the training batch. By default, retry on
+        # empty-after-filter batches so the trainer never receives an empty
+        # batch. When `experimental.paper_faithful_empty_batch=True`, run a
+        # single attempt — ScaleRL §3.4 specifies zero-variance filtering as
+        # *drop, don't refill* (vs DAPO dynamic resampling). The all-empty
+        # case is then surfaced as a real failure rather than masked by retry.
+        max_attempts = (
+            1 if config.experimental.paper_faithful_empty_batch else MAX_EMPTY_BATCH_ATTEMPTS
+        )
         generate_completions_time = 0.0
         train_rollouts: list[vf.RolloutOutput] = []
         num_rollouts = 0
         num_unique_examples = 0
         n_trainable = 0
-        for attempt in range(MAX_EMPTY_BATCH_ATTEMPTS):
+        for attempt in range(max_attempts):
             train_rollouts = await scheduler.generate_batch(step=progress.step)
             generate_completions_time += scheduler.last_batch_generation_time
 
@@ -441,22 +448,28 @@ async def orchestrate(config: OrchestratorConfig):
             if n_trainable > 0:
                 break
 
-            if attempt == MAX_EMPTY_BATCH_ATTEMPTS - 1:
+            if attempt == max_attempts - 1:
                 logger.error(
-                    f"Attempt {attempt + 1}/{MAX_EMPTY_BATCH_ATTEMPTS} at step {progress.step} "
+                    f"Attempt {attempt + 1}/{max_attempts} at step {progress.step} "
                     f"filtered out all {num_rollouts} rollouts - crashing orchestrator"
                 )
-                reason = (
-                    f"All {num_rollouts} rollouts were filtered out on "
-                    f"{MAX_EMPTY_BATCH_ATTEMPTS} consecutive attempts at step {progress.step}"
-                )
+                if config.experimental.paper_faithful_empty_batch:
+                    reason = (
+                        f"All {num_rollouts} rollouts were filtered out at step "
+                        f"{progress.step} (paper_faithful_empty_batch=True; no retry)"
+                    )
+                else:
+                    reason = (
+                        f"All {num_rollouts} rollouts were filtered out on "
+                        f"{max_attempts} consecutive attempts at step {progress.step}"
+                    )
                 evicted_path = config.output_dir / "control" / "evicted.txt"
                 evicted_path.parent.mkdir(parents=True, exist_ok=True)
                 evicted_path.write_text(reason)
                 raise RuntimeError(reason)
 
             logger.warning(
-                f"Attempt {attempt + 1}/{MAX_EMPTY_BATCH_ATTEMPTS} at step {progress.step} "
+                f"Attempt {attempt + 1}/{max_attempts} at step {progress.step} "
                 f"filtered out all {num_rollouts} rollouts - retrying batch generation"
             )
 

@@ -930,6 +930,24 @@ class OrchestratorExperimentalConfig(BaseConfig):
         ),
     ] = False
 
+    paper_faithful_empty_batch: Annotated[
+        bool,
+        Field(
+            description=(
+                "Opt into ScaleRL §3.4-faithful behavior on all-filtered batches: when every "
+                "rollout in a step is filtered (zero-variance, mask-empty, etc.), do NOT "
+                "regenerate the batch and do NOT crash. Instead drop the step's optimizer "
+                "update entirely and advance to the next batch — the recipe's zero-variance "
+                "filtering is *not* DAPO's dynamic resampling. Default off keeps the "
+                "engineering guardrail (retry up to MAX_EMPTY_BATCH_ATTEMPTS, then crash) so "
+                "operator misconfiguration of an env that always returns zero-variance "
+                "rollouts still surfaces loudly. Set true only when you want the paper's "
+                "exact behavior — typically on a small training pool where the all-empty "
+                "boundary is a real possibility (e.g. 18-task TB train split)."
+            ),
+        ),
+    ] = False
+
 
 class TeacherModelConfig(BaseConfig):
     """Configures the teacher model for computing teacher logprobs (e.g. for distillation)."""

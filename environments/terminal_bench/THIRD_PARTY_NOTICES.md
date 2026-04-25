@@ -2,7 +2,7 @@
 
 The Harbor-format task fixtures committed under
 `environments/terminal_bench/tasks/` are imported verbatim from the upstream
-**Terminal-Bench / opencode_harbor** project. The fork applies no logic
+**Terminal-Bench** project. The fork applies no logic
 changes to those task directories; only file-format / path adjustments
 needed to run them against a local Docker daemon (see
 `environments/terminal_bench/__init__.py`).
@@ -12,8 +12,6 @@ needed to run them against a local Docker daemon (see
 - **Terminal-Bench**:
   https://github.com/laude-institute/terminal-bench
   Apache License 2.0.
-- **opencode_harbor** (Harbor task wrapper format):
-  internal companion to Terminal-Bench, also Apache License 2.0.
 
 The `.gitattributes` and `pyproject.toml::extend-exclude` rules in this
 fork mark the imported fixtures as third-party so style / lint checks
@@ -34,12 +32,6 @@ upstream license terms.
   (`environments/terminal_bench/env.py`); the underlying Harbor rubric
   conventions (`tests/test.sh`, `/logs/verifier/reward.{txt,json}`) are
   upstream contracts honored without modification.
-- Two task names — `fix-code-vulnerability` and `sqlite-with-gcov` —
-  are committed as symlinks pointing outside this repo (to a sibling
-  `opencode_harbor` checkout). They are EXCLUDED from the runtime
-  config (`configs/scalerl_terminal_bench/rl.toml`); the symlinks
-  exist only to keep the directory listing aligned with upstream for
-  rebase hygiene.
 
 ## Reporting
 

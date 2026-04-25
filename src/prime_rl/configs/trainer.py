@@ -762,9 +762,11 @@ class CISPOLossConfig(BaseModel):
                 "Upper truncation cap on the IS ratio (rho = exp(trainer_logprobs - "
                 "inference_logprobs)). ScaleRL ablation: insensitive in {4, 5, 8}. "
                 "Bound `>=1` because eps_max < 1 would clamp the on-policy mode "
-                "(rho ≈ 1) to a sub-1 coefficient on every token, silently zeroing "
-                "the gradient — observable post-hoc as ratio_truncated ≈ 1 but "
-                "preventable here."
+                "(rho ≈ 1) to a sub-1 coefficient on every token: the gradient "
+                "magnitude is shrunk uniformly (not zeroed — log π_θ still carries "
+                "gradient), but the recipe's IS-correction is no longer recovered. "
+                "Observable post-hoc as ratio_truncated saturating near 1.0; "
+                "preventable here at config load."
             ),
         ),
     ] = 4.0

@@ -116,6 +116,8 @@ class FakeDataLoader:
             "temperatures": torch.ones(input_ids.shape[0]).unsqueeze(0),
             "loss_mask": loss_mask.unsqueeze(0),
             "lora_num_tokens": lora_num_tokens,
+            "sequence_loss_weights": [],
+            "inference_logprobs_synthesized": False,
             "routed_experts": None,
             "pixel_values": None,
             "image_grid_thw": None,
@@ -142,6 +144,8 @@ class FakeDataLoader:
             "temperatures": torch.ones(self.seq_len).unsqueeze(0),
             "loss_mask": torch.ones(self.seq_len, dtype=torch.bool).unsqueeze(0),
             "lora_num_tokens": lora_num_tokens,
+            "sequence_loss_weights": [],
+            "inference_logprobs_synthesized": False,
             "routed_experts": None,
             "pixel_values": None,
             "image_grid_thw": None,
@@ -211,9 +215,11 @@ class DataLoader:
             temperatures=torch.tensor(micro_batch.temperatures, dtype=torch.float).unsqueeze(0),
             lora_num_tokens=torch.tensor(micro_batch.lora_num_tokens, dtype=torch.int32),
             sequence_loss_weights=list(micro_batch.sequence_loss_weights),
-            inference_logprobs_synthesized=bool(
-                getattr(micro_batch, "inference_logprobs_synthesized", False)
-            ),
+            # Strict read — `inference_logprobs_synthesized` is a non-optional
+            # bool on MicroBatch (msgspec default False). Falling back via
+            # getattr would silently disable the IS-ratio guard if the schema
+            # ever changed.
+            inference_logprobs_synthesized=micro_batch.inference_logprobs_synthesized,
             # Multimodal fields - no batch dimension for these as they are variable-sized
             pixel_values=torch.frombuffer(bytearray(micro_batch.pixel_values), dtype=torch.float32).reshape(
                 micro_batch.pixel_values_shape

@@ -199,6 +199,9 @@ def _convert_tools_to_oai_format(tool_defs: list) -> list[dict[str, Any]] | None
     ]
 
 
+_LOGPROBS_SYNTHESIZED_WARNED: set[str] = set()
+
+
 def pretokenize_rollout_trajectory(
     output: vf.RolloutOutput,
     tokenizer: PreTrainedTokenizer,
@@ -216,10 +219,12 @@ def pretokenize_rollout_trajectory(
     Mark every reconstructed step with `_logprobs_synthesized=True` so the
     flag propagates to TrainingSample.inference_logprobs_synthesized.
     Enforcement of "don't combine synthesized logprobs with IS-ratio losses"
-    is at config-load time via `validate_is_ratio_loss_with_external_rollout_string_client`
-    in configs/rl.py — that's the load-bearing guard. The flag here is for
-    observability (warning log on first occurrence) and for future runtime
-    consumers that want a per-rollout signal.
+    is at config-load time via `validate_external_rollout_mode` in configs/rl.py
+    (rejects the canonical `teacher_rollout_model`+CISPO case at startup) and
+    at runtime via the synth-flag check in trainer.rl.train (catches the
+    `[orchestrator.client] base_url` override path the static validator
+    cannot see). The flag here is for both: it carries the runtime-time signal
+    and drives a one-shot observability warning.
     """
     logger = get_logger()
     tools = _convert_tools_to_oai_format(output.get("tool_defs", []))
@@ -244,10 +249,13 @@ def pretokenize_rollout_trajectory(
         step["tokens"] = reconstructed
         # Warn at most ONCE per rollout (not once per step) — a 16-rollout
         # × 10-turn TB run would otherwise spam stderr with 160 lines per step.
-        # The config-level validator (`validate_is_ratio_loss_with_external_rollout_string_client`)
-        # is the load-bearing guard; this warning is observability only.
-        if not output.get("_logprobs_synthesized_warned"):
-            output["_logprobs_synthesized_warned"] = True
+        # The config-level validator + train-side runtime check are the
+        # load-bearing guards; this warning is observability only. The dedup
+        # cache lives in module scope (not on `output`) so it doesn't pollute
+        # the vf.RolloutOutput schema that may get serialized to wandb / disk.
+        example_id = output["example_id"]
+        if example_id not in _LOGPROBS_SYNTHESIZED_WARNED:
+            _LOGPROBS_SYNTHESIZED_WARNED.add(example_id)
             logger.warning(
                 "pretokenize_rollout_trajectory: example %s reconstructed token IDs "
                 "WITHOUT real generator logprobs (chat client did not preserve token data; "
@@ -255,7 +263,7 @@ def pretokenize_rollout_trajectory(
                 "for SFT but corrupts CISPO/Default importance ratios. The config-level "
                 "validator should have rejected this combination at load time — if you see "
                 "this warning, please verify your rollout-path config.",
-                output["example_id"],
+                example_id,
                 step_idx,
             )
 
