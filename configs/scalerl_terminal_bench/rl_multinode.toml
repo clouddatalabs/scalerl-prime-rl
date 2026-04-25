@@ -32,9 +32,9 @@ gpus_per_node = 8
 
 [slurm]
 job_name = "scalerl-tb-multinode"
-partition = "GPU_PARTITION"   # required — your cluster's GPU partition
-# account = "YOUR_SLURM_ACCOUNT"  # uncomment + set if your cluster requires it
-time = "24:00:00"             # adjust to your QoS cap
+partition = "your-gpu-partition"   # required — your cluster's GPU partition
+# account = "your-slurm-account"  # uncomment + set if your cluster requires it
+time = "24:00:00"                  # adjust to your QoS cap
 # nodelist = "node-001,node-002"  # uncomment to pin specific nodes
 # exclude  = "node-099"           # uncomment to exclude flaky nodes
 # `pre_run_command` runs on the head node after env setup. The TB env
@@ -59,7 +59,23 @@ name = "Qwen/Qwen3-8B"
 matmul_precision = "highest"
 
 [trainer.model]
+# Mirror the single-node `rl.toml` paper-faithful stack — these knobs
+# control the §3.2 train/inference parity (FP32 LM-head, FA4 attention)
+# and the bf16 optimizer dtype that `optimization_dtype="float32"` (the
+# upstream default) would silently flip to FP32, blowing up memory on
+# B200 at seq_len=8192. Without these, "fp32_lm_head=true" alone gives
+# the LM-head fp32 path while the rest of the stack drifts off paper.
+attn = "fa4"
+impl = "hf"
+optimization_dtype = "bfloat16"
+reduce_dtype = "bfloat16"
 fp32_lm_head = true
+fused_lm_head_token_chunk_size = 8192
+
+[trainer.model.ac]
+# Activation checkpointing every 6th block — required to fit Qwen3-8B
+# at seq_len=8192 + max_completion_tokens=6144 on 8×B200 per train node.
+freq = 6
 
 [trainer.optim]
 type = "adamw"
