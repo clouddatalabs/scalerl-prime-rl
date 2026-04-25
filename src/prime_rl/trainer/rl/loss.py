@@ -357,6 +357,25 @@ def compute_loss(
 
     Returns:
         Tuple of (scaled_loss, aggregated_metrics)
+
+    NOT-VERIFIED — cp>1 with `sequence`/`none` mode:
+        The scaling on the `else` branch below multiplies by
+        `fsdp_gradient_divide_factor = dp * cp` to cancel FSDP's gradient
+        averaging. Under context parallelism, the upstream `gather_for_cp`
+        step uses `dist_nn.all_gather`, whose backward is a SUM-reduce-scatter.
+        When all CP ranks compute identical loss (which they do, since the
+        per-rank `total_loss` is a global weighted sum after the gather), the
+        gather backward injects an additional factor of `cp` on local
+        activation gradients, compounding with the `dp*cp` loss multiplier
+        and FSDP's `1/(dp*cp)` divisor to leave a residual factor of `cp`
+        on parameter gradients vs. the desired single-process baseline.
+        This branch has only been exercised under cp=1 in this fork; cp>1
+        sequence/none-mode scaling has NOT been empirically verified against
+        a single-process baseline. Do not deploy a cp>1 sequence/none-mode
+        run without first running such a verification (e.g. compare gradient
+        norms / final losses on a tiny config with cp=1 vs cp=2 holding
+        global batch fixed). All shipped configs in this fork use cp=1, so
+        the open question is latent for current users.
     """
     # Initialize as a 0-d tensor so an empty packed batch (len(trainer_logprobs)==0)
     # still returns a Tensor with a real device, not a Python float. A Python-float
@@ -456,6 +475,13 @@ def compute_loss(
         # `aggregate = global_sum / dp_world_size` — i.e. effective LR shrinks
         # 1/dp_world_size in multi-rank DP. Multiplying by dp_world_size here
         # cancels the FSDP divisor so `aggregate_grad == sum_global(w_i * grad_i)`.
+        #
+        # ⚠️ NOT-VERIFIED for cp>1: this scaling has only been exercised at
+        # cp=1 in this fork. The cp>1 path interacts with `gather_for_cp`'s
+        # SUM-reduce-scatter backward in ways that may leave a residual `cp`
+        # factor on parameter gradients (see the docstring note above). All
+        # shipped configs use cp=1; do not deploy cp>1 sequence/none-mode
+        # without an empirical single-process-vs-cp comparison first.
         # Token-mode is approximately unaffected: each rank divides by its
         # local trainable tokens, which only equals `global_tokens / dp_world_size`
         # under perfectly balanced packing. The packer pads micro-batch *count*
