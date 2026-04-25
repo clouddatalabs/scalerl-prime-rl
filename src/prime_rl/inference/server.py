@@ -13,6 +13,10 @@ def setup_vllm_env(config: InferenceConfig):
     if config.enable_lora:
         os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
 
+    # Read by prime_rl.inference.patches.monkey_patch_vllm_fp32_lm_head, registered via the
+    # vllm.general_plugins entry point in pyproject.toml. Trainer side must match.
+    os.environ["PRIME_RL_VLLM_FP32_LM_HEAD"] = "1" if config.model.fp32_lm_head else "0"
+
 
 def main():
     config = cli(InferenceConfig)

@@ -266,6 +266,36 @@ def test_fused_lm_head_correct_shift():
     )
 
 
+def test_fused_lm_head_fp32_backward_matches_full_logits_cpu():
+    torch.manual_seed(7)
+    b, s, h, v = 2, 3, 8, 20000
+    temperature = torch.full((b, s), 1.3, dtype=torch.float32)
+    chunk_size = 2
+
+    hidden0 = torch.randn(b, s, h, dtype=torch.bfloat16, requires_grad=True)
+    labels = torch.randint(0, v, (b, s), dtype=torch.long)
+    weight0 = torch.randn(v, h, dtype=torch.bfloat16, requires_grad=True)
+
+    hidden_ref = hidden0.detach().clone().requires_grad_(True)
+    weight_ref = weight0.detach().clone().requires_grad_(True)
+    logits = hidden_ref.float() @ weight_ref.float().t()
+    logits = logits / temperature.unsqueeze(-1)
+    logp = torch.log_softmax(logits, dim=-1).gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+    logp.sum().backward()
+
+    hidden_fused = hidden0.detach().clone().requires_grad_(True)
+    weight_fused = weight0.detach().clone().requires_grad_(True)
+    lm = FusedOutputLinear(in_features=h, out_features=v, chunk_size=chunk_size, fp32_lm_head=True)
+    lm.weight = torch.nn.Parameter(weight_fused)
+
+    fused_out = lm(hidden_fused, labels=labels, temperature=temperature)
+    fused_out["logprobs"].sum().backward()
+
+    torch.testing.assert_close(fused_out["logprobs"], logp, rtol=0, atol=1e-3)
+    torch.testing.assert_close(hidden_fused.grad.float(), hidden_ref.grad.float(), rtol=0, atol=2e-2)
+    torch.testing.assert_close(lm.weight.grad.float(), weight_ref.grad.float(), rtol=0, atol=2e-2)
+
+
 @pytest.mark.gpu
 def test_inject_prime_lm_head_vanilla():
     """Test that inject_prime_lm_head correctly wraps HF model with VanillaOutputLinear."""

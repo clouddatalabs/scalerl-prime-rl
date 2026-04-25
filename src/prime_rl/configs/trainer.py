@@ -358,6 +358,18 @@ class ModelConfig(BaseModelConfig):
         ),
     ] = "disabled"
 
+    fp32_lm_head: Annotated[
+        bool,
+        Field(
+            description=(
+                "Whether to compute the trainer LM-head logits projection / logprob path in float32 "
+                "instead of model dtype. Reduces generator/trainer probability mismatches in RL "
+                "(ScaleRL §3.2 / MiniMax-M1 §3.2). Must be paired with the inference engine running "
+                "the LM-head matmul in fp32 — see prime_rl.inference.patches."
+            ),
+        ),
+    ] = False
+
     @model_validator(mode="before")
     @classmethod
     def _normalize_attn_alias(cls, data):

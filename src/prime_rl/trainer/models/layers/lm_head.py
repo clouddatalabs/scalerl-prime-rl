@@ -5,6 +5,7 @@ from typing import TypedDict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from prime_rl.utils.logger import get_logger
@@ -36,9 +37,10 @@ def cast_float_and_contiguous(output: PrimeLmOutput) -> PrimeLmOutput:
 
 
 class FusedOutputLinear(torch.nn.Linear):
-    def __init__(self, in_features: int, out_features: int, chunk_size: int):
+    def __init__(self, in_features: int, out_features: int, chunk_size: int, fp32_lm_head: bool = False):
         super().__init__(in_features, out_features, bias=False)
         self.chunk_size = chunk_size
+        self.fp32_lm_head = fp32_lm_head
 
     def forward(
         self,
@@ -55,7 +57,7 @@ class FusedOutputLinear(torch.nn.Linear):
         inv_t = 1.0 / temperature.reshape(b * s).contiguous()  # [N]
 
         logprobs, entropy = _SequenceChunkedLogProbEntropyFn.apply(
-            hidden_states, self.weight, labels, inv_t, self.chunk_size
+            hidden_states, self.weight, labels, inv_t, self.chunk_size, self.fp32_lm_head
         )
 
         logprobs = logprobs.reshape(b, s)
@@ -64,13 +66,16 @@ class FusedOutputLinear(torch.nn.Linear):
 
 
 class VanillaOutputLinear(torch.nn.Linear):
-    def __init__(self, in_features: int, out_features: int):
+    def __init__(self, in_features: int, out_features: int, fp32_lm_head: bool = False):
         super().__init__(in_features, out_features, bias=False)
+        self.fp32_lm_head = fp32_lm_head
 
     def forward(
         self, hidden_states: torch.Tensor, labels: torch.Tensor | None = None, temperature: Tensor | None = None
     ) -> PrimeLmOutput:
         # VanillaOutputLinear just returns logits - temperature scaling is done externally in train.py
+        if self.fp32_lm_head:
+            return PrimeLmOutput(logits=F.linear(hidden_states.float(), self.weight.float()))
         return PrimeLmOutput(logits=super().forward(hidden_states))
 
 
@@ -168,6 +173,7 @@ class _SequenceChunkedLogProbEntropyFn(torch.autograd.Function):
         labels: torch.Tensor,  # [N]
         inv_temperature: torch.Tensor,  # [N]
         chunk_size: int,
+        fp32_lm_head: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns per-token logprobs and entropy by chunking over flattened sequence tokens.
@@ -204,7 +210,10 @@ class _SequenceChunkedLogProbEntropyFn(torch.autograd.Function):
             for vocab_start in range(0, vocab, vocab_chunk_size):
                 vocab_end = min(vocab_start + vocab_chunk_size, vocab)
                 weight_chunk = weight[vocab_start:vocab_end]
-                logits_chunk = hidden_chunk @ weight_chunk.t()
+                if fp32_lm_head:
+                    logits_chunk = hidden_chunk.float() @ weight_chunk.float().t()
+                else:
+                    logits_chunk = hidden_chunk @ weight_chunk.t()
                 scaled_logits = logits_chunk.to(torch.float32) * inv_t_chunk
 
                 m, s, t = _online_logsumexp_and_weighted_update(m, s, t, scaled_logits)
@@ -221,6 +230,7 @@ class _SequenceChunkedLogProbEntropyFn(torch.autograd.Function):
 
         ctx.save_for_backward(hidden, weight, labels, inv_temperature, logz)
         ctx.chunk_size = chunk_size
+        ctx.fp32_lm_head = fp32_lm_head
 
         return logprobs, entropy
 
@@ -232,13 +242,14 @@ class _SequenceChunkedLogProbEntropyFn(torch.autograd.Function):
 
         hidden, weight, labels, inv_temperature, logz = ctx.saved_tensors
         chunk_size: int = ctx.chunk_size
+        fp32_lm_head: bool = ctx.fp32_lm_head
 
         n, _ = hidden.shape
         vocab = weight.shape[0]
         vocab_chunk_size = min(vocab, 8192)
 
-        grad_hidden = torch.zeros_like(hidden)
-        grad_weight = torch.zeros_like(weight)
+        grad_hidden = torch.zeros_like(hidden, dtype=torch.float32 if fp32_lm_head else hidden.dtype)
+        grad_weight = torch.zeros_like(weight, dtype=torch.float32 if fp32_lm_head else weight.dtype)
 
         for start in range(0, n, chunk_size):
             end = min(start + chunk_size, n)
@@ -251,7 +262,9 @@ class _SequenceChunkedLogProbEntropyFn(torch.autograd.Function):
             for vocab_start in range(0, vocab, vocab_chunk_size):
                 vocab_end = min(vocab_start + vocab_chunk_size, vocab)
                 weight_chunk = weight[vocab_start:vocab_end]
-                logits_chunk = hidden_chunk @ weight_chunk.t()
+                hidden_for_logits = hidden_chunk.float() if fp32_lm_head else hidden_chunk
+                weight_for_logits = weight_chunk.float() if fp32_lm_head else weight_chunk
+                logits_chunk = hidden_for_logits @ weight_for_logits.t()
                 scaled_logits = logits_chunk.to(torch.float32) * inv_t_chunk
                 probs = torch.exp(scaled_logits - logz_chunk.unsqueeze(-1))
 
@@ -262,16 +275,21 @@ class _SequenceChunkedLogProbEntropyFn(torch.autograd.Function):
                     grad_logits[mask, idx] += grad_chunk[mask]
                 grad_logits = grad_logits * inv_t_chunk
 
-                grad_hidden[start:end].add_(grad_logits.to(hidden.dtype) @ weight_chunk)
-                grad_weight[vocab_start:vocab_end].add_(grad_logits.to(weight.dtype).t() @ hidden_chunk)
+                grad_logits_for_hidden = grad_logits if fp32_lm_head else grad_logits.to(hidden.dtype)
+                grad_logits_for_weight = grad_logits if fp32_lm_head else grad_logits.to(weight.dtype)
+                grad_hidden_chunk = grad_logits_for_hidden @ weight_for_logits
+                grad_weight_chunk = grad_logits_for_weight.t() @ hidden_for_logits
+                grad_hidden[start:end].add_(grad_hidden_chunk)
+                grad_weight[vocab_start:vocab_end].add_(grad_weight_chunk)
 
-        return grad_hidden, grad_weight, None, None, None
+        return grad_hidden.to(hidden.dtype), grad_weight.to(weight.dtype), None, None, None, None
 
 
 def inject_prime_lm_head(
     model: nn.Module,
     chunk_size: int | None = None,
     fused_cross_entropy: bool | str = False,
+    fp32_lm_head: bool = False,
 ) -> None:
     """
     Inject a PrimeRL LM head into a model.
@@ -287,6 +305,7 @@ def inject_prime_lm_head(
             - False: no fusion
             - True or "liger": Liger kernel fusion
             - "quack": quack-kernels fusion (chunked linear + CE with CuTe DSL kernels)
+        fp32_lm_head: Whether to compute the LM-head projection in float32 instead of model dtype.
     """
     # Guards so we have nicer error messages when a non-standard model is used
     assert hasattr(model, "model"), f"model doesnt have backbone in model.model:\n{model}"
@@ -308,6 +327,11 @@ def inject_prime_lm_head(
                 "Use loss_impl='liger_fused' or loss_impl='torch' instead."
             )
         if not fused_cross_entropy:
+            if fp32_lm_head:
+                raise ValueError(
+                    "fp32_lm_head is not supported on Gemma-style models with final_logit_softcapping. "
+                    "inject_gemma_lm_head does not thread the fp32 path; refusing to silently drop the flag."
+                )
             from prime_rl.trainer.models.layers.lm_head_gemma import inject_gemma_lm_head
 
             inject_gemma_lm_head(model, chunk_size, final_logit_softcapping)
@@ -316,12 +340,16 @@ def inject_prime_lm_head(
     # Replace the lm_head with the appropriate wrapper
     old_lm_head = model.lm_head
     if fused_cross_entropy == "quack":
+        if fp32_lm_head:
+            raise ValueError("fp32_lm_head is not supported with fused_cross_entropy='quack'")
         logger.info("Injecting fused cross-entropy LM head (quack-kernels)")
         model.lm_head = QuackFusedCrossEntropyOutputLinear(
             in_features=old_lm_head.in_features,
             out_features=old_lm_head.out_features,
         )
     elif fused_cross_entropy:
+        if fp32_lm_head:
+            raise ValueError("fp32_lm_head is not supported with fused_cross_entropy=True/'liger'")
         logger.info("Injecting fused cross-entropy LM head (Liger kernel)")
         model.lm_head = FusedCrossEntropyOutputLinear(
             in_features=old_lm_head.in_features,
@@ -329,13 +357,23 @@ def inject_prime_lm_head(
             softcap=final_logit_softcapping,
         )
     elif isinstance(chunk_size, int):
-        logger.info(f"Injecting chunked LM head with chunk size {chunk_size}")
+        logger.info(
+            f"Injecting chunked LM head with chunk size {chunk_size}"
+            + (" and float32 matmul" if fp32_lm_head else "")
+        )
         model.lm_head = FusedOutputLinear(
-            in_features=old_lm_head.in_features, out_features=old_lm_head.out_features, chunk_size=chunk_size
+            in_features=old_lm_head.in_features,
+            out_features=old_lm_head.out_features,
+            chunk_size=chunk_size,
+            fp32_lm_head=fp32_lm_head,
         )
     else:
-        logger.info("Injecting vanilla LM head")
-        model.lm_head = VanillaOutputLinear(in_features=old_lm_head.in_features, out_features=old_lm_head.out_features)
+        logger.info("Injecting vanilla LM head" + (" with float32 matmul" if fp32_lm_head else ""))
+        model.lm_head = VanillaOutputLinear(
+            in_features=old_lm_head.in_features,
+            out_features=old_lm_head.out_features,
+            fp32_lm_head=fp32_lm_head,
+        )
     model.lm_head.weight = old_lm_head.weight
     del old_lm_head
 

@@ -101,6 +101,17 @@ class ModelConfig(BaseModelConfig):
         ),
     ] = None
 
+    fp32_lm_head: Annotated[
+        bool,
+        Field(
+            description=(
+                "Run the inference LM-head matmul in float32 for train/infer logprob parity "
+                "(ScaleRL §3.2). Applied through prime_rl.inference.patches.monkey_patch_vllm_fp32_lm_head, "
+                "loaded via the vllm.general_plugins entry point. Must be paired with trainer.model.fp32_lm_head."
+            ),
+        ),
+    ] = False
+
 
 class WeightBroadcastConfig(BaseConfig):
     """Configures weight broadcast settings."""

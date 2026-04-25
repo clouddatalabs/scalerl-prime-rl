@@ -1018,7 +1018,12 @@ def setup_model(
     if isinstance(config.fused_lm_head_token_chunk_size, int):
         lm_head_chunk_size = config.fused_lm_head_token_chunk_size
 
-    inject_prime_lm_head(model, chunk_size=lm_head_chunk_size, fused_cross_entropy=fused_cross_entropy)
+    inject_prime_lm_head(
+        model,
+        chunk_size=lm_head_chunk_size,
+        fused_cross_entropy=fused_cross_entropy,
+        fp32_lm_head=config.fp32_lm_head,
+    )
 
     # Apply LoRA before FSDP setup
     if config.lora is not None:
