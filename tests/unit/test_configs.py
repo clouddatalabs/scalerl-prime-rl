@@ -159,3 +159,32 @@ def test_removed_fused_lm_head_chunk_size_field_is_rejected():
 def test_selective_activation_checkpointing_requires_custom_impl():
     with pytest.raises(ValidationError, match="Selective activation checkpointing requires model.impl='custom'"):
         TrainerModelConfig.model_validate({"impl": "hf", "ac": {"mode": "selective"}})
+
+
+def test_nccl_async_level_requires_explicit_opt_in():
+    """NCCL + max_async_level != 1 must raise unless the experimental override is set."""
+    with pytest.raises(ValidationError, match="allow_nccl_async_level_override"):
+        OrchestratorConfig.model_validate(
+            {"weight_broadcast": {"type": "nccl"}, "max_async_level": 8}
+        )
+
+
+def test_nccl_async_level_opt_in_allows_override():
+    """With experimental.allow_nccl_async_level_override = true, NCCL + async > 1 validates."""
+    config = OrchestratorConfig.model_validate(
+        {
+            "weight_broadcast": {"type": "nccl"},
+            "max_async_level": 8,
+            "experimental": {"allow_nccl_async_level_override": True},
+        }
+    )
+    assert config.max_async_level == 8
+    assert config.experimental.allow_nccl_async_level_override is True
+
+
+def test_nccl_async_level_default_one_still_validates():
+    """The default NCCL + max_async_level=1 path still works without the override."""
+    config = OrchestratorConfig.model_validate(
+        {"weight_broadcast": {"type": "nccl"}, "max_async_level": 1}
+    )
+    assert config.experimental.allow_nccl_async_level_override is False

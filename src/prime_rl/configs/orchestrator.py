@@ -812,6 +812,20 @@ WeightBroadcastConfig: TypeAlias = Annotated[
 class OrchestratorExperimentalConfig(BaseConfig):
     """Experimental features for the orchestrator."""
 
+    allow_nccl_async_level_override: Annotated[
+        bool,
+        Field(
+            description=(
+                "Opt into running NCCL weight broadcast with max_async_level != 1. "
+                "Upstream defaults to max_async_level = 1 on NCCL because the broadcast "
+                "is synchronous and can deadlock or yield partial reads on some hardware "
+                "when the trainer is mid-broadcast while the generator is still emitting "
+                "rollouts. Empirically works on B200/EFA at max_async_level=8 (ScaleRL "
+                "Pipeline-RL §3.1); other hardware may need filesystem broadcast instead."
+            ),
+        ),
+    ] = False
+
 
 class TeacherModelConfig(BaseConfig):
     """Configures the teacher model for computing teacher logprobs (e.g. for distillation)."""
@@ -1088,9 +1102,18 @@ class OrchestratorConfig(BaseConfig):
 
     @model_validator(mode="after")
     def nccl_max_async_level(self):
-        if self.weight_broadcast.type == "nccl":
-            if not self.max_async_level == 1:
-                raise ValueError("max_async_level must be 1 for NCCL broadcast")
+        if (
+            self.weight_broadcast.type == "nccl"
+            and self.max_async_level != 1
+            and not self.experimental.allow_nccl_async_level_override
+        ):
+            raise ValueError(
+                "NCCL weight broadcast defaults to max_async_level = 1 because the broadcast "
+                "is synchronous and can deadlock under async-level > 1 on some hardware. "
+                "Set experimental.allow_nccl_async_level_override = true to opt in (validated "
+                "on B200/EFA per ScaleRL Pipeline-RL §3.1; other hardware may need filesystem "
+                "broadcast)."
+            )
         return self
 
     @model_validator(mode="after")
