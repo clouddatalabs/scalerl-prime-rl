@@ -35,6 +35,13 @@ source .venv/bin/activate
 # upstream HEAD. Both invariants are documented in README.md and SCALERL.md.
 uv sync --extra all --locked
 
+# Repair FA4 namespace shadow. `pyproject.toml` declares both `flash-attn`
+# (FA2) and `flash-attn-4` (FA4); both ship a `flash_attn/cute/` subpackage
+# and uv install order is non-deterministic, so the FA2 stub can shadow the
+# real FA4 kernels. `import flash_attn` succeeds either way — wrong-kernel
+# silently embeds in checkpoints. Defense-in-depth, idempotent.
+bash $PROJECT_DIR/scripts/fix-flash-attn-cute.sh
+
 {% if pre_run_command %}
 # Pre-run command
 {{ pre_run_command }}

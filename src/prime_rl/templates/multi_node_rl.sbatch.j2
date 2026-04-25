@@ -148,6 +148,9 @@ source .venv/bin/activate
 # pin git deps to uv.lock. Recipe invariant per README.md and SCALERL.md.
 uv sync --extra all --locked
 
+# Repair FA4 namespace shadow — see single_node_rl.sbatch.j2 for context.
+bash $PROJECT_DIR/scripts/fix-flash-attn-cute.sh
+
 {% if pre_run_command %}
 # Pre-run command
 {{ pre_run_command }}
