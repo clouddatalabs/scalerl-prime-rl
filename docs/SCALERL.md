@@ -107,6 +107,29 @@ submissions don't collide. Checkpoints land under
 capped at `keep_last = 3` plus every 500-step milestone (`keep_interval = 500`);
 raise `keep_last` if you want fast random-step resume and have the storage.
 
+**Reproducibility.** Two consecutive runs of either shipped config will NOT
+be bit-equivalent. Sources of non-determinism:
+- Sampling seeds: `[orchestrator] seed` defaults to 42 (fixed). But
+  `[orchestrator.train.sampling] seed`, `[orchestrator.eval.sampling] seed`,
+  and `[inference] seed` are all unset by default — vLLM samples differently
+  each run. Pin these to integers if you need deterministic rollouts.
+- NCCL all-reduce ordering across ranks produces ~1e-6 numerical drift even
+  with seeds pinned.
+- FA4 (flash_attn.cute) is non-deterministic by design (atomic adds in the
+  backward).
+
+In practice, expect step-level metrics to track within ~1% across runs but
+not match exactly. If you need to bisect a regression, set every seed
+above to the same integer and disable FA4 (`attn = "sdpa"`) for the
+comparison run.
+
+**Postmortem when wandb is off.** Both shipped configs ship with `[wandb]`
+commented out. Run state persists locally under `[output_dir]` from the
+TOML — checkpoints in `<output_dir>/checkpoints/`, rollout JSONLs in
+`<output_dir>/run_default/rollouts/`, orchestrator + trainer stdout in the
+slurm log file (path printed by the sbatch). Uncomment `[wandb]` and set
+`WANDB_API_KEY` in `.env` for cloud logging.
+
 **Multi-node.** The shipped configs target a single 8-GPU node via
 `SingleNodeDeploymentConfig` (`num_train_gpus`/`num_infer_gpus`). To scale
 out, switch the `[deployment]` block to the multi-node schema:

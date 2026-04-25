@@ -1,5 +1,10 @@
 name: Release
 
+# Upstream-only: gates Docker Hub release behind PrimeIntellect/prime-rl
+# secrets and a self-hosted `image-builder` runner. clouddatalabs/scalerl-prime-rl
+# (this fork) doesn't have either, so this workflow is disabled here. To
+# re-enable for a fork, change the `if:` line below to your repo slug.
+
 on:
   push:
     branches: [main]
@@ -8,6 +13,7 @@ on:
 jobs:
   cuda:
     name: Push CUDA image to Docker
+    if: github.repository == 'PrimeIntellect-ai/prime-rl'
     runs-on: image-builder
     steps:
       - name: Remove unnecessary packages

@@ -304,6 +304,19 @@ def test_adamw_config_eps_bounds():
         AdamWConfig(eps=1e-2)  # above le=1e-3
 
 
+def test_cispo_adv_tau_rejects_zero():
+    """`adv_tau=0` zeros every per-token contribution to the CISPO loss
+    (-sg(min(rho,eps_max)) * adv_tau * adv * log_pi). With no teacher / KL
+    fallback path in CISPO, the loss is identically 0 and gradients vanish
+    silently. Reject at config load."""
+    from prime_rl.configs.trainer import CISPOLossConfig
+
+    CISPOLossConfig(adv_tau=1e-6)  # in range
+    CISPOLossConfig(adv_tau=1.0)  # default
+    with pytest.raises(ValidationError):
+        CISPOLossConfig(adv_tau=0.0)
+
+
 def test_cispo_eps_max_bounds():
     """`eps_max < 1` would clamp the on-policy mode (rho≈1) to a sub-1
     coefficient and silently zero the gradient. Reject at config load."""

@@ -758,7 +758,12 @@ class CISPOLossConfig(BaseModel):
             ),
         ),
     ] = 4.0
-    adv_tau: Annotated[float, Field(ge=0, description="Advantage scale factor (matches DefaultLossConfig.adv_tau).")] = 1.0
+    # `gt=0` not `ge=0`: with adv_tau=0 every term in `-sg(min(rho, eps_max)) *
+    # adv_tau * adv * log_pi_theta` is identically zero — the loss is 0, the
+    # gradient is 0, and training silently runs without any signal. CISPO has
+    # no teacher / KL fallback path, so unlike DefaultLossConfig there's no
+    # legitimate use of adv_tau=0.
+    adv_tau: Annotated[float, Field(gt=0, description="Advantage scale factor (matches DefaultLossConfig.adv_tau).")] = 1.0
     loss_scale_mode: Annotated[
         LossScaleMode,
         Field(description="Use 'sequence' or 'none' with prompt-level averaging; 'token' for batch-token mean."),

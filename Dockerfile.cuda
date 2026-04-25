@@ -52,13 +52,18 @@ COPY configs /app/configs
 COPY examples /app/examples
 COPY benchmarks/scripts /app/benchmarks/scripts
 
+COPY scripts/fix-flash-attn-cute.sh /app/scripts/fix-flash-attn-cute.sh
+
 RUN --mount=type=cache,target=/app/.cache/uv \
     # Intentionally NOT including --extra flash-attn-3: the FA3 wheel ships
     # Hopper sm_90 kernels only and crashes on B200 with "no kernel image is
-    # available." Matches the `[all]` extra in pyproject.toml. Run
-    # `scripts/fix-flash-attn-cute.sh` after build if FA4 namespace gets
-    # shadowed.
-    uv sync --extra flash-attn --extra flash-attn-cute --extra envs --extra gpt-oss --group mamba-ssm --locked --no-dev
+    # available." Matches the `[all]` extra in pyproject.toml.
+    uv sync --extra flash-attn --extra flash-attn-cute --extra envs --extra gpt-oss --group mamba-ssm --locked --no-dev \
+    # FA2 (`flash-attn`) and FA4 (`flash-attn-cute`) both ship a `flash_attn/cute/`
+    # sub-package. uv sync ordering is non-deterministic, so the FA2 stub can
+    # silently shadow the real FA4 module. Run the repair inside the build so
+    # consumers don't ship a broken image.
+    && bash /app/scripts/fix-flash-attn-cute.sh
 
 # arm64: build flash-attn from source, fix namespace conflicts, apply workarounds
 ARG TARGETARCH

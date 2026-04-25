@@ -9,6 +9,11 @@ scalerl-prime-rl — public POC fork of <a href="https://github.com/PrimeIntelle
 > lives in **[`docs/SCALERL.md`](docs/SCALERL.md)** — read that first; the
 > Quickstart there is the working setup. The rest of this README is the
 > upstream prime-rl README, kept verbatim for reference.
+>
+> ⚠️ **Do not run the upstream `curl ... PrimeIntellect-ai/prime-rl/main/scripts/install.sh`
+> Quick Setup snippet shown below** — it clones plain upstream and skips
+> every ScaleRL ingredient. Use `docs/SCALERL.md` Quickstart step 1
+> (`git clone https://github.com/clouddatalabs/scalerl-prime-rl.git`) instead.
 
 ---
 

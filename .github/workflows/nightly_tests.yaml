@@ -53,6 +53,10 @@ jobs:
                   echo "matrix=$json" >> "$GITHUB_OUTPUT"
     run-experiment:
         name: Run experiment
+        # Upstream-only: requires the `research-cluster` self-hosted runner
+        # which doesn't exist in clouddatalabs/scalerl-prime-rl. Skip on this
+        # fork; re-enable by changing the `if:` line below to your repo slug.
+        if: github.repository == 'PrimeIntellect-ai/prime-rl'
         needs: discover-experiments
         runs-on: research-cluster
         container:
