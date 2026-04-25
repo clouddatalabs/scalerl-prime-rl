@@ -99,6 +99,22 @@ def shift_tensor_right(t: Float[Tensor, "batch seq"], pad_value: float | None = 
         pad_value: Value to use for position 0. If None, uses 0.0 for backward compatibility.
                    For logprobs, should be log(1/vocab_size) to represent uniform distribution.
                    For entropy, should be log(vocab_size) to represent maximum entropy.
+
+    ⚠️ PACKED-BATCH INVARIANT: this function operates on the FULL packed
+    batch (shape ``[1, total_seq_len]`` after packing) and only prepends
+    `pad_value` at GLOBAL position 0. For sub-sequence k≥2 (offset
+    L1+L2+...+Lk-1 in the packed tensor), position 0 of the sub-sequence
+    picks up sub-seq (k-1)'s LAST value rather than the intended
+    `log(1/V)` / `log(V)` pad. This is currently safe because
+    `prepare_sample` (`trainer/batch.py`) refuses any sample with a
+    trainable prompt position (asserts every position-0 has
+    `loss_mask=False`); CISPO's `safe_mask` and Default's `keep_mask` both
+    AND in `loss_mask`, so the leaked value is always zeroed out before
+    reaching the loss multiply. A future change that lifts the
+    prompt-mask invariant, makes position 0 trainable, or introduces an
+    alternate packing without position-id resets at boundaries would
+    silently propagate stale values across packing boundaries — call out
+    here so the next refactor doesn't quietly re-introduce the bug.
     """
     if pad_value is None:
         pad_value = 0.0
