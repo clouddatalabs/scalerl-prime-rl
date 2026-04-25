@@ -121,9 +121,22 @@ def apply_batch_advantage_normalization(
     # contract violation, not a "treat as surviving" default.
     surviving = [r for r in rollouts if not r["is_filtered"]]
 
-    if len(surviving) < 2:
-        for r in surviving:
+    def _filter_out(rollouts_to_skip: list[vf.RolloutOutput], reason: str) -> None:
+        """Mark a rollout as filtered AND zero its advantage. Without setting
+        is_filtered=True the trainer would still see them as trainable in
+        `n_trainable > 0`, run a forward+backward with zero advantages
+        (wasted compute), and pollute monitoring with the resulting
+        zero-grad / nonzero-importance-ratio step."""
+        for r in rollouts_to_skip:
+            r["is_filtered"] = True
             r["advantage"] = 0.0
+            existing = list(r.get("filters") or [])
+            if reason not in existing:
+                existing.append(reason)
+            r["filters"] = existing
+
+    if len(surviving) < 2:
+        _filter_out(surviving, "batch_norm_too_few_survivors")
         return
 
     advs = torch.tensor([float(r["advantage"]) for r in surviving])
@@ -136,11 +149,10 @@ def apply_batch_advantage_normalization(
         )
     std = advs.std(unbiased=False).item()
     if std <= _NORM_EPS:
-        # Every surviving advantage is the same value. The intended rescale
-        # gives a degenerate `1/eps`-blown direction; zero them instead so the
-        # gradient is zero on this step rather than huge-and-meaningless.
-        for r in surviving:
-            r["advantage"] = 0.0
+        # Every surviving advantage is the same value. Mark as filtered so
+        # the orchestrator's empty-batch retry kicks in rather than the
+        # trainer running a zero-gradient step on a degenerate cohort.
+        _filter_out(surviving, "batch_norm_zero_std")
         return
 
     scale = 1.0 / (std + _NORM_EPS)

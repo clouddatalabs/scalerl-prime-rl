@@ -212,21 +212,28 @@ def _pad_group_for_distribution(group: list[MicroBatch], num_train_workers: int)
 
 
 def _trainable_completion_tokens(rollout: TrainingSample, seq_len: int) -> int:
-    """Count completion tokens that actually enter the loss after prepare_sample().
+    """Count tokens that actually enter the loss after prepare_sample().
 
-    prepare_sample concatenates `prompt_ids + completion_ids` then truncates to
-    seq_len. The trainable mask within the completion is `completion_mask`, which
-    can be False for orchestrator-injected prompt-extension tokens (see
-    orchestrator/trajectories.py — tool-call prompts get completion_mask=False).
+    prepare_sample builds `loss_mask = prompt_mask + completion_mask` then
+    truncates the concatenation to seq_len. compute_loss weights summed
+    losses against the FULL loss_mask, so prompt-side trainable tokens count
+    too — multi-turn envs (e.g. terminal_bench) emit prompt_mask=True on
+    assistant turns inside the prompt segment, and counting only
+    completion_mask would silently up-weight those samples by a factor of
+    `(prompt_trainable + completion_trainable) / completion_trainable`.
 
-    This function counts only the completion_mask=True tokens that survive the
-    seq_len truncation, matching what compute_loss will actually weight.
+    The truncation rule: positions [0, prompt_len) come from prompt_mask,
+    positions [prompt_len, prompt_len + completion_len) from completion_mask.
+    After truncation to seq_len, prompt-side keeps the first
+    `min(prompt_len, seq_len)` entries; completion-side keeps the first
+    `max(0, seq_len - prompt_len)` entries. Sum the surviving True bits.
     """
     prompt_len = len(rollout.prompt_ids)
-    if prompt_len >= seq_len:
-        return 0
-    surviving = seq_len - prompt_len
-    return int(sum(rollout.completion_mask[:surviving]))
+    surviving_prompt = min(prompt_len, seq_len)
+    surviving_completion = max(0, seq_len - prompt_len)
+    prompt_trainable = int(sum(rollout.prompt_mask[:surviving_prompt]))
+    completion_trainable = int(sum(rollout.completion_mask[:surviving_completion]))
+    return prompt_trainable + completion_trainable
 
 
 def apply_prompt_average_sequence_weights(

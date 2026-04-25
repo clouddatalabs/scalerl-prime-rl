@@ -61,12 +61,16 @@ bash scripts/fix-flash-attn-cute.sh
 #    pull through whatever NAT your compute nodes have. Uses HF_HOME set above.
 huggingface-cli download Qwen/Qwen3-8B
 
-# 5. Submit. Override the partition / log dir if your cluster differs.
-#    LOG_DIR controls where the slurm stdout/stderr goes; the run's
-#    checkpoints + rollouts go under `[output_dir]` from the TOML
-#    (default: outputs/scalerl_math).
-sbatch -p <partition> --export=ALL,REPO_ROOT="$PWD",OUTPUT_ROOT="$PWD/slurm-logs" \
+# 5. Submit. Override the partition / log dir / config-to-launch if your
+#    cluster differs. OUTPUT_ROOT controls where the slurm stdout/stderr go;
+#    the run's checkpoints + rollouts go under `[output_dir]` from the TOML
+#    (default: outputs/scalerl_math or outputs/scalerl_terminal_bench).
+#    SCALERL_CONFIG selects which config to launch — defaults to the math
+#    smoke; switch to the Snowflake-handoff TB config explicitly.
+sbatch -p <partition> --export=ALL,REPO_ROOT="$PWD",OUTPUT_ROOT="$PWD/slurm-logs",\
+SCALERL_CONFIG=configs/scalerl_terminal_bench/rl.toml \
        scripts/scalerl_smoke.sbatch
+# (For the math smoke, omit SCALERL_CONFIG — it defaults to scalerl_math.)
 
 # 6. Tail the log. Smoke configs train for 500 steps; first step is ~3 min
 #    cold, steady-state ~30-60s/step on 4xB200 with FA4 + compiled vLLM.

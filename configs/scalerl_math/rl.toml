@@ -125,8 +125,11 @@ num_examples = 100
 rollouts_per_example = 4
 
 [trainer]
-# Set fp32 matmul precision to "highest" so torch's autocast doesn't downcast
-# the fp32 LM-head matmul we explicitly request below.
+# torch.set_float32_matmul_precision("high") (the upstream default on Ampere+)
+# transparently runs FP32 matmuls in TF32 — fast, but loses bits the FP32
+# LM-head exists to keep. "highest" forces true FP32 matmul, so the
+# `fp32_lm_head=true` path actually computes in fp32 instead of being
+# silently relaxed to TF32.
 matmul_precision = "highest"
 
 [trainer.model]

@@ -289,6 +289,23 @@ def test_rl_config_accepts_prompt_average_loss_with_sequence_scale_mode():
     assert config.trainer.loss.loss_scale_mode == "sequence"
 
 
+def test_adamw_config_carries_eps_and_rejects_typos():
+    """AdamW `eps` field must round-trip into the optimizer constructor.
+
+    Regression: pre-fix `AdamWConfig` had no `eps` field; the smoke configs'
+    `eps = 1e-15` was silently dropped (BaseModel default `extra="ignore"`),
+    and torch's default 1e-8 was used. With ScaleRL gradient magnitudes
+    that's an underflow risk the paper specifically warns about.
+    """
+    from prime_rl.configs.trainer import AdamWConfig
+
+    cfg = AdamWConfig(eps=1e-15)
+    assert cfg.eps == 1e-15
+    # extra=forbid on BaseOptimizerConfig — typos must raise.
+    with pytest.raises(ValidationError):
+        AdamWConfig(epislon=1e-15)  # typo
+
+
 def test_rl_config_root_rejects_nccl_async_without_override():
     """Setting NCCL + max_async_level > 1 at the RL root with no override on either
     sub-config must still be rejected. The auto_setup_weight_broadcast validator

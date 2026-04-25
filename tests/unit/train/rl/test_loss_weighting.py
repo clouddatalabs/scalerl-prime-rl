@@ -19,9 +19,13 @@ def _make_sample(
     advantage: float = 1.0,
     env_name: str = "env_a",
 ) -> TrainingSample:
+    # `prompt_mask = [False]*3` matches the simple-trajectory tokenization path
+    # (orchestrator/trajectories.py:168), so the trainable tokens are just the
+    # completion side. Multi-turn envs that emit `prompt_mask=True` on
+    # assistant turns are covered by a dedicated test below.
     return TrainingSample(
         prompt_ids=[1, 2, 3],
-        prompt_mask=[True, True, True],
+        prompt_mask=[False, False, False],
         completion_ids=[10] * completion_len,
         completion_mask=[True] * completion_len,
         completion_logprobs=[0.0] * completion_len,
@@ -121,6 +125,37 @@ def test_apply_prompt_average_sequence_weights_disambiguates_envs():
     assert total == pytest.approx(1.0)
 
 
+def test_apply_prompt_average_sequence_weights_counts_prompt_mask_trainable_tokens():
+    """Multi-turn envs (e.g. terminal_bench) emit prompt_mask=True on assistant
+    turns inside the prompt segment. `prepare_sample` builds
+    `loss_mask = prompt_mask + completion_mask`, so compute_loss weights both
+    sides; the trainable-token denominator must match.
+
+    Setup: a multi-turn sample with 2 trainable prompt tokens + 4 trainable
+    completion tokens (= 6 total) vs a single-turn sample with 0 prompt-trainable
+    + 6 completion-trainable (= 6 total). Same denominator → equal weights.
+    A regression that ignores prompt_mask gives the multi-turn sample only 4
+    in the denominator, inflating its weight.
+    """
+    multi_turn = TrainingSample(
+        prompt_ids=[1, 2, 3, 4, 5],
+        prompt_mask=[False, True, True, False, False],  # 2 trainable prompt tokens
+        completion_ids=[10, 11, 12, 13],
+        completion_mask=[True, True, True, True],  # 4 trainable completion tokens
+        completion_logprobs=[0.0] * 4,
+        completion_temperatures=[1.0] * 4,
+        advantage=1.0,
+        reward=0.0,
+        example_id="A",
+        prompt_average_loss=True,
+        env_name="env_a",
+    )
+    single_turn = _make_sample(example_id="A", completion_len=6)
+    weights = apply_prompt_average_sequence_weights([multi_turn, single_turn], seq_len=4096)
+    # total_p = (2+4) + 6 = 12 trainable tokens; per-sample weight = 1/(12*1) = 1/12.
+    assert weights == pytest.approx([1.0 / 12.0, 1.0 / 12.0])
+
+
 def test_apply_prompt_average_sequence_weights_requires_env_name():
     sample = _make_sample(example_id="A", completion_len=5, env_name="env_a")
     sample.env_name = None
@@ -154,7 +189,7 @@ def test_apply_prompt_average_sequence_weights_excludes_non_trainable_completion
     not contribute to the prompt-level weight — only trainable tokens enter the loss."""
     sample = TrainingSample(
         prompt_ids=[1, 2, 3],
-        prompt_mask=[True, True, True],
+        prompt_mask=[False, False, False],
         completion_ids=[10, 11, 12, 13, 14, 15],
         # 4 of 6 completion tokens are trainable; 2 are interleaved tool-call prompt
         # tokens with completion_mask=False.

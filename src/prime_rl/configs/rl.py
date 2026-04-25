@@ -621,16 +621,29 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def propagate_nccl_async_override(self):
-        """If either side opts into the experimental NCCL override, propagate to the other.
+        """If one side opts into the experimental NCCL override, propagate to the other.
 
         RLConfig owns max_async_level for both subconfigs, so the experimental opt-in must be
         consistent across them. Setting it on either side propagates; this avoids the "fix
         the orchestrator validator but the trainer validator still rejects" footgun.
+
+        Honor explicit `false` on both sides: a user who set both to false on
+        purpose to assert "definitely no override" should not have their value
+        silently flipped. Only propagate when AT MOST one side was explicitly
+        set; reject conflicting explicit values.
         """
-        flag = (
-            self.orchestrator.experimental.allow_nccl_async_level_override
-            or self.trainer.experimental.allow_nccl_async_level_override
-        )
+        orch_set = "allow_nccl_async_level_override" in self.orchestrator.experimental.model_fields_set
+        trainer_set = "allow_nccl_async_level_override" in self.trainer.experimental.model_fields_set
+        orch_flag = self.orchestrator.experimental.allow_nccl_async_level_override
+        trainer_flag = self.trainer.experimental.allow_nccl_async_level_override
+        if orch_set and trainer_set and orch_flag != trainer_flag:
+            raise ValueError(
+                "[orchestrator.experimental] allow_nccl_async_level_override "
+                f"({orch_flag}) and [trainer.experimental] allow_nccl_async_level_override "
+                f"({trainer_flag}) conflict. Set both to the same value, or set only one and "
+                "let RLConfig propagate."
+            )
+        flag = orch_flag if orch_set else trainer_flag if trainer_set else orch_flag  # default False
         self.orchestrator.experimental.allow_nccl_async_level_override = flag
         self.trainer.experimental.allow_nccl_async_level_override = flag
         return self

@@ -14,6 +14,8 @@
 # (#SBATCH directives are parsed before the script body, so an exported
 # PARTITION env var cannot drive --partition; use `sbatch -p` instead.)
 #
+#   SCALERL_CONFIG  — TOML config to launch (default: configs/scalerl_math/rl.toml).
+#                     Set to configs/scalerl_terminal_bench/rl.toml for the Snowflake handoff.
 #   SCALERL_FORCE_CLEAR_LD — set "1" to unset LD_LIBRARY_PATH/LD_PRELOAD even on non-AWS-DLAMI hosts
 #   SCALERL_NO_EFA  — set "1" to skip the EFA libfabric env vars when your cluster has no EFA
 #
@@ -162,12 +164,20 @@ with open(fa4.__file__) as f:
     fi
 fi
 
+# Config path. Set SCALERL_CONFIG to launch a different config (e.g. the
+# Snowflake handoff): `sbatch --export=ALL,SCALERL_CONFIG=configs/scalerl_terminal_bench/rl.toml ...`
+SCALERL_CONFIG="${SCALERL_CONFIG:-configs/scalerl_math/rl.toml}"
+if [ ! -f "$REPO_ROOT/$SCALERL_CONFIG" ]; then
+    echo "ERROR: SCALERL_CONFIG=$SCALERL_CONFIG not found under $REPO_ROOT" >&2
+    exit 1
+fi
+
 # Print effective config (helpful for postmortem) before launching.
-echo "=== effective ScaleRL config ==="
+echo "=== effective ScaleRL config ($SCALERL_CONFIG) ==="
 "$PYBIN" -c "
-import tomli
+import sys, tomli
 from prime_rl.configs.rl import RLConfig
-cfg = RLConfig.model_validate(tomli.loads(open('configs/scalerl_math/rl.toml','rb').read().decode()))
+cfg = RLConfig.model_validate(tomli.loads(open(sys.argv[1],'rb').read().decode()))
 print(' loss type:               ', cfg.trainer.loss.type)
 print(' loss eps_max:            ', cfg.trainer.loss.eps_max)
 print(' loss scale mode:         ', cfg.trainer.loss.loss_scale_mode)
@@ -182,9 +192,13 @@ print(' max_off_policy_steps:    ', cfg.orchestrator.max_off_policy_steps)
 print(' allow_nccl_async_override:', cfg.orchestrator.experimental.allow_nccl_async_level_override)
 print(' attn:                    ', cfg.trainer.model.attn)
 print(' optim_dtype:             ', cfg.trainer.model.optimization_dtype)
-"
+print(' optim eps:               ', cfg.trainer.optim.eps)
+print(' scheduler:               ', cfg.trainer.scheduler.type, 'warmup=', getattr(cfg.trainer.scheduler, 'warmup_steps', '-'))
+print(' batch_size:              ', cfg.orchestrator.batch_size)
+print(' rollouts_per_example:    ', cfg.orchestrator.rollouts_per_example)
+" "$SCALERL_CONFIG"
 echo "================================="
 
 # Use the venv's `rl` entry-point directly. `uv run` is unreliable here because
 # `source .venv/bin/activate` does not always rewrite PATH cleanly under slurm.
-"$REPO_ROOT/.venv/bin/rl" @ configs/scalerl_math/rl.toml
+"$REPO_ROOT/.venv/bin/rl" @ "$SCALERL_CONFIG"

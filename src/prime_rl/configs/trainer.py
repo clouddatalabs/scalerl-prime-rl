@@ -2,7 +2,7 @@ import warnings
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from prime_rl.configs.shared import (
     BaseModelConfig,
@@ -490,6 +490,20 @@ class LinearSchedulerConfig(BaseModel):
 
     min_lr: Annotated[float, Field(ge=0, description="Minimum learning rate to converge to.")] = 0.0
 
+    @model_validator(mode="after")
+    def at_least_one_phase(self):
+        """`setup_linear_scheduler` asserts `warmup_steps > 0 or decay_steps > 0`.
+        Catch it at config load instead of after the SLURM job has booted the
+        container.
+        """
+        if self.warmup_steps == 0 and self.decay_steps == 0:
+            raise ValueError(
+                "[trainer.scheduler] type='linear' requires warmup_steps > 0 or "
+                "decay_steps > 0; both are 0. For a no-warmup constant LR, set "
+                "type = 'constant' instead."
+            )
+        return self
+
 
 class CosineSchedulerConfig(BaseModel):
     """Configuration for cosine learning rate scheduler."""
@@ -509,6 +523,11 @@ SchedulerConfig: TypeAlias = Annotated[
 
 
 class BaseOptimizerConfig(BaseModel):
+    # `extra="forbid"` so a typo in any optimizer field (`betas1` → `beta1`,
+    # `eps` on a non-AdamW optimizer, etc.) crashes at config load instead of
+    # silently using the default — see snowflake_poc_critique pass.
+    model_config = ConfigDict(extra="forbid")
+
     lr: Annotated[float, Field(ge=0)] = 1e-6
     weight_decay: Annotated[float, Field(ge=0)] = 0.01
     max_norm: Annotated[
@@ -527,6 +546,10 @@ class AdamWConfig(BaseOptimizerConfig):
 
     betas1: Annotated[float, Field(ge=0)] = 0.9
     betas2: Annotated[float, Field(ge=0)] = 0.999
+    # ScaleRL §3.1 / Wortsman et al. 2023 / MiniMax-M1: lower epsilon avoids
+    # gradient underflow at the gradient magnitudes typical of large models.
+    # Default torch is 1e-8; the ScaleRL paper sets 1e-15.
+    eps: Annotated[float, Field(ge=0, description="Adam epsilon (denominator stability). ScaleRL uses 1e-15.")] = 1e-8
 
 
 class MuonConfig(BaseOptimizerConfig):

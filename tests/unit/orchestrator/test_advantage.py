@@ -310,21 +310,24 @@ def test_apply_batch_advantage_normalization_no_op_for_non_batch_modes():
 
 
 def test_apply_batch_advantage_normalization_handles_few_surviving():
-    """Fewer than 2 surviving rollouts → std undefined; zero out so the step's
-    contribution to the gradient is zero (raw values would silently rescale
-    the LR step-to-step, the very drift this function exists to prevent)."""
+    """Fewer than 2 surviving rollouts → std undefined; mark as filtered AND
+    zero advantage so the orchestrator's empty-batch retry kicks in instead
+    of the trainer running a wasted zero-gradient step (which also pollutes
+    monitoring metrics with non-zero IR / zero grad-norm readings)."""
     rollouts = [
         {"advantage": 1.0, "is_filtered": False},
         {"advantage": -1.0, "is_filtered": True},
     ]
     apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
     assert rollouts[0]["advantage"] == 0.0
-    assert rollouts[1]["advantage"] == -1.0  # filtered rollouts are untouched
+    assert rollouts[0]["is_filtered"] is True
+    assert "batch_norm_too_few_survivors" in rollouts[0]["filters"]
+    assert rollouts[1]["advantage"] == -1.0  # already-filtered rollouts untouched
 
 
 def test_apply_batch_advantage_normalization_zeros_constant_advantages():
-    """All surviving advantages identical (std == 0) → zero out (don't divide
-    by eps and explode to ~1e8)."""
+    """All surviving advantages identical (std == 0) → mark filtered and zero
+    out so the orchestrator retries instead of running 1/eps explosions."""
     rollouts = [
         {"advantage": 0.5, "is_filtered": False},
         {"advantage": 0.5, "is_filtered": False},
@@ -333,6 +336,8 @@ def test_apply_batch_advantage_normalization_zeros_constant_advantages():
     apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
     for r in rollouts:
         assert r["advantage"] == 0.0
+        assert r["is_filtered"] is True
+        assert "batch_norm_zero_std" in r["filters"]
 
 
 def test_apply_batch_advantage_normalization_raises_on_nonfinite():

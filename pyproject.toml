@@ -97,6 +97,11 @@ all = [
     # Opt back in via `pip install 'prime-rl[flash-attn-3]'` if you target
     # Hopper.
     "prime-rl[flash-attn-cute]",
+    # Pull the env packages (math-env, math500, etc.) used by the shipped
+    # POC configs. Without this `prime-rl[envs]` line, `uv sync --extra all`
+    # produces an install where `id = "math-env"` in the smoke config can't
+    # be resolved by verifiers.
+    "prime-rl[envs]",
 ]
 
 [dependency-groups]
