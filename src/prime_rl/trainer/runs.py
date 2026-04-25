@@ -404,6 +404,17 @@ class MultiRunManager:
         # job (~10 min). This validator runs every step on the RL trainer
         # via `DataLoader.wait_for_batch`, so a one-shot pickling regression
         # would brick every subsequent step.
+        # Use a step-versioned key so peers can detect a stale read. Without
+        # the version, if `pickle.dumps(sync_data)` raises on master BEFORE
+        # the `store.set("runs", ...)` write, the store key keeps its
+        # PREVIOUS sync's payload — peers happily decode the stale data and
+        # run `_create_run_data`/`_delete_run_data`/creation+deletion hooks
+        # on phantom runs for one-or-more steps before the next collective
+        # crashes. Tagging the payload with a counter master increments on
+        # every successful set lets peers detect "no new data this step"
+        # and fail fast.
+        sync_call_idx = getattr(self, "_sync_call_idx", 0) + 1
+        self._sync_call_idx = sync_call_idx
         try:
             if self.world.is_master:
                 # Include configs for new runs so non-master ranks have them
@@ -416,6 +427,7 @@ class MultiRunManager:
                     "scaling_factors": self.scaling_factors.cpu(),
                     "new_configs": new_configs,
                     "progress": self.progress,
+                    "_sync_call_idx": sync_call_idx,
                 }
                 self.store.set("runs", pickle.dumps(sync_data))
         finally:
@@ -429,6 +441,20 @@ class MultiRunManager:
             deleted_run_idxs = {run: self._last_synced_id_2_idx[run] for run in deleted_runs}
         else:
             sync_data: dict = pickle.loads(self.store.get("runs"))
+            received_idx = sync_data.get("_sync_call_idx")
+            if received_idx != sync_call_idx:
+                # Master failed to write the current sync's payload —
+                # peers are about to act on a stale snapshot from a
+                # previous sync. Bail loudly instead of mutating run
+                # state on phantom data. Master's exception will surface
+                # via clean_exit; peers raise here so the whole world
+                # fails together.
+                raise RuntimeError(
+                    f"MultiRunManager.synchronize_state: stale store payload "
+                    f"(expected sync #{sync_call_idx}, got #{received_idx}). "
+                    "Master likely raised before writing. Refusing to apply "
+                    "stale state to peer ranks."
+                )
             new_id_2_idx: dict[str, int] = sync_data["id_2_idx"]
             self.ready_to_update = sync_data["ready_to_update"]
             self.scaling_factors.copy_(sync_data["scaling_factors"])
