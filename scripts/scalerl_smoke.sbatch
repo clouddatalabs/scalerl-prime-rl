@@ -32,6 +32,13 @@ cd "$REPO_ROOT"
 # Slurm sets a minimal PATH; uv lives in /usr/local/bin on this cluster.
 export PATH="/usr/local/bin:$PATH"
 
+# The cluster's user shell sets HF_HUB_OFFLINE=1, which breaks first-time
+# dataset/model downloads. Override here for the smoke run; set to 1 once
+# everything is cached.
+export HF_HUB_OFFLINE=0
+# Keep HF cache on the shared filesystem so multi-node jobs share downloads.
+export HF_HOME="${HF_HOME:-/mnt/shared/hf-cache}"
+
 # Use the venv we set up in this repo. The .venv was populated with `uv sync
 # --all-extras` outside slurm; we don't re-sync here to avoid network races
 # between concurrent jobs.
