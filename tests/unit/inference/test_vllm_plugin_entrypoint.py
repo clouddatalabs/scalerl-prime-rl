@@ -46,6 +46,32 @@ def test_vllm_general_plugins_entrypoint_target_resolves():
     assert callable(fn), f"plugin target {target.value} did not load to a callable"
 
 
+def test_transformers_v5_compat_does_not_raise_at_module_top():
+    """Regression guard: invoking the umbrella entry point must not blow up
+    with NameError / ImportError before any monkey-patch runs.
+
+    vLLM's plugin loader catches plugin-load exceptions and only logs a
+    warning; an exception in the FIRST line of `transformers_v5_compat`
+    silently disables every patch — including the load-bearing
+    `monkey_patch_vllm_fp32_lm_head` for ScaleRL §3.2 train/inference
+    logprob parity. The previous coverage at
+    `test_vllm_general_plugins_entrypoint_target_resolves` only loaded the
+    callable but never called it; this test fills that gap.
+
+    Each patch has its own try/except inside the umbrella, so transient
+    vLLM-version mismatches are tolerated. What we're guarding here is
+    the umbrella's prologue (logger setup, transformers import) —
+    failures there bypass every per-patch try/except.
+    """
+    from prime_rl.inference.patches import transformers_v5_compat
+
+    # Should return cleanly, even on a vLLM pin where some internal
+    # patches log warnings about renamed symbols. The contract is
+    # "umbrella body executes without raising"; per-patch failures are
+    # logged and isolated.
+    transformers_v5_compat()
+
+
 def test_vllm_fp32_lm_head_enabled_env_parsing():
     """`PRIME_RL_VLLM_FP32_LM_HEAD` parsing must accept the documented truthy
     spellings and reject the documented falsy ones — drift here would silently

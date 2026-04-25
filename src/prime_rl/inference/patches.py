@@ -1,3 +1,4 @@
+import logging
 import os
 
 import torch
@@ -32,8 +33,6 @@ def promote_parallel_lm_head_to_fp32(model) -> int:
     upcasts the LM-head call site. Refuse loudly until the embedding
     side is plumbed through too.
     """
-    import logging
-
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
     if not vllm_fp32_lm_head_enabled():
