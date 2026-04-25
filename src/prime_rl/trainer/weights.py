@@ -134,18 +134,29 @@ def gather_weights_on_master(
         warnings.filterwarnings("ignore", category=UserWarning, module="torch.distributed.*")
 
         cpu_state = {}
-        for key, value in model.state_dict().items():
-            if isinstance(value, DTensor):
-                # only gather after the downcast to dtype as it will be faster
-                value = cast(DTensor, value.to(dtype)).full_tensor()
+        # Wrap the loop in try/finally so the barrier is reached on every
+        # rank regardless of master-side failure. Without finally, a
+        # master-only failure (assertion, host-OOM, disk-full, NFS hiccup)
+        # raises out of the loop on master while peer ranks (which call
+        # `full_tensor()` collectively but skip the master-only block)
+        # continue to the barrier — and then block until NCCL watchdog
+        # kills the job (~10 min). The fork's checkpoint-save path fires
+        # this every `[ckpt] interval`, so a transient FS error would
+        # cost a watchdog timeout per occurrence.
+        try:
+            for key, value in model.state_dict().items():
+                if isinstance(value, DTensor):
+                    # only gather after the downcast to dtype as it will be faster
+                    value = cast(DTensor, value.to(dtype)).full_tensor()
 
-            if is_master:
-                key = get_fqns(model, key)
-                assert len(key) == 1
-                key = next(iter(key))
-                # TODO(Sami) Blocking to avoid race condition, should make non-blocking long-term tho
-                cpu_state[key] = value.to("cpu", non_blocking=False)
-        torch.distributed.barrier()
+                if is_master:
+                    key = get_fqns(model, key)
+                    assert len(key) == 1
+                    key = next(iter(key))
+                    # TODO(Sami) Blocking to avoid race condition, should make non-blocking long-term tho
+                    cpu_state[key] = value.to("cpu", non_blocking=False)
+        finally:
+            torch.distributed.barrier()
 
     # Always clean up the state dict for HF compatibility
     if any(".base_layer." in key or "lora_A" in key or "lora_B" in key for key in cpu_state.keys()):

@@ -394,20 +394,32 @@ class MultiRunManager:
         All ranks then execute hooks and parameter resets together.
         """
 
-        if self.world.is_master:
-            # Include configs for new runs so non-master ranks have them
-            new_runs = self.id_2_idx.keys() - self._last_synced_id_2_idx.keys()
-            new_configs = {new_run: self.config[self.id_2_idx[new_run]] for new_run in new_runs}
+        # Wrap the master-only `pickle.dumps + store.set` in try/finally so
+        # the barrier is reached on every rank regardless of master failure.
+        # Without finally, `pickle.dumps(sync_data)` raising on master (e.g.
+        # an OrchestratorConfig carrying a non-picklable hook closure, a
+        # custom Path subclass, or any future schema change that introduces
+        # a non-picklable field) skips the barrier on master while peer
+        # ranks block at `dist.barrier()` until NCCL watchdog kills the
+        # job (~10 min). This validator runs every step on the RL trainer
+        # via `DataLoader.wait_for_batch`, so a one-shot pickling regression
+        # would brick every subsequent step.
+        try:
+            if self.world.is_master:
+                # Include configs for new runs so non-master ranks have them
+                new_runs = self.id_2_idx.keys() - self._last_synced_id_2_idx.keys()
+                new_configs = {new_run: self.config[self.id_2_idx[new_run]] for new_run in new_runs}
 
-            sync_data = {
-                "id_2_idx": self.id_2_idx,
-                "ready_to_update": self.ready_to_update,
-                "scaling_factors": self.scaling_factors.cpu(),
-                "new_configs": new_configs,
-                "progress": self.progress,
-            }
-            self.store.set("runs", pickle.dumps(sync_data))
-        dist.barrier()
+                sync_data = {
+                    "id_2_idx": self.id_2_idx,
+                    "ready_to_update": self.ready_to_update,
+                    "scaling_factors": self.scaling_factors.cpu(),
+                    "new_configs": new_configs,
+                    "progress": self.progress,
+                }
+                self.store.set("runs", pickle.dumps(sync_data))
+        finally:
+            dist.barrier()
 
         if self.world.is_master:
             # Calculate changes since last sync (this is what other ranks will see)
