@@ -159,6 +159,16 @@ if [ -z "${WANDB_MODE:-}" ]; then
     fi
 fi
 
+# Offline-mode persistence. `WANDB_MODE=offline` writes run artifacts to
+# `$WANDB_DIR/wandb/`; with no override that is `$CWD/wandb/`, which on
+# most clusters is the compute node's local scratch — lost when SLURM
+# reaps the job. Pin to `$OUTPUT_ROOT/wandb/` (shared with the slurm
+# stdout log dir, persistent across jobs) so a post-mortem `wandb sync
+# $OUTPUT_ROOT/wandb/offline-run-*` actually finds the data.
+if [ "${WANDB_MODE}" = "offline" ] && [ -z "${WANDB_DIR:-}" ]; then
+    export WANDB_DIR="$OUTPUT_ROOT"
+fi
+
 # Use the venv we set up in this repo. The .venv was populated with `uv sync
 # --extra all` outside slurm; we don't re-sync here to avoid network races
 # between concurrent jobs.
