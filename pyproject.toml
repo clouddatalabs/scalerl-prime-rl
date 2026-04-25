@@ -96,6 +96,16 @@ quack = [
 ]
 all = [
     "prime-rl[flash-attn]",
+    # SUPPLY-CHAIN NOTE: `[disagg]` pulls `deep_ep`, `deep_gemm`, and
+    # `nixl_cu12` from prebuilt wheels hosted on a personal GitHub user
+    # account (`samsja/research-pre-built-wheels` — see `[tool.uv.sources]`
+    # below). Release deletion, account rotation, or account compromise
+    # would break every fresh `uv sync --extra all` and could ship
+    # untrusted code. The shipped ScaleRL configs (`configs/scalerl_*/rl.toml`)
+    # do NOT use prefill/decode disaggregation, so these deps are
+    # unnecessary for the smoke path. For a hardened handoff, mirror these
+    # wheels under your own release infrastructure with hash pinning and
+    # update `[tool.uv.sources]` to point at the mirror.
     "prime-rl[disagg]",
     "prime-rl[quack]",
     # Intentionally NOT including flash-attn-3 here: the FA3 wheel ships

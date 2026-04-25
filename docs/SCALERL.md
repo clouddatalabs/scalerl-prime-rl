@@ -130,13 +130,26 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
   install cuda-toolkit-12-8`, or a module-load on HPC clusters). The
   install.sh preflight catches a missing `nvcc` and prints an actionable
   message rather than crashing mid-sync.
-- **Network from the COMPUTE node, OR pre-stage on the login node.** Many
-  managed clusters firewall compute nodes off the package mirrors. The
-  `uv sync` step needs egress to:
-  - `github.com` (CUTLASS, FA4 sources)
-  - `huggingface.co` (Qwen3-8B and dataset weights)
+- **Network egress allowlist.** `uv sync` runs on the **login node** by
+  default and needs:
+  - `pypi.org` and `files.pythonhosted.org` (the bulk of the dependency
+    tree — `uv.lock` resolves ~800 packages from PyPI)
+  - `download.pytorch.org` (torch+CUDA-12.8 wheels via the explicit
+    `[[tool.uv.index]]` declared in `pyproject.toml`)
+  - `astral.sh` (`scripts/install.sh` and `Dockerfile.cuda` curl uv's
+    install script from here)
+  - `github.com` (CUTLASS, FA4 sources, and the seven git-pinned deps —
+    transformers, flash-attn-4, verifiers, torchtitan, dion,
+    pydantic-config, flash-linear-attention)
   - `hub.primeintellect.ai` (the `[envs]` extra resolves verifiers
-    environments through Prime Intellect's index)
+    environments through Prime Intellect's index — login-node-only
+    requirement; never queried at runtime)
+  - `huggingface.co` (Qwen3-8B and dataset weights — needed wherever
+    you pre-stage `HF_HOME` from)
+
+  Compute-node egress is needed at **runtime** for:
+  - `huggingface.co` if `HF_HOME` is shared but unstaged (pre-staging
+    on the login node is strongly preferred)
   - For Terminal-Bench only: `ghcr.io/laude-institute/...` AND
     `docker.io` (the rollout host builds each task's
     `environment/Dockerfile` locally with `build_local_images=True`; 26
@@ -146,9 +159,19 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
     those task builds to fail and the rollouts then write
     `reward=0` — indistinguishable from model failure.
 
-  If your compute nodes can't reach any of these, pre-stage on the login
-  node: `hf download Qwen/Qwen3-8B`, `bash scripts/fix-flash-attn-cute.sh`,
-  and `docker pull` the TB base images you'll need.
+  If your login node lacks egress to PyPI / pytorch.org / astral.sh,
+  pre-build the venv on a host that does and ship the `.venv` directory
+  along with the repo. If your compute nodes can't reach the runtime
+  endpoints, pre-stage on the login node: `hf download Qwen/Qwen3-8B`,
+  `bash scripts/fix-flash-attn-cute.sh`, and `docker pull` the TB base
+  images you'll need.
+- **`sbatch --time=` may exceed your QoS cap.** The shipped sbatch
+  defaults to `#SBATCH --time=12:00:00`. Many shared clusters cap MaxTime
+  at 4 or 8 hours per QoS — submission rejects with
+  `sbatch: error: Job time limit exceeds QoS max`. Override at submit
+  time: `sbatch -t HH:MM:SS -p <partition> ... scripts/scalerl_smoke.sbatch`.
+  The smoke run typically completes the first paper-batch step within an
+  hour even on a cold venv.
 - **`$HOME` and `HF_HOME` must be visible to compute nodes.** The
   Quickstart above pre-downloads Qwen3-8B (~16 GB) on the login node into
   `$REPO_ROOT/hf-cache`, and the sbatch defaults `HF_HOME` to that path
