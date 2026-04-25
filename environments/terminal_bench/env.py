@@ -900,19 +900,32 @@ def _truncate(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
 async def _harbor_reward(state: vf.State, **kwargs) -> float:
     """Read the float written by `finalize_rollout`.
 
-    If the reward path failed (`tb_reward_setup_error` set), raise instead of
+    If the reward path OR the rollout-setup path failed, raise instead of
     returning 0.0. A 0.0 reward feeds NPR's pass-rate Welford update and the
     advantage's group baseline as a real "model failed" signal — biasing the
     policy against tasks whose plumbing is flaky rather than tasks the model
     actually fails. Raising here lets verifiers' run_rollout mark the
     rollout's `error` field, which the scheduler already reschedules on.
+
+    Honor BOTH error tags:
+    - `tb_reward_setup_error`: set in `finalize_rollout` when reward
+      computation itself fails (Docker exec error, unparseable
+      reward.txt, missing tests/ dir).
+    - `tb_setup_error`: set in `setup_state` when the rollout container
+      could not even start (image build timeout, registry-whitelist
+      block, EACCES on docker.sock). Previously only `tb_reward_setup_error`
+      fired here — image-build failures slipped through as
+      `state.get("tb_reward") or 0.0 → 0.0` and got attributed to the
+      model. Same class of bug as the in-container egress failure mode
+      (see comment block in `finalize_rollout`).
     """
-    setup_error = state.get("tb_reward_setup_error")
-    if setup_error:
-        raise RuntimeError(
-            f"terminal_bench_local: reward computation failed (rollout error, "
-            f"NOT a real zero reward): {setup_error}"
-        )
+    for key in ("tb_reward_setup_error", "tb_setup_error"):
+        setup_error = state.get(key)
+        if setup_error:
+            raise RuntimeError(
+                f"terminal_bench_local: {key} (rollout error, NOT a real zero "
+                f"reward): {setup_error}"
+            )
     return float(state.get("tb_reward") or 0.0)
 
 
