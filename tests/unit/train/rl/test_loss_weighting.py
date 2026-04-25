@@ -208,6 +208,30 @@ def _identity_custom_loss(inputs: LossInputs, **_: object) -> LossOutputs:
     return LossOutputs(loss=torch.tensor(1.0), metrics={})
 
 
+def test_pad_micro_batch_extends_sequence_loss_weights_for_phantom_split():
+    """Padding restarts position_ids at 0, which get_response_lengths reads as a new
+    sequence. We must add a [0.0] weight so length matches num_packed and the phantom
+    contributes nothing under loss_scale_mode='sequence'/'none'.
+    """
+    from prime_rl.trainer.batch import pad_micro_batch
+    from prime_rl.transport.types import MicroBatch
+
+    mb = MicroBatch(
+        input_ids=[1, 2, 3, 4, 5],
+        loss_mask=[True, True, True, True, True],
+        advantages=[1.0, 1.0, 1.0, 1.0, 1.0],
+        inference_logprobs=[0.0] * 5,
+        position_ids=[0, 1, 2, 3, 4],
+        temperatures=[1.0] * 5,
+        sequence_loss_weights=[0.5],
+        lora_num_tokens=[5],
+    )
+    pad_micro_batch(mb, pad_to_multiple_of=8)
+    # Padding adds 3 tokens with position_ids=[0,1,2] — a phantom sequence boundary.
+    assert mb.sequence_loss_weights == [0.5, 0.0]
+    assert len(mb.input_ids) == 8
+
+
 def test_setup_loss_fn_custom_loss_attaches_loss_scale_mode():
     cfg = CustomLossConfig(
         import_path="tests.unit.train.rl.test_loss_weighting._identity_custom_loss",
