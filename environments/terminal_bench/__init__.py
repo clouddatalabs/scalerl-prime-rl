@@ -19,10 +19,9 @@ Preconditions:
   trigger a pull which dominates time-to-first-step.
 
 Harbor-format tasks are checked in under ``environments/terminal_bench/tasks/``
-— no external dataset download required. Some entries in that directory are
-symlinks pointing outside the repo (e.g. to a sibling ``opencode_harbor``
-tree); ``configs/scalerl_terminal_bench/rl.toml`` enumerates only the
-runnable ones, so the runtime list is the source of truth, not ``ls tasks/``.
+— no external dataset download required. The runnable train/test split is
+enumerated by ``configs/scalerl_terminal_bench/rl.toml``; treat that config
+as the source of truth for which task directories the runtime will exercise.
 
 Usage in an orchestrator config (``name`` is required when more than one
 env entry references this module — `validate_unique_env_names` rejects

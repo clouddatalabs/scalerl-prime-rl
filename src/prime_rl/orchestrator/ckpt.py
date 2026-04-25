@@ -16,6 +16,13 @@ class Progress:
     total_tokens: int = 0
     total_samples: int = 0
     total_problems: int = 0
+    # Monotonic group_id counter from the scheduler. Persisted across resume so
+    # rollouts saved by `Buffer.save` (with stamped `group_id`s in {0..N})
+    # don't collide with freshly-issued ids on resume — that collision would
+    # silently merge unrelated prompts in `apply_prompt_average_sequence_weights`'s
+    # group-keyed normalization. The orchestrator copies into / out of
+    # `Scheduler.next_group_id` around save/load.
+    next_group_id: int = 0
 
 
 class CheckpointManager:

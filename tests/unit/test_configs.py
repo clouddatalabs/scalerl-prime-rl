@@ -277,23 +277,50 @@ def test_rl_config_rejects_mismatched_fp32_lm_head():
         RLConfig.model_validate(
             {
                 **_RL_BASE,
-                "trainer": {"model": {"fp32_lm_head": True}},
+                "trainer": {"model": {"fp32_lm_head": True}, "matmul_precision": "highest"},
                 "inference": {"model": {"fp32_lm_head": False}},
             }
         )
 
 
 def test_rl_config_accepts_matched_fp32_lm_head():
-    """fp32_lm_head=True on both sides validates."""
+    """fp32_lm_head=True on both sides validates (with matmul_precision=highest)."""
     config = RLConfig.model_validate(
         {
             **_RL_BASE,
-            "trainer": {"model": {"fp32_lm_head": True}},
+            "trainer": {"model": {"fp32_lm_head": True}, "matmul_precision": "highest"},
             "inference": {"model": {"fp32_lm_head": True}},
         }
     )
     assert config.trainer.model.fp32_lm_head is True
     assert config.inference.model.fp32_lm_head is True
+
+
+def test_rl_config_rejects_fp32_lm_head_with_high_matmul_precision():
+    """fp32_lm_head=True silently runs FP32 matmuls in TF32 unless
+    matmul_precision='highest'. The default 'high' setting defeats the §3.2
+    train/inference logprob parity that fp32_lm_head exists for."""
+    with pytest.raises(ValidationError, match="matmul_precision='highest'"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "trainer": {"model": {"fp32_lm_head": True}, "matmul_precision": "high"},
+                "inference": {"model": {"fp32_lm_head": True}},
+            }
+        )
+
+
+def test_rl_config_rejects_fp32_lm_head_with_default_matmul_precision():
+    """The trainer default for matmul_precision is 'high'; fp32_lm_head=True
+    without explicit override is the most likely footgun and must fail loudly."""
+    with pytest.raises(ValidationError, match="matmul_precision='highest'"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "trainer": {"model": {"fp32_lm_head": True}},
+                "inference": {"model": {"fp32_lm_head": True}},
+            }
+        )
 
 
 def test_rl_config_skips_fp32_lm_head_check_when_inference_omitted():
@@ -308,7 +335,7 @@ def test_rl_config_skips_fp32_lm_head_check_when_inference_omitted():
         warnings.simplefilter("always")
         config = RLConfig.model_validate(
             {
-                "trainer": {"model": {"fp32_lm_head": True}},
+                "trainer": {"model": {"fp32_lm_head": True}, "matmul_precision": "highest"},
                 "orchestrator": {},
                 "inference": None,
             }
@@ -446,6 +473,7 @@ def test_rl_config_rejects_fp32_lm_head_with_fp8_weight_transfer():
                 },
                 "trainer": {
                     "model": {"fp32_lm_head": True, "impl": "custom"},
+                    "matmul_precision": "highest",
                 },
                 "inference": {"model": {"fp32_lm_head": True}},
             }

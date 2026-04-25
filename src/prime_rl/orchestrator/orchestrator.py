@@ -82,6 +82,18 @@ SHUTDOWN_TIMEOUT_S = 300
 MAX_EMPTY_BATCH_ATTEMPTS = 3
 
 
+def _resolve_max_empty_batch_attempts(paper_faithful_empty_batch: bool) -> int:
+    """Resolve the empty-batch retry budget from the experimental flag.
+
+    ScaleRL §3.4 zero-variance filtering is *drop-don't-refill*; that's the
+    paper-faithful path (single attempt). The default keeps an engineering
+    retry budget (MAX_EMPTY_BATCH_ATTEMPTS) so a transiently-bad batch
+    doesn't crash the run. Extracted so unit tests can pin the table without
+    booting the orchestrator.
+    """
+    return 1 if paper_faithful_empty_batch else MAX_EMPTY_BATCH_ATTEMPTS
+
+
 @clean_exit
 async def orchestrate(config: OrchestratorConfig):
     # Initialize the logger
@@ -297,6 +309,10 @@ async def orchestrate(config: OrchestratorConfig):
         ckpt_manager.load(progress, buffer, step=checkpoint_step)
         logger.info(f"Resuming training from checkpoint step {checkpoint_step}")
         scheduler.ckpt_step = progress.step  # Always resume from the latest checkpoint
+        # Resume group_id sequence past the high-water mark; otherwise the
+        # fresh scheduler hands out colliding ids that prompt-avg keying
+        # would silently merge with old rollouts in rollout_buffer.jsonl.
+        scheduler.next_group_id = progress.next_group_id
         if config.eval and config.eval.skip_eval_on_resume:
             prev_ckpt_step = scheduler.ckpt_step
             last_eval_steps = {name: scheduler.ckpt_step for name in last_eval_steps}
@@ -343,6 +359,10 @@ async def orchestrate(config: OrchestratorConfig):
         ):
             logger.info(f"Saving checkpoint at step {progress.step}")
             save_ckpt_start_time = time.perf_counter()
+            # Snapshot the live scheduler counter into Progress before save —
+            # a fresh resume reads it back so future group_ids don't collide
+            # with ids stamped on rollouts already on disk.
+            progress.next_group_id = scheduler.next_group_id
             ckpt_manager.save(progress, buffer, step=progress.step)
             save_ckpt_time = time.perf_counter() - save_ckpt_start_time
 
@@ -417,8 +437,8 @@ async def orchestrate(config: OrchestratorConfig):
         # single attempt — ScaleRL §3.4 specifies zero-variance filtering as
         # *drop, don't refill* (vs DAPO dynamic resampling). The all-empty
         # case is then surfaced as a real failure rather than masked by retry.
-        max_attempts = (
-            1 if config.experimental.paper_faithful_empty_batch else MAX_EMPTY_BATCH_ATTEMPTS
+        max_attempts = _resolve_max_empty_batch_attempts(
+            config.experimental.paper_faithful_empty_batch
         )
         generate_completions_time = 0.0
         train_rollouts: list[vf.RolloutOutput] = []

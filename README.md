@@ -96,10 +96,12 @@ Currently, you **need at least one NVIDIA GPU to use PRIME-RL**. If you don't al
 > step 1 (`git clone https://github.com/clouddatalabs/scalerl-prime-rl.git`)
 > instead. The block is preserved for reference / upstream parity only.
 
-```bash
-# UPSTREAM-ONLY: do not use on this fork. See docs/SCALERL.md instead.
-curl -sSL https://raw.githubusercontent.com/PrimeIntellect-ai/prime-rl/main/scripts/install.sh | bash
-```
+<!--
+Removed from copy-pasteable form: curl-piping the upstream install.sh on this
+fork clones plain upstream/prime-rl and skips every ScaleRL ingredient. Use
+docs/SCALERL.md Quickstart step 1 instead.
+-->
+On this fork: see [docs/SCALERL.md](docs/SCALERL.md) Quickstart.
 
 <details>
 <summary>

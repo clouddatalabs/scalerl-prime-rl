@@ -23,8 +23,8 @@ Each individual task directory under `tasks/` may carry its own
 `LICENSE`, `task.toml::license`, or attribution metadata sourced from
 the upstream task author. The aggregate `LICENSE` file at the
 repository root applies to fork-original code (`src/prime_rl/*`,
-`baker/*`, configs, scripts); imported task fixtures retain their
-upstream license terms.
+configs, scripts); imported task fixtures retain their upstream
+license terms.
 
 ## Modifications in this fork
 

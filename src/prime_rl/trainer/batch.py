@@ -213,6 +213,17 @@ def pad_micro_batch(micro_batch: MicroBatch, pad_to_multiple_of: int) -> MicroBa
     )
     if micro_batch.mm_token_type_ids is not None:
         micro_batch.mm_token_type_ids.extend([0] * padding_size)
+    # routed_experts is per-token; without padding here, the downstream
+    # `torch.tensor(...).reshape(...)` in `_micro_batch_to_tensor` would
+    # either crash on shape mismatch or silently misalign router-replay
+    # supervision with token positions. Padding entries get a single layer/topk
+    # entry of -1s sized like the existing entries — loss_mask is False on
+    # padding tokens so router-replay loss ignores them, but we keep the
+    # tensor shape consistent with `len(input_ids)`.
+    if micro_batch.routed_experts is not None and len(micro_batch.routed_experts) > 0:
+        layers_topk = micro_batch.routed_experts[0]
+        pad_entry = [[-1 for _ in row] for row in layers_topk]
+        micro_batch.routed_experts.extend([pad_entry] * padding_size)
     # The padding tokens get position_ids = range(padding_size) above, which restarts at 0.
     # `get_response_lengths` (utils.py) reads position_id resets as sequence boundaries — but
     # only when the NEXT position_id is 1 (otherwise the 0 is treated as trailing padding of
@@ -239,6 +250,11 @@ def _make_dummy_batch(source: MicroBatch) -> MicroBatch:
     dummy = copy.deepcopy(source)
     dummy.advantages = [0.0] * len(dummy.input_ids)
     dummy.loss_mask = [False] * len(dummy.input_ids)
+    # The IS-ratio runtime guard rejects any micro-batch carrying the synth
+    # flag against CISPO/Default. A dummy is loss-mask-zero, so it contributes
+    # nothing — but the deepcopy would otherwise inherit the source's flag and
+    # trip the guard before the loop short-circuits on zero loss_mask. Reset it.
+    dummy.inference_logprobs_synthesized = False
     # Zero the sequence weights so the dummy contributes nothing to the loss when
     # loss_scale_mode is "sequence" / "none". For token-mode runs the source's
     # weights are the neutral `[1.0]*N` default, and `compute_loss` rejects any
@@ -337,7 +353,10 @@ def apply_prompt_average_sequence_weights(
 
     # If any rollout has a group_id, every rollout must — partial assignment
     # would silently mix the two keying schemes and miscount num_prompts.
-    have_gid = [getattr(r, "group_id", None) is not None for r in rollouts]
+    # Strict access: TrainingSample.group_id is declared on the msgspec schema
+    # (default None); a getattr fallback would silently downgrade to the
+    # legacy keying path on a schema rename.
+    have_gid = [r.group_id is not None for r in rollouts]
     if any(have_gid) and not all(have_gid):
         raise ValueError(
             "prompt_average_loss requires consistent group_id assignment: some rollouts "
@@ -353,7 +372,9 @@ def apply_prompt_average_sequence_weights(
         else:
             if rollout.example_id is None:
                 raise ValueError("example_id is required when prompt_average_loss is enabled")
-            env_name = getattr(rollout, "env_name", None)
+            # Strict access — env_name is a schema field; getattr fallback
+            # would silently lose the cross-env disambiguation contract.
+            env_name = rollout.env_name
             if not env_name:
                 raise ValueError(
                     "env_name is required on every sample when prompt_average_loss is enabled "

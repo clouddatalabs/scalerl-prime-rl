@@ -934,16 +934,19 @@ class OrchestratorExperimentalConfig(BaseConfig):
         bool,
         Field(
             description=(
-                "Opt into ScaleRL §3.4-faithful behavior on all-filtered batches: when every "
-                "rollout in a step is filtered (zero-variance, mask-empty, etc.), do NOT "
-                "regenerate the batch and do NOT crash. Instead drop the step's optimizer "
-                "update entirely and advance to the next batch — the recipe's zero-variance "
-                "filtering is *not* DAPO's dynamic resampling. Default off keeps the "
-                "engineering guardrail (retry up to MAX_EMPTY_BATCH_ATTEMPTS, then crash) so "
-                "operator misconfiguration of an env that always returns zero-variance "
-                "rollouts still surfaces loudly. Set true only when you want the paper's "
-                "exact behavior — typically on a small training pool where the all-empty "
-                "boundary is a real possibility (e.g. 18-task TB train split)."
+                "Opt into ScaleRL §3.4-aligned no-refill behavior on all-filtered batches. "
+                "ScaleRL drops zero-variance prompts from the current effective batch and "
+                "does NOT refill (vs DAPO's dynamic resampling). The default behavior here "
+                "retries up to MAX_EMPTY_BATCH_ATTEMPTS times before crashing, which is an "
+                "engineering guardrail that departs from the paper. Setting this flag true "
+                "removes the retry: a single generation attempt, then crash if the entire "
+                "batch is filtered out. The recipe is silent on the all-empty boundary, so "
+                "we still surface it as a real failure (writes control/evicted.txt) rather "
+                "than truly skipping the optimizer step — implementing skip would require "
+                "coordinated trainer-side support that this fork does not add. Use this "
+                "flag on small training pools where the all-empty boundary is plausible "
+                "(e.g. 18-task TB train split) so transient zero-variance does not get "
+                "papered over by retry."
             ),
         ),
     ] = False

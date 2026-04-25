@@ -995,14 +995,11 @@ def load_environment(
     root = Path(task_root)
     if not root.is_absolute():
         # Anchor relative paths to this env module's repo root, NOT the
-        # caller's cwd. Prior code fell back to `Path.cwd()` if RESEARCH_ROOT
-        # was unset (it never is) — that worked only because the smoke
-        # sbatch happens to `cd $REPO_ROOT` first. A caller from another
-        # directory (e.g. baker eval --rescore, ad-hoc unit invocation,
-        # resume from a different cwd) would otherwise silently pick up a
-        # sibling repo's tasks/ dir or FileNotFoundError on cwd.
-        # `Path(__file__).parent` is `environments/terminal_bench/`; two
-        # parents up is the repo root.
+        # caller's cwd. A caller from a directory other than the repo root
+        # (ad-hoc unit invocation, resume from a different cwd) would
+        # otherwise silently pick up a sibling repo's tasks/ dir or
+        # FileNotFoundError on cwd. `Path(__file__).parent` is
+        # `environments/terminal_bench/`; two parents up is the repo root.
         repo_root = Path(__file__).resolve().parent.parent.parent
         root = (repo_root / root).resolve()
     if not root.is_dir():
@@ -1026,11 +1023,9 @@ def load_environment(
     # routing to the correct env server (see ``prime_rl.orchestrator.
     # buffer.Buffer`` and ``Environment._ensure_task`` which fills it
     # with ``self.env_id`` when absent). Overloading it with per-sample
-    # names -- as the pre-fix version of this file did -- made every
-    # rollout land with ``state["task"] == "environments.terminal_bench"``
-    # inside ``setup_state`` instead of the real task name. The other
-    # environments (tool_use_demo, resolve_trajectory, chat_smoke) all
-    # follow the same convention.
+    # names made every rollout land with
+    # ``state["task"] == "environments.terminal_bench"`` inside
+    # ``setup_state`` instead of the real task name.
     rows: list[dict[str, Any]] = []
     for idx, spec in enumerate(specs):
         for _ in range(max(1, rollouts_per_task_in_dataset)):

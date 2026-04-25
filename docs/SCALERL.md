@@ -211,9 +211,8 @@ Two reference configs ship with the recipe wired up:
   `sbatch scripts/scalerl_smoke.sbatch`.
 - **`configs/scalerl_terminal_bench/rl.toml`** — Snowflake POC handoff config. Qwen3-8B on
   the in-tree Terminal-Bench Harbor tasks (`environments/terminal_bench/`). 28 usable
-  committed tasks split 18 train / 10 test. (Two task names — `fix-code-vulnerability`
-  Requires a Docker daemon reachable from the rollout process (host or
-  `/var/run/docker.sock` bind-mounted into the container).
+  committed tasks split 18 train / 10 test. Requires a Docker daemon reachable from the
+  rollout process (host or `/var/run/docker.sock` bind-mounted into the container).
 
 Both configs exercise the full ScaleRL knob set (CISPO, prompt-level averaging, batch-level
 advantage normalization, FP32 LM-head on both sides, NPR @ 0.9, `max_async_level=8` with the
@@ -244,5 +243,3 @@ Each ingredient cites its origin in the config docstrings. Primary sources:
 - No-Positive-Resampling: Polaris (An et al., 2025), 0.9 threshold.
 - FP32 LM-head: Minimax-M1 §3.2.
 
-For a deeper write-up of which features are server-side vs client-side and the API contract this
-fork assumes, see the upstream POC plan doc (kept in the parent research repo, not shipped here).

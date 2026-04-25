@@ -472,6 +472,37 @@ class RLConfig(BaseConfig):
     # that's the load-bearing guard for the bypass path.
 
     @model_validator(mode="after")
+    def validate_fp32_lm_head_matmul_precision(self):
+        """fp32_lm_head=True is silently downgraded to TF32 unless
+        matmul_precision="highest".
+
+        PyTorch's `torch.set_float32_matmul_precision("high")` (the
+        TrainerConfig default) relaxes FP32 matmuls to TF32 (10-bit
+        mantissa) on NVIDIA Ampere+. The LM-head matmul in
+        `trainer.models.layers.lm_head` is a plain `F.linear(hidden.float(),
+        weight.float())`, so it honors that global flag — defeating the
+        very §3.2 / MiniMax-M1 §3.2 train/inference logprob parity that
+        fp32_lm_head exists to enforce. The shipped scalerl_*/rl.toml
+        configs already override to "highest", but a child config that
+        copy-pastes only `fp32_lm_head=true` would silently get TF32.
+        Reject the combination at config load.
+        """
+        if not self.trainer.model.fp32_lm_head:
+            return self
+        if self.trainer.matmul_precision != "highest":
+            raise ValueError(
+                "trainer.model.fp32_lm_head=True requires "
+                f"trainer.matmul_precision='highest' (got "
+                f"{self.trainer.matmul_precision!r}). 'high'/'medium' "
+                "silently relaxes FP32 matmuls to TF32 (10-bit mantissa) "
+                "on NVIDIA Ampere+, which defeats the §3.2 "
+                "train/inference logprob-parity ingredient that "
+                "fp32_lm_head exists for. Set [trainer] matmul_precision "
+                "= \"highest\" or disable fp32_lm_head."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_fp32_lm_head_no_fp8_transfer(self):
         """fp32_lm_head + quantize_in_weight_transfer=true silently undoes
         the §3.2 ingredient.
