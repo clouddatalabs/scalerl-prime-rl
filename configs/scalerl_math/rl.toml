@@ -38,6 +38,11 @@ name = "Qwen/Qwen3-8B"
 
 [ckpt]
 interval = 100
+# Cap retention so a long run doesn't fill the cache with Qwen3-8B + optimizer
+# state checkpoints (~16+ GB each). Keep the 3 most-recent steps for quick
+# resume, plus every 500-step milestone. Tune for your storage budget.
+keep_last = 3
+keep_interval = 500
 
 # NCCL broadcast at max_async_level=8 requires the experimental opt-in flag
 # (validated on B200/EFA per ScaleRL Pipeline-RL §3.1).

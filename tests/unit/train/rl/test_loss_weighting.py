@@ -93,24 +93,30 @@ def test_apply_prompt_average_sequence_weights_disambiguates_envs():
     `example_id` is only unique within an env, so a multi-env training batch
     where env_a/example_id=0 and env_b/example_id=0 are both present would
     fold them into one prompt under the old code (snowflake_poc_critique.md §3).
-    Group key is now (env_name, example_id) so the four samples below count
-    as TWO prompts of two samples each, not one prompt of four.
+    Group key is now (env_name, example_id) so the samples below count as
+    TWO prompts.
+
+    Use UNEQUAL completion lengths across envs (env_a samples 10 tokens each,
+    env_b samples 20 tokens each) so the correct and broken behaviors yield
+    different weights — a uniform-shapes test would coincide and let the bug
+    sneak back.
     """
     rollouts = [
         _make_sample(example_id="0", completion_len=10, env_name="env_a"),
         _make_sample(example_id="0", completion_len=10, env_name="env_a"),
-        _make_sample(example_id="0", completion_len=10, env_name="env_b"),
-        _make_sample(example_id="0", completion_len=10, env_name="env_b"),
+        _make_sample(example_id="0", completion_len=20, env_name="env_b"),
+        _make_sample(example_id="0", completion_len=20, env_name="env_b"),
     ]
     weights = apply_prompt_average_sequence_weights(rollouts, seq_len=4096)
-    # Two prompts, each with total = 20 trainable tokens.
-    # per-sample weight = 1 / (20 * 2) = 0.025 — every sample gets the same.
-    assert weights == pytest.approx([0.025, 0.025, 0.025, 0.025])
-    # Sanity for the bug: if the key were just example_id, num_prompts would be 1
-    # and total would be 40, giving 1/(40*1) = 0.025 too — same number, but for
-    # the wrong reason. Verify by check the multi-prompt structure: total per
-    # prompt should equal 1/num_prompts.
-    summed_losses = [10, 10, 10, 10]
+    # Correct: 2 prompts. env_a total = 20 → w = 1/(20*2) = 0.025; env_b total = 40 → w = 0.0125.
+    assert weights == pytest.approx([0.025, 0.025, 0.0125, 0.0125])
+    # If the key were just example_id (broken), num_prompts=1 and total=60 →
+    # uniform w = 1/60 ≈ 0.01667 across all four samples. Pin the divergence.
+    broken_uniform_weight = 1.0 / 60.0
+    assert weights[0] != pytest.approx(broken_uniform_weight)
+    assert weights[2] != pytest.approx(broken_uniform_weight)
+    # Sanity: with summed losses = trainable_tokens, total = mean over prompts of per-token mean = 1.
+    summed_losses = [10, 10, 20, 20]
     total = sum(w * l for w, l in zip(weights, summed_losses))
     assert total == pytest.approx(1.0)
 
@@ -346,6 +352,65 @@ def test_pad_micro_batch_extends_sequence_loss_weights_for_phantom_split():
     # Padding adds 3 tokens with position_ids=[0,1,2] — a phantom sequence boundary.
     assert mb.sequence_loss_weights == [0.5, 0.0]
     assert len(mb.input_ids) == 8
+
+
+def test_pad_micro_batch_padding_size_one_does_not_create_phantom_sequence():
+    """When `padding_size == 1`, the trailing single `0` is folded by
+    get_response_lengths into the previous sequence (it only treats `0` as a
+    boundary when the NEXT position_id is 1). Appending a phantom weight in
+    that case would produce a length-mismatch crash in compute_loss.
+    """
+    from prime_rl.trainer.batch import pad_micro_batch
+    from prime_rl.trainer.utils import get_response_lengths
+    from prime_rl.transport.types import MicroBatch
+
+    mb = MicroBatch(
+        input_ids=[1, 2, 3, 4, 5, 6, 7],
+        loss_mask=[True] * 7,
+        advantages=[1.0] * 7,
+        inference_logprobs=[0.0] * 7,
+        position_ids=[0, 1, 2, 3, 4, 5, 6],
+        temperatures=[1.0] * 7,
+        sequence_loss_weights=[0.5],
+        lora_num_tokens=[7],
+    )
+    pad_micro_batch(mb, pad_to_multiple_of=8)
+    # padding_size = 1 → position_ids end with [..., 6, 0]. The trailing 0 is folded
+    # into the last sequence by get_response_lengths.
+    assert len(mb.input_ids) == 8
+    assert mb.position_ids[-1] == 0
+    num_packed = len(get_response_lengths(torch.tensor(mb.position_ids)))
+    assert num_packed == 1, f"padding_size=1 must not create a phantom sequence; got {num_packed}"
+    assert len(mb.sequence_loss_weights) == num_packed, (
+        "sequence_loss_weights length must match num_packed_sequences for compute_loss to accept it"
+    )
+
+
+def test_pad_micro_batch_packed_two_samples_then_padding_size_one():
+    """Two real packed sequences plus padding_size=1: phantom-detection still works.
+    The intra-sequence-2 boundary at position_ids[3]==0 is detected because
+    position_ids[4]==1; the trailing pad `0` is folded into seq 2.
+    """
+    from prime_rl.trainer.batch import pad_micro_batch
+    from prime_rl.trainer.utils import get_response_lengths
+    from prime_rl.transport.types import MicroBatch
+
+    mb = MicroBatch(
+        # Two packed sequences of length 3 and 4: positions [0,1,2, 0,1,2,3] (len 7)
+        input_ids=[1, 2, 3, 4, 5, 6, 7],
+        loss_mask=[True] * 7,
+        advantages=[1.0] * 7,
+        inference_logprobs=[0.0] * 7,
+        position_ids=[0, 1, 2, 0, 1, 2, 3],
+        temperatures=[1.0] * 7,
+        sequence_loss_weights=[0.3, 0.7],
+        lora_num_tokens=[7],
+    )
+    pad_micro_batch(mb, pad_to_multiple_of=8)
+    assert len(mb.input_ids) == 8
+    num_packed = len(get_response_lengths(torch.tensor(mb.position_ids)))
+    assert num_packed == 2
+    assert len(mb.sequence_loss_weights) == num_packed
 
 
 def test_setup_loss_fn_custom_loss_attaches_loss_scale_mode():

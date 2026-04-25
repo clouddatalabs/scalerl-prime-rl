@@ -262,6 +262,33 @@ def test_rl_config_skips_fp32_lm_head_check_when_inference_omitted():
     assert config.trainer.model.fp32_lm_head is True
 
 
+def test_rl_config_rejects_prompt_average_loss_with_token_scale_mode():
+    """orchestrator.prompt_average_loss=True without sequence/none scale mode would
+    silently train under token-mean reduction — the packer's per-sequence weights are
+    discarded by compute_loss when loss_scale_mode='token'."""
+    with pytest.raises(ValidationError, match="prompt_average_loss=true requires"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "orchestrator": {"prompt_average_loss": True},
+                "trainer": {"loss": {"type": "default", "loss_scale_mode": "token"}},
+            }
+        )
+
+
+def test_rl_config_accepts_prompt_average_loss_with_sequence_scale_mode():
+    """The same combo with sequence-mode loss validates."""
+    config = RLConfig.model_validate(
+        {
+            **_RL_BASE,
+            "orchestrator": {"prompt_average_loss": True},
+            "trainer": {"loss": {"type": "cispo", "loss_scale_mode": "sequence"}},
+        }
+    )
+    assert config.orchestrator.prompt_average_loss is True
+    assert config.trainer.loss.loss_scale_mode == "sequence"
+
+
 def test_rl_config_root_rejects_nccl_async_without_override():
     """Setting NCCL + max_async_level > 1 at the RL root with no override on either
     sub-config must still be rejected. The auto_setup_weight_broadcast validator

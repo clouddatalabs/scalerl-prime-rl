@@ -424,7 +424,10 @@ class ModelConfig(BaseModelConfig):
         # path). impl="auto" picks one based on the model — accept it too.
         if self.attn == "fa4" and self.impl not in ("hf", "custom", "auto"):
             raise ValueError(
-                f"Flash attention 4 is only supported with impl in (\"hf\", \"custom\", \"auto\"); got impl={self.impl!r}"
+                f"Flash attention 4 is only supported with model.impl in {{\"hf\", \"custom\", \"auto\"}}; "
+                f"got impl={self.impl!r}. Use model.impl = \"auto\" (recommended) to let prime-rl "
+                "pick the right path for the model class, or model.impl = \"hf\" to force the "
+                "transformers AttentionInterface bridge for dense models."
             )
         return self
 
@@ -659,10 +662,18 @@ class CheckpointConfig(BaseConfig):
     ] = False
 
 
-# ScaleRL §3.3 / DAPO "Token-Level Policy Gradient Loss" — knob describing how each
-# packed sequence's loss is scaled before reduction. "token" is the upstream behavior
-# (sum / total_trainable_tokens); "sequence" / "none" defer scaling to per-sequence
-# weights set by the packer (e.g. prompt-level averaging).
+# ScaleRL §3.3 / DAPO "Token-Level Policy Gradient Loss" — describes how the packer's
+# per-sequence summed loss is reduced over the batch.
+#   "token":    `sum_i loss_i / total_trainable_tokens`. Upstream prime-rl default.
+#               Ignores `sequence_loss_weights` if the packer set them — pair with
+#               `OrchestratorConfig.prompt_average_loss = false`.
+#   "sequence": `sum_i (sequence_loss_weights[i] * loss_i)`. The packer encodes
+#               normalization in the weights (e.g. ScaleRL prompt-averaging fills
+#               them with `1 / (total_p * num_prompts)`).
+#   "none":     identical to "sequence" today — kept as a separate name for callers
+#               that want to signal "I'm passing raw weights, don't add an extra
+#               token-count divisor." Same execution path; pick whichever name reads
+#               better at the call site.
 LossScaleMode: TypeAlias = Literal["token", "sequence", "none"]
 
 

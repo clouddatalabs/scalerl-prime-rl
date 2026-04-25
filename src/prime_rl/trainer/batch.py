@@ -179,11 +179,13 @@ def pad_micro_batch(micro_batch: MicroBatch, pad_to_multiple_of: int) -> MicroBa
     if micro_batch.mm_token_type_ids is not None:
         micro_batch.mm_token_type_ids.extend([0] * padding_size)
     # The padding tokens get position_ids = range(padding_size) above, which restarts at 0.
-    # `get_response_lengths` reads position_id resets as sequence boundaries, so the padding
-    # block looks like a phantom sequence to compute_loss. Extend sequence_loss_weights with
-    # a zero weight so length matches num_packed_sequences and the phantom contributes nothing
-    # to the loss when loss_scale_mode is "sequence" / "none".
-    if micro_batch.sequence_loss_weights:
+    # `get_response_lengths` (utils.py) reads position_id resets as sequence boundaries — but
+    # only when the NEXT position_id is 1 (otherwise the 0 is treated as trailing padding of
+    # the previous sequence). So a phantom sequence is created only when padding_size >= 2.
+    # When padding_size == 1 the trailing single `0` is folded into the last real sequence
+    # and num_packed_sequences is unchanged; appending a phantom weight would produce a
+    # length-mismatch crash in compute_loss.
+    if micro_batch.sequence_loss_weights and padding_size >= 2:
         micro_batch.sequence_loss_weights.append(0.0)
 
     return micro_batch

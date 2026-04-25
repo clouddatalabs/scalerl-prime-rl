@@ -735,8 +735,7 @@ class DefaultAdvantageConfig(BaseModel):
                 "(before apply_filters drops zero-advantage groups via ZeroAdvantageFilter). "
                 "Practical effect is a per-step constant-factor scaling of surviving advantages "
                 "— absorbed into the LR — but the scale drifts step-to-step as the pre-filter "
-                "pool changes. Post-filter implementation is a follow-up; flagged in "
-                "snowflake_poc_critique.md §2."
+                "pool changes. Post-filter implementation is a follow-up."
             )
         ),
     ] = "none"
@@ -964,12 +963,16 @@ class OrchestratorConfig(BaseConfig):
         bool,
         Field(
             description=(
-                "ScaleRL §3.3 / DAPO 'Token-Level Policy Gradient Loss' — normalize the RL loss so "
-                "each prompt's G rollouts contribute the same total weight to the step. The orchestrator "
-                "tags each TrainingSample with example_id + prompt_average_loss=True; the trainer's "
-                "packer turns those into per-sequence weights `sample_tokens / (total_prompt_tokens * "
-                "num_prompts)`. Pair with loss_scale_mode='sequence' or 'none' on the trainer.loss "
-                "config — see prime_rl.trainer.batch.apply_prompt_average_sequence_weights."
+                "ScaleRL §3.3 / DAPO 'Token-Level Policy Gradient Loss' — normalize the RL "
+                "loss so each prompt contributes the per-token mean over its rollouts, then "
+                "the batch loss is the mean over prompts. The orchestrator tags each "
+                "TrainingSample with (env_name, example_id) + prompt_average_loss=True; the "
+                "packer fills `sequence_loss_weights[i] = 1 / (total_trainable_tokens_in_p * "
+                "num_prompts)` for sample i in prompt p. Per-sample summed losses then "
+                "reduce as sum_i (w_i * loss_i) = mean_p (per-token mean within p). "
+                "Requires trainer.loss.loss_scale_mode in {'sequence', 'none'} (validated "
+                "at config load); 'token' silently discards the weights. CISPO defaults to "
+                "'sequence'; DefaultLossConfig and SFTLossConfig default to 'token'."
             )
         ),
     ] = False

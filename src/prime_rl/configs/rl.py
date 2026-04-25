@@ -624,8 +624,7 @@ class RLConfig(BaseConfig):
 
         RLConfig owns max_async_level for both subconfigs, so the experimental opt-in must be
         consistent across them. Setting it on either side propagates; this avoids the "fix
-        the orchestrator validator but the trainer validator still rejects" footgun the
-        critique flagged at snowflake_poc_critique.md §1.
+        the orchestrator validator but the trainer validator still rejects" footgun.
         """
         flag = (
             self.orchestrator.experimental.allow_nccl_async_level_override
@@ -643,8 +642,6 @@ class RLConfig(BaseConfig):
         correlation > 0.99. Setting it on one side without the other defeats the purpose
         AND injects silent bias into any IS-based loss. Fail loud at config load.
 
-        See snowflake_poc_critique.md §3.
-
         Skipped when [inference] is omitted (e.g. externally managed inference pools or
         num_infer_nodes=0 fake-data runs); there is nothing to make consistent with.
         """
@@ -659,6 +656,34 @@ class RLConfig(BaseConfig):
                 f"inference.model.fp32_lm_head={inference_fp32}. "
                 "Mismatch defeats the train/inference logprob parity that FP32 LM-head exists "
                 "to provide (ScaleRL §3.2). Set both true or both false."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_prompt_average_loss_scale_mode(self):
+        """Reject `orchestrator.prompt_average_loss=True` paired with a trainer
+        `loss_scale_mode` that ignores `sequence_loss_weights`.
+
+        The orchestrator tags every sample with prompt-avg metadata and the
+        packer fills `sequence_loss_weights` accordingly. But `compute_loss`
+        only consumes those weights when `loss_scale_mode in {"sequence",
+        "none"}` — under `"token"` they are silently dropped and the model
+        trains under token-mean reduction while the user thinks they are
+        getting prompt-mean. CISPO defaults to `"sequence"` so the smoke
+        config is fine, but `DefaultLossConfig` and `SFTLossConfig` default
+        to `"token"`.
+        """
+        if not self.orchestrator.prompt_average_loss:
+            return self
+        scale_mode = self.trainer.loss.loss_scale_mode
+        if scale_mode not in ("sequence", "none"):
+            raise ValueError(
+                "orchestrator.prompt_average_loss=true requires "
+                "trainer.loss.loss_scale_mode in {'sequence', 'none'} so the "
+                "packer's per-sequence weights actually reach compute_loss. "
+                f"Got loss_scale_mode={scale_mode!r}. Either set "
+                "[trainer.loss] loss_scale_mode = \"sequence\" "
+                "(the CISPO default), or disable prompt_average_loss."
             )
         return self
 
@@ -721,7 +746,7 @@ class RLConfig(BaseConfig):
         `auto_setup_weight_broadcast` reassigns their `weight_broadcast` after their
         validators have already run. A root config with `[weight_broadcast].type = "nccl"`,
         `max_async_level = 8`, and no override on either subconfig would otherwise sneak
-        through. See snowflake_poc_critique.md §5.
+        through.
         """
         broadcast = self.trainer.weight_broadcast
         if broadcast is None or broadcast.type != "nccl":
@@ -736,9 +761,14 @@ class RLConfig(BaseConfig):
         if not override:
             raise ValueError(
                 "NCCL weight broadcast with max_async_level > 1 is rejected by default. "
-                "ScaleRL Pipeline-RL §3.1 requires it; set "
-                "`[orchestrator.experimental] allow_nccl_async_level_override = true` "
-                "to opt in (validated on B200/EFA). For other hardware prefer "
+                "ScaleRL Pipeline-RL §3.1 requires it; set the experimental override on "
+                "either side — they propagate to both — using EITHER\n"
+                "    [orchestrator.experimental]\n"
+                "    allow_nccl_async_level_override = true\n"
+                "OR\n"
+                "    [trainer.experimental]\n"
+                "    allow_nccl_async_level_override = true\n"
+                "Validated on B200/EFA. For other hardware prefer "
                 "`[weight_broadcast] type = \"filesystem\"`."
             )
         return self
