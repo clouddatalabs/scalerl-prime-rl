@@ -87,8 +87,10 @@ type = "default"
 normalization = "batch"
 
 [orchestrator.buffer]
-easy_threshold = 1.0
-hard_threshold = 0.0
+# Paper-faithful: no easy_threshold/hard_threshold pre-eviction. Per-step
+# zero-variance filtering is handled by the default ZeroAdvantageFilter;
+# permanent eviction is solely NPR (§3.6, easy-side cumulative pass rate).
+# See configs/scalerl_math/rl.toml for the full rationale.
 no_positive_resampling = true
 no_positive_resampling_threshold = 0.9
 

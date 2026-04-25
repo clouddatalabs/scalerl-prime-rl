@@ -89,10 +89,22 @@ type = "default"
 normalization = "batch"
 
 [orchestrator.buffer]
-easy_threshold = 1.0
-hard_threshold = 0.0
-# ScaleRL §3.6: permanently exclude prompts whose Welford-cumulative pass rate
-# crosses 0.9 (Polaris convention).
+# DELIBERATELY no easy_threshold / hard_threshold:
+#   * Paper-faithful zero-variance filtering happens per-step via the default
+#     ZeroAdvantageFilter (already in OrchestratorConfig.filters), which drops
+#     groups whose advantages collapse to zero (all-correct or all-failed in
+#     the binary case). Filtering does NOT remove the prompt from future
+#     sampling — the prompt stays in rotation and contributes to the NPR
+#     pass-rate average.
+#   * The only permanent eviction the paper specifies is NPR (§3.6, easy-side
+#     only): once a prompt's Welford-cumulative pass rate crosses
+#     no_positive_resampling_threshold, it leaves the pool.
+#   * Adding `easy_threshold` or `hard_threshold` runs `update_pools` BEFORE
+#     `update_pass_rate`, which (a) introduces a second permanent-eviction
+#     mechanism not in the paper, (b) skips NPR's cumulative average update
+#     for evicted groups, and (c) the smoke configs previously had
+#     `hard_threshold=0.0` permanently evicting all-zero prompts — pure
+#     deviation from the paper's per-step variance filter.
 no_positive_resampling = true
 no_positive_resampling_threshold = 0.9
 
