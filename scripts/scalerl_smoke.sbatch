@@ -32,11 +32,18 @@ cd "$REPO_ROOT"
 # Slurm sets a minimal PATH; uv lives in /usr/local/bin on this cluster.
 export PATH="/usr/local/bin:$PATH"
 
-# Clear inherited LD_PRELOAD — the cluster's .bashrc points at a libcublas under
-# /opt/dlami/nvme/venv_build/ that conflicts with whatever the venv's torch ships.
-# Baker does the same via `sbatch --export ALL,LD_PRELOAD=`; we do it here so the
-# fix lands without changing how we submit.
+# Clear inherited LD_PRELOAD and LD_LIBRARY_PATH — the AMI's
+# /etc/profile.d/dlami.sh sets LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib:...
+# FIRST, but torch (cu128) was built against CUDA 12.8 and bundles its own
+# libcublas under .venv/.../nvidia/cublas/lib/. With the host setting in front,
+# the dynamic linker resolves libcublas from CUDA 12.9 — ABI drift in cublasGemmEx
+# → CUBLAS_STATUS_INVALID_VALUE on B200. Baker's Docker doesn't see profile.d so
+# it has a clean env; we need to clear it ourselves.
+# Same story for LD_PRELOAD (points at a libcublas under /opt/dlami/nvme/venv_build/
+# that doesn't exist on this node — ld.so logs warnings and ignores it, but cleaner
+# to just unset).
 unset LD_PRELOAD
+unset LD_LIBRARY_PATH
 
 # Mirror baker's container-side runtime env (baker/cli/docker_runtime.py
 # EFA_RUNTIME_ENV). Baker runs prime-rl inside Docker and sets these on the
