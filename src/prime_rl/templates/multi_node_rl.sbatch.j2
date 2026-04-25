@@ -144,7 +144,9 @@ echo "MASTER_PORT=${MASTER_PORT}"
 cd $PROJECT_DIR
 [ -f .env ] && source .env
 source .venv/bin/activate
-uv sync --all-extras
+# `--extra all` not `--all-extras` (FA3 crashes on B200), `--locked` to
+# pin git deps to uv.lock. Recipe invariant per README.md and SCALERL.md.
+uv sync --extra all --locked
 
 {% if pre_run_command %}
 # Pre-run command
@@ -370,7 +372,13 @@ else
     TRAIN_NODE_RANK=$SLURM_PROCID
 {%- endif %}
 
-    export HF_HUB_OFFLINE=1
+    # `HF_HUB_OFFLINE=1` is on by default — assumes the operator pre-staged
+    # the model with `hf download Qwen/Qwen3-8B` (per the SCALERL.md
+    # Quickstart) and `HF_HOME` is shared across nodes. On clusters where
+    # `HF_HOME` is node-local, `HF_HUB_OFFLINE=1` produces an opaque
+    # "model files not found" failure with no doc pointer. Honor the
+    # operator's explicit choice when set in `.env` or the parent shell.
+    export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 
     # This is required for compilation to work correctly
     export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"

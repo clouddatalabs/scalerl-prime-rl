@@ -27,7 +27,11 @@ export PROJECT_DIR={{ project_dir }}
 cd $PROJECT_DIR
 [ -f .env ] && source .env
 source .venv/bin/activate
-uv sync --all-extras
+# `--extra all` (the aggregate extra) NOT `--all-extras`. The latter
+# enumerates every extra by name and pulls in `flash-attn-3`, whose wheel
+# ships Hopper sm_90 kernels only and crashes on B200 with "no kernel
+# image available." `--locked` matches the Dockerfile and install.sh path.
+uv sync --extra all --locked
 
 {% if pre_run_command %}
 # Pre-run command

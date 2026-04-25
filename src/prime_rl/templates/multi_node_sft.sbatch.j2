@@ -50,8 +50,10 @@ echo "MASTER_PORT=${MASTER_PORT}"
 [ -f $PROJECT_DIR/.env ] && source $PROJECT_DIR/.env
 source $PROJECT_DIR/.venv/bin/activate
 
-# Install environment as local package
-cd $PROJECT_DIR && uv sync --all-extras
+# Install environment as local package.
+# `--extra all` not `--all-extras` (FA3 crashes on B200), `--locked` per
+# the README/SCALERL invariant.
+cd $PROJECT_DIR && uv sync --extra all --locked
 
 
 {% if pre_run_command %}
@@ -95,7 +97,9 @@ srun bash -c '
 
     TRAIN_NODE_RANK=$SLURM_PROCID
 
-    export HF_HUB_OFFLINE=1
+    # Honor operator override; default to offline (assumes pre-staged
+    # model + shared HF_HOME). See multi_node_rl.sbatch.j2 for context.
+    export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 
     # This is required for compilation to work correctly
     export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"

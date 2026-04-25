@@ -58,7 +58,9 @@ export VLLM_CACHE_ROOT=/tmp/.vllm_cache_$(whoami)
 cd $PROJECT_DIR
 [ -f .env ] && source .env
 source .venv/bin/activate
-uv sync --all-extras
+# `--extra all` not `--all-extras` (the latter pulls FA3 which crashes on
+# B200), `--locked` to keep git pins in sync with the Dockerfile path.
+uv sync --extra all --locked
 
 # Print inference URLs
 export HOSTNAMES=( $( scontrol show hostnames $SLURM_JOB_NODELIST ) )
