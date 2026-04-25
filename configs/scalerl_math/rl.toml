@@ -109,11 +109,12 @@ rollouts_per_example = 4
 matmul_precision = "highest"
 
 [trainer.model]
-# FA4 (flash_attn.cute) ring attention — landed upstream as #2307. Required
-# for reasonable B200 performance with long context. FA4 only works with the
-# custom model impl (per upstream's validator).
-attn = "fa4"
-impl = "custom"
+# FA3 (flash_attention_3) — works on B200 with the upstream HF impl. The
+# custom impl supports FA4 (better perf) but doesn't yet have dense Qwen3
+# registered, only the MoE variants. Switch back to `attn = "fa4"` +
+# `impl = "custom"` once a dense Qwen3 is added to AutoModelForCausalLMPrimeRL.
+attn = "flash_attention_3"
+impl = "hf"
 # Match vLLM inference dtype to avoid optimizer/inference numerical drift.
 optimization_dtype = "bfloat16"
 reduce_dtype = "bfloat16"
