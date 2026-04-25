@@ -119,10 +119,12 @@ tail -f "$PWD/slurm-logs/<jobid>.log"
   `build-essential` (gcc/g++), `git`, `curl`, **plus the CUDA toolkit**
   (`nvcc` matching torch's CUDA 12.8 — the `cuda-toolkit-12-8` package or
   equivalent). CUTLASS + flash-attn-cute build from source on first sync.
-  On a minimal/distroless image, install via
-  `INSTALL_BASE_PACKAGES=1 bash scripts/install.sh` or your cluster's
-  package manager — `uv sync` will otherwise fail with an opaque CUTLASS
-  or "nvcc not found" error halfway through.
+  `INSTALL_BASE_PACKAGES=1 bash scripts/install.sh` installs the apt-side
+  build tools (`build-essential`, `git`, `curl`, etc.) but does NOT install
+  the CUDA toolkit — that step is cluster-specific (NVIDIA's repo + `apt
+  install cuda-toolkit-12-8`, or a module-load on HPC clusters). The
+  install.sh preflight catches a missing `nvcc` and prints an actionable
+  message rather than crashing mid-sync.
 - **Network from the COMPUTE node, OR pre-stage on the login node.** Many
   managed clusters firewall compute nodes off the package mirrors. The
   `uv sync` step needs egress to:
