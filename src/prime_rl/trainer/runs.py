@@ -516,6 +516,25 @@ def _validate_orch_lora_against_trainer(
             False,
             f"model.lora.rank ({orch_config.model.lora.rank}) exceeds trainer max rank ({trainer_lora.rank})",
         )
+    # Per-run alpha must match the trainer's (the single-run path's
+    # `auto_setup_lora` already enforces this; multi-run was strictly
+    # weaker without justification). The scaling factor in
+    # `MultiRunManager.scaling_factors` is `alpha/rank`, used by the
+    # trainer's optimizer step. If the orchestrator's saved adapter
+    # config — which vLLM consumes at adapter-load time — disagrees,
+    # train and inference apply different scales and the adapter
+    # silently mistrains.
+    if orch_config.model.lora.alpha != trainer_lora.alpha:
+        return (
+            False,
+            f"model.lora.alpha ({orch_config.model.lora.alpha}) does not match "
+            f"trainer.model.lora.alpha ({trainer_lora.alpha}). The trainer "
+            "applies alpha/rank as the LoRA scaling factor; vLLM reads alpha "
+            "from the saved adapter config at load time. Disagreement here "
+            "silently mistrains the adapter (train and inference scale by "
+            "different factors). Either omit alpha from the orchestrator "
+            "config to inherit, or set it equal to trainer.model.lora.alpha.",
+        )
     return True, ""
 
 

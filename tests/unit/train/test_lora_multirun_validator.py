@@ -70,11 +70,25 @@ def test_lora_rank_exceeding_trainer_max_rejected():
 
 
 def test_lora_rank_equal_or_lower_than_trainer_accepted():
-    cfg = _orch_config(lora_kwargs={"rank": 4, "alpha": 8})
+    # Note: alpha must MATCH trainer's; the validator no longer permits
+    # divergent alpha (train/inference scaling-factor mismatch silently
+    # mistrains). Rank-only divergence is still allowed up to trainer's max.
+    cfg = _orch_config(lora_kwargs={"rank": 4, "alpha": 16})
     ok, msg = _validate_orch_lora_against_trainer(cfg, _trainer_lora(rank=8, alpha=16))
     assert ok, msg
     assert cfg.model.lora.rank == 4
-    assert cfg.model.lora.alpha == 8
+    assert cfg.model.lora.alpha == 16
+
+
+def test_lora_alpha_mismatch_rejected():
+    """Per-run alpha != trainer's is rejected — the scaling factor
+    `alpha/rank` controls the gradient flow on the trainer side AND vLLM's
+    LoRA application at inference, and disagreement silently mistrains."""
+    cfg = _orch_config(lora_kwargs={"rank": 4, "alpha": 32})
+    ok, msg = _validate_orch_lora_against_trainer(cfg, _trainer_lora(rank=8, alpha=16))
+    assert ok is False
+    assert "does not match" in msg
+    assert "alpha" in msg
 
 
 def test_validator_does_not_crash_on_none_lora():

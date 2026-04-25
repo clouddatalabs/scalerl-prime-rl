@@ -1126,6 +1126,23 @@ class RLConfig(BaseConfig):
                             f"deployment.num_infer_gpus ({num_infer_gpus}) must be "
                             f"divisible by inference.parallel.tp ({self.inference.parallel.tp})."
                         )
+                    # If the operator explicitly set `[inference.parallel] dp`,
+                    # silently overwriting it would be a config-violation
+                    # foot-gun: the operator picked a value, the auto-derive
+                    # disagrees, and the run goes with the auto-derived value.
+                    # Reject loudly so the operator knows their choice didn't
+                    # win. `model_fields_set` distinguishes "explicitly set"
+                    # from "inherited from the schema default".
+                    if "dp" in self.inference.parallel.model_fields_set:
+                        derived_dp = num_infer_gpus // self.inference.parallel.tp
+                        raise ValueError(
+                            f"inference.parallel.dp was explicitly set to "
+                            f"{self.inference.parallel.dp}, but deployment.num_infer_gpus "
+                            f"({num_infer_gpus}) / inference.parallel.tp "
+                            f"({self.inference.parallel.tp}) = {derived_dp} disagrees. "
+                            "Either set `[inference.parallel] dp` to match the "
+                            "deployment-derived value, or omit it to inherit."
+                        )
                     self.inference.parallel.dp = num_infer_gpus // self.inference.parallel.tp
                 # Ensure api_server_count matches DP so all workers are created.
                 # Without this, the NCCL broadcast group expects dp*tp workers
