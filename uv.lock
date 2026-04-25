@@ -893,7 +893,7 @@ dependencies = [
 [[package]]
 name = "flash-linear-attention"
 version = "0.4.2"
-source = { git = "https://github.com/fla-org/flash-linear-attention#02af88ef8aa7f7043a899c9ca6fde168e1cf8c7e" }
+source = { git = "https://github.com/fla-org/flash-linear-attention?rev=02af88e#02af88ef8aa7f7043a899c9ca6fde168e1cf8c7e" }
 dependencies = [
     { name = "einops", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "torch", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
@@ -2771,7 +2771,7 @@ requires-dist = [
     { name = "flash-attn", marker = "platform_machine == 'x86_64' and extra == 'flash-attn'", url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3+cu128torch2.10-cp312-cp312-linux_x86_64.whl" },
     { name = "flash-attn-3", marker = "extra == 'flash-attn-3'", index = "https://download.pytorch.org/whl/test/cu128" },
     { name = "flash-attn-4", marker = "extra == 'flash-attn-cute'", git = "https://github.com/Dao-AILab/flash-attention.git?subdirectory=flash_attn%2Fcute&rev=abd9943b" },
-    { name = "flash-linear-attention", git = "https://github.com/fla-org/flash-linear-attention" },
+    { name = "flash-linear-attention", git = "https://github.com/fla-org/flash-linear-attention?rev=02af88e" },
     { name = "jaxtyping", specifier = ">=0.3.2" },
     { name = "kernels", marker = "extra == 'gpt-oss'" },
     { name = "liger-kernel", specifier = ">=0.5.10" },

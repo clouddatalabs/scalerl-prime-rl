@@ -110,6 +110,12 @@ no_positive_resampling_threshold = 0.9
 
 [orchestrator.eval]
 interval = 50
+# Terminal-Bench eval is 10 docker tasks × rollouts_per_example=16 = 160
+# container runs per pass — tens of minutes wall clock. eval_base_model=true
+# (the upstream default) would force one of those passes at step 0 before
+# any training happens, wasting the slot on the base model. Override to
+# false; users can opt back in for a "before/after" comparison.
+eval_base_model = false
 
 [orchestrator.eval.sampling]
 temperature = 0.6

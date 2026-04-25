@@ -289,6 +289,54 @@ def test_rl_config_accepts_prompt_average_loss_with_sequence_scale_mode():
     assert config.trainer.loss.loss_scale_mode == "sequence"
 
 
+def test_adamw_config_eps_bounds():
+    """Tightened from `gt=0` to `Field(ge=1e-30, le=1e-3)` to reject
+    sub-fp32-representable values that would silently train at effectively
+    zero epsilon. Pin every boundary so a regression to `gt=0` fails."""
+    from prime_rl.configs.trainer import AdamWConfig
+
+    AdamWConfig(eps=1e-30)  # boundary in
+    AdamWConfig(eps=1e-3)  # boundary in
+    AdamWConfig(eps=1e-15)  # ScaleRL paper value
+    with pytest.raises(ValidationError):
+        AdamWConfig(eps=1e-50)  # below ge=1e-30
+    with pytest.raises(ValidationError):
+        AdamWConfig(eps=1e-2)  # above le=1e-3
+
+
+def test_cispo_eps_max_bounds():
+    """`eps_max < 1` would clamp the on-policy mode (rho≈1) to a sub-1
+    coefficient and silently zero the gradient. Reject at config load."""
+    from prime_rl.configs.trainer import CISPOLossConfig
+
+    CISPOLossConfig(eps_max=1.0)  # boundary in
+    CISPOLossConfig(eps_max=4.0)  # paper default
+    CISPOLossConfig(eps_max=64.0)  # boundary in
+    with pytest.raises(ValidationError):
+        CISPOLossConfig(eps_max=0.5)  # below ge=1.0 — silent gradient zero
+    with pytest.raises(ValidationError):
+        CISPOLossConfig(eps_max=128.0)  # above le=64.0
+
+
+def test_shipped_poc_configs_load_cleanly():
+    """Both shipped POC configs must validate. A typo (e.g.
+    `use_token_clinet = false`) would otherwise only surface at launch
+    time, hours into a SLURM allocation."""
+    import tomli
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    for relpath in ["configs/scalerl_math/rl.toml", "configs/scalerl_terminal_bench/rl.toml"]:
+        config_path = repo_root / relpath
+        with open(config_path, "rb") as f:
+            data = tomli.loads(f.read().decode())
+        cfg = RLConfig.model_validate(data)
+        # Spot-check: load-bearing knobs we documented in the configs.
+        assert cfg.trainer.optim.eps == 1e-15, f"{relpath}: AdamW eps must round-trip from TOML"
+        assert cfg.trainer.scheduler.type == "linear"
+        assert cfg.trainer.scheduler.warmup_steps == 100
+
+
 def test_adamw_config_carries_eps_and_rejects_typos():
     """AdamW `eps` field must round-trip into the optimizer constructor.
 

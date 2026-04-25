@@ -273,6 +273,59 @@ def test_apply_filters_first_filter_wins():
     assert rollout["is_filtered"] is True
 
 
+def test_apply_filters_monitor_falls_through_to_enforcing_filter():
+    """Regression: a monitoring filter detecting first must NOT short-circuit
+    a later enforcing filter. Pre-fix the loop unconditionally `break`'d on
+    the first detection, so a rollout flagged by Gibberish (enforce=False)
+    AND ZeroAdvantage (enforce=True) ended up `is_filtered=False` and leaked
+    into the trainer with a zero advantage — silent training corruption.
+    """
+    from prime_rl.orchestrator.filters import RolloutFilter
+
+    class _AlwaysFireFilter(RolloutFilter):
+        def __init__(self, name: str, enforce: bool):
+            self.name = name
+            self.enforce = enforce
+
+        def check(self, rollout):
+            from prime_rl.orchestrator.filters import FilterResult
+            return FilterResult(detected=True)
+
+    monitor = _AlwaysFireFilter("monitor", enforce=False)
+    enforcer = _AlwaysFireFilter("enforcer", enforce=True)
+    rollout = _make_rollout(completion_ids=[1, 2, 3], completion_logprobs=[-1.0] * 3)
+    apply_filters([monitor, enforcer], [rollout])
+    assert rollout["filters"]["monitor"] is True, "monitor detection must be recorded"
+    assert rollout["filters"]["enforcer"] is True, "enforcer must run after monitor falls through"
+    assert rollout["is_filtered"] is True, "enforcing filter must drop the rollout despite earlier monitor hit"
+
+
+def test_apply_filters_breaks_after_enforcing():
+    """First enforcing detection breaks the loop (no double-counting). A second
+    enforcing filter that would also fire is NOT counted again."""
+    from prime_rl.orchestrator.filters import RolloutFilter
+
+    class _AlwaysFireFilter(RolloutFilter):
+        def __init__(self, name: str, enforce: bool):
+            self.name = name
+            self.enforce = enforce
+            self.calls = 0
+
+        def check(self, rollout):
+            from prime_rl.orchestrator.filters import FilterResult
+            self.calls += 1
+            return FilterResult(detected=True)
+
+    enforcer1 = _AlwaysFireFilter("e1", enforce=True)
+    enforcer2 = _AlwaysFireFilter("e2", enforce=True)
+    rollout = _make_rollout(completion_ids=[1, 2, 3], completion_logprobs=[-1.0] * 3)
+    apply_filters([enforcer1, enforcer2], [rollout])
+    assert enforcer1.calls == 1
+    assert enforcer2.calls == 0, "loop must break after the first enforcing detection"
+    assert rollout["filters"]["e1"] is True
+    assert rollout["filters"]["e2"] is False
+
+
 def test_apply_filters_empty_list():
     rollout = _make_rollout(
         completion_ids=[1, 2, 3],

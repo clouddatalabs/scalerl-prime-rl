@@ -214,16 +214,27 @@ if [ "${SCALERL_RESUME:-0}" = "1" ]; then
     # step 0 — wiping prior rollouts and broadcasts in the same output_dir
     # via `clean_future_steps(resume_step=-1)`. That's a footgun the user
     # almost never wants when they explicitly asked to resume.
-    OUTPUT_DIR_RESOLVED="$("$PYBIN" -c "
+    #
+    # Resolve in Python: honor `[ckpt] output_dir` override and absolute
+    # paths. Print three lines: ckpt_dir, interval, then a sentinel.
+    PRELOAD="$("$PYBIN" - <<PYEOF "$SCALERL_CONFIG" "$REPO_ROOT"
 import sys, tomli
+from pathlib import Path
 from prime_rl.configs.rl import RLConfig
 cfg = RLConfig.model_validate(tomli.loads(open(sys.argv[1],'rb').read().decode()))
-print(cfg.output_dir)
-" "$SCALERL_CONFIG")"
-    CKPT_DIR="$REPO_ROOT/$OUTPUT_DIR_RESOLVED/checkpoints"
+ckpt_root = cfg.ckpt.output_dir if (cfg.ckpt and cfg.ckpt.output_dir is not None) else cfg.output_dir
+ckpt_root = Path(str(ckpt_root))
+if not ckpt_root.is_absolute():
+    ckpt_root = (Path(sys.argv[2]) / ckpt_root).resolve()
+print(ckpt_root / "checkpoints")
+print(cfg.ckpt.interval if cfg.ckpt else 100)
+PYEOF
+)"
+    CKPT_DIR="$(echo "$PRELOAD" | sed -n 1p)"
+    CKPT_INTERVAL="$(echo "$PRELOAD" | sed -n 2p)"
     if [ -z "$(find "$CKPT_DIR" -mindepth 1 -maxdepth 1 -type d -name 'step_*' 2>/dev/null)" ]; then
         echo "ERROR: SCALERL_RESUME=1 but no checkpoints found under $CKPT_DIR." >&2
-        echo "       The first checkpoint lands at [ckpt] interval (= ${SCALERL_CKPT_INTERVAL:-100}) steps;" >&2
+        echo "       The first checkpoint lands at [ckpt] interval (= $CKPT_INTERVAL) steps;" >&2
         echo "       a run that crashed before that has nothing to resume from." >&2
         echo "       Resubmit without SCALERL_RESUME=1 to start fresh, or rm -rf the output_dir if you" >&2
         echo "       want a clean restart in place." >&2

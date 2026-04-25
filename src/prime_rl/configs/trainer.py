@@ -745,7 +745,18 @@ class CISPOLossConfig(BaseModel):
 
     eps_max: Annotated[
         float,
-        Field(gt=0, description="Upper truncation cap on the IS ratio. ScaleRL ablation: insensitive in {4, 5, 8}."),
+        Field(
+            ge=1.0,
+            le=64.0,
+            description=(
+                "Upper truncation cap on the IS ratio (rho = exp(trainer_logprobs - "
+                "inference_logprobs)). ScaleRL ablation: insensitive in {4, 5, 8}. "
+                "Bound `>=1` because eps_max < 1 would clamp the on-policy mode "
+                "(rho ≈ 1) to a sub-1 coefficient on every token, silently zeroing "
+                "the gradient — observable post-hoc as ratio_truncated ≈ 1 but "
+                "preventable here."
+            ),
+        ),
     ] = 4.0
     adv_tau: Annotated[float, Field(ge=0, description="Advantage scale factor (matches DefaultLossConfig.adv_tau).")] = 1.0
     loss_scale_mode: Annotated[

@@ -53,7 +53,12 @@ COPY examples /app/examples
 COPY benchmarks/scripts /app/benchmarks/scripts
 
 RUN --mount=type=cache,target=/app/.cache/uv \
-    uv sync --extra flash-attn --extra flash-attn-3 --extra flash-attn-cute --extra envs --extra gpt-oss --group mamba-ssm --locked --no-dev
+    # Intentionally NOT including --extra flash-attn-3: the FA3 wheel ships
+    # Hopper sm_90 kernels only and crashes on B200 with "no kernel image is
+    # available." Matches the `[all]` extra in pyproject.toml. Run
+    # `scripts/fix-flash-attn-cute.sh` after build if FA4 namespace gets
+    # shadowed.
+    uv sync --extra flash-attn --extra flash-attn-cute --extra envs --extra gpt-oss --group mamba-ssm --locked --no-dev
 
 # arm64: build flash-attn from source, fix namespace conflicts, apply workarounds
 ARG TARGETARCH

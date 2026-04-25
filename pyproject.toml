@@ -158,7 +158,7 @@ mini_swe_agent_plus = { index = "primeintellect" }
 deep-ep = { url = "https://github.com/samsja/research-pre-built-wheels/releases/download/v0.2/deep_ep-1.2.1+73b6ea4-cp312-cp312-linux_x86_64.whl" }
 deep-gemm = { url = "https://github.com/samsja/research-pre-built-wheels/releases/download/v0.2/deep_gemm-2.3.0+477618c-cp312-cp312-linux_x86_64.whl" }
 nixl-cu12 = { url = "https://github.com/samsja/research-pre-built-wheels/releases/download/v0.2/nixl_cu12-0.10.1-cp312-cp312-linux_x86_64.whl" }
-flash-linear-attention = { git = "https://github.com/fla-org/flash-linear-attention" }
+flash-linear-attention = { git = "https://github.com/fla-org/flash-linear-attention", rev = "02af88e" }
 flash_attn_3 = { index = "pytorch-cu128-test" }
 
 [tool.uv.extra-build-dependencies]
@@ -195,6 +195,11 @@ line-length = 120
 # committed verbatim. Linting them is out of scope (matches the
 # `.gitattributes` whitespace exemption for the same subtree).
 extend-exclude = ["environments/terminal_bench/tasks"]
+# `force-exclude` so `extend-exclude` applies even when the path is passed
+# explicitly (e.g. by pre-commit, which lists every staged file). Without
+# this, `pre-commit run` would auto-rewrite imported fixtures the moment a
+# contributor edits one, silently mutating upstream task definitions.
+force-exclude = true
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
