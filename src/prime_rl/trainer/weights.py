@@ -134,29 +134,41 @@ def gather_weights_on_master(
         warnings.filterwarnings("ignore", category=UserWarning, module="torch.distributed.*")
 
         cpu_state = {}
-        # Wrap the loop in try/finally so the barrier is reached on every
-        # rank regardless of master-side failure. Without finally, a
-        # master-only failure (assertion, host-OOM, disk-full, NFS hiccup)
-        # raises out of the loop on master while peer ranks (which call
-        # `full_tensor()` collectively but skip the master-only block)
-        # continue to the barrier — and then block until NCCL watchdog
-        # kills the job (~10 min). The fork's checkpoint-save path fires
-        # this every `[ckpt] interval`, so a transient FS error would
-        # cost a watchdog timeout per occurrence.
+        # The previous try/finally only protected the trailing barrier — but
+        # `value.full_tensor()` (called UNCONDITIONALLY on every rank inside
+        # the loop) is itself a collective. If master raises mid-loop on the
+        # master-only block (assertion, host-OOM, disk-full, NFS hiccup),
+        # master unwinds to the `finally` barrier while peer ranks proceed
+        # to the NEXT iteration's `full_tensor()` collective — which blocks
+        # forever waiting for a master that's already at the barrier. NCCL
+        # watchdog kills the job ~10 min later. Mirror the catch-and-continue
+        # pattern used in `NCCLWeightBroadcastSender.broadcast_weights`:
+        # capture master-side failures, keep the loop running so peer
+        # collectives complete, re-raise after the loop. This fork's
+        # checkpoint-save path fires every `[ckpt] interval`, so a transient
+        # FS error would cost a watchdog timeout per occurrence under the
+        # prior fix; this version surfaces the original error cleanly.
+        master_error: Exception | None = None
         try:
             for key, value in model.state_dict().items():
                 if isinstance(value, DTensor):
                     # only gather after the downcast to dtype as it will be faster
                     value = cast(DTensor, value.to(dtype)).full_tensor()
 
-                if is_master:
-                    key = get_fqns(model, key)
-                    assert len(key) == 1
-                    key = next(iter(key))
-                    # TODO(Sami) Blocking to avoid race condition, should make non-blocking long-term tho
-                    cpu_state[key] = value.to("cpu", non_blocking=False)
+                if is_master and master_error is None:
+                    try:
+                        key = get_fqns(model, key)
+                        assert len(key) == 1
+                        key = next(iter(key))
+                        # TODO(Sami) Blocking to avoid race condition, should make non-blocking long-term tho
+                        cpu_state[key] = value.to("cpu", non_blocking=False)
+                    except Exception as e:
+                        master_error = e
         finally:
             torch.distributed.barrier()
+
+        if master_error is not None:
+            raise master_error
 
     # Always clean up the state dict for HF compatibility
     if any(".base_layer." in key or "lora_A" in key or "lora_B" in key for key in cpu_state.keys()):

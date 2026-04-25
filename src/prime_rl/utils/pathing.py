@@ -98,15 +98,32 @@ def get_stable_ckpt_steps(ckpt_dir: Path) -> list[int]:
 
 
 def resolve_latest_ckpt_step(ckpt_dir: Path) -> int | None:
-    """Gets the latest checkpoint step from the checkpoint directory. Returns None if no checkpoints are found."""
-    steps = get_all_ckpt_steps(ckpt_dir)
-    if len(steps) == 0:
-        logger = get_logger()
-        logger.warning(f"No checkpoints found in {ckpt_dir}. Starting from scratch.")
-        return None
-    latest_step = steps[-1]
+    """Gets the latest checkpoint step from the checkpoint directory. Returns None if no checkpoints are found.
+
+    Walks STABLE-marker-tagged steps only. Without the STABLE filter, a
+    SIGKILL / OOM / disk-full mid-`dcp_save` leaves a partial `step_N/`
+    directory with a higher step number than the last good checkpoint,
+    and `baker resume` would silently pick it up — either crashing in
+    `dcp_load` after partial state is already mutated, or (worse) loading
+    torn weights and continuing as if everything is fine. Only checkpoints
+    whose `mark_stable(step)` ran (which fires AFTER `dcp_save` returns)
+    are eligible for resume.
+    """
+    stable_steps = get_stable_ckpt_steps(ckpt_dir)
     logger = get_logger()
-    logger.info(f"Found latest checkpoint in {ckpt_dir}: {latest_step}")
+    if len(stable_steps) == 0:
+        all_steps = get_all_ckpt_steps(ckpt_dir)
+        if len(all_steps) > 0:
+            logger.warning(
+                f"Found {len(all_steps)} checkpoint dir(s) in {ckpt_dir} but none "
+                "have a STABLE marker — they are all partial saves. Resume "
+                "would silently load torn state. Starting from scratch instead."
+            )
+        else:
+            logger.warning(f"No checkpoints found in {ckpt_dir}. Starting from scratch.")
+        return None
+    latest_step = stable_steps[-1]
+    logger.info(f"Found latest stable checkpoint in {ckpt_dir}: {latest_step}")
     return latest_step
 
 

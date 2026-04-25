@@ -242,6 +242,17 @@ class CheckpointManager:
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.save_to_path(ckpt_path, model, optimizers, scheduler, progress, dataloader)
+        # Mark the step's directory complete so the resume path can
+        # distinguish a fully-saved checkpoint from a partial one. Without
+        # the STABLE marker, `resolve_latest_ckpt_step` (which walks
+        # `step_*` directories) would silently return a torn step left
+        # behind by a SIGKILL / OOM / disk-full mid-`dcp_save`, and the
+        # next `baker resume` would either silently load a partial state
+        # or crash after partial state has been mutated. The multi-run
+        # path (multi_ckpt.py) and the weight-checkpoint manager already
+        # write STABLE; the single-run trainer-state path was the
+        # remaining gap.
+        self.mark_stable(step)
         bisect.insort(self.ckpt_steps, step)
 
     def maybe_clean(self) -> None:
