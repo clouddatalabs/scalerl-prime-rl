@@ -1,8 +1,10 @@
 # ScaleRL recipe on Terminal-Bench 2 — Snowflake POC handoff config
 #
 # Snowflake-side reproduction target. Same recipe as configs/scalerl_math/rl.toml
-# but pointed at the in-tree Terminal-Bench tasks (Harbor format, 30 tasks shipped
-# under environments/terminal_bench/tasks/). 20 train / 10 test per the doc.
+# but pointed at the in-tree Terminal-Bench tasks (Harbor format) under
+# environments/terminal_bench/tasks/. 28 usable committed tasks split 18 train
+# / 10 test (two task names — `fix-code-vulnerability` and `sqlite-with-gcov` —
+# are symlinks pointing outside the repo and are excluded from the runtime config).
 #
 # Preconditions:
 #   - Docker daemon reachable from rollout process (host or sock-mounted into container).
@@ -19,9 +21,11 @@ num_infer_gpus = 4
 [model]
 name = "Qwen/Qwen3-8B"
 
-[wandb]
-project = "scalerl-prime-rl"
-name = "scalerl-tb-qwen3-8b"
+# Wandb disabled for the handoff — enable by uncommenting and running
+# `wandb login` / setting WANDB_API_KEY in .env first.
+# [wandb]
+# project = "scalerl-prime-rl"
+# name = "scalerl-tb-qwen3-8b"
 
 [ckpt]
 interval = 100

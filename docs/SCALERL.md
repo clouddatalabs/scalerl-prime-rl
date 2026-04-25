@@ -32,8 +32,10 @@ Two reference configs ship with the recipe wired up:
   built-in `PrimeIntellect/Hendrycks-Math` env). Submit with
   `sbatch scripts/scalerl_smoke.sbatch`.
 - **`configs/scalerl_terminal_bench/rl.toml`** — Snowflake POC handoff config. Qwen3-8B on
-  the in-tree Terminal-Bench Harbor tasks (`environments/terminal_bench/`). 30 tasks
-  shipped, split 20 train / 10 test. Requires a Docker daemon reachable from the rollout
+  the in-tree Terminal-Bench Harbor tasks (`environments/terminal_bench/`). 28 usable
+  committed tasks split 18 train / 10 test. (Two task names — `fix-code-vulnerability`
+  and `sqlite-with-gcov` — are committed as symlinks pointing outside the repo and are
+  excluded from the runtime config.) Requires a Docker daemon reachable from the rollout
   process (host or `/var/run/docker.sock` bind-mounted into the container).
 
 Both configs exercise the full ScaleRL knob set (CISPO, prompt-level averaging, batch-level
