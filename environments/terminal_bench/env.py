@@ -50,13 +50,17 @@ Usage sketch for the orchestrator config::
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import tomllib
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -138,6 +142,52 @@ def _load_task_spec(task_dir: Path) -> _TaskSpec:
         instruction=instruction,
         docker_image=image,
     )
+
+
+_BUILD_LOCK_DIR = Path(os.environ.get("TB_BUILD_LOCK_DIR", "/tmp/tb-build-locks"))
+
+
+def _build_lock_path(tag: str) -> Path:
+    """Return a filesystem path for a cross-process advisory lock keyed to
+    a Docker image tag. We hash the tag — `tb-local/<task>:latest` contains
+    `/` and `:` which are filename-illegal on some filesystems — and prefix
+    with a short readable slug so a stuck lock is greppable in `lsof`.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", tag)[:48]
+    digest = hashlib.sha1(tag.encode("utf-8")).hexdigest()[:12]
+    return _BUILD_LOCK_DIR / f"{safe}-{digest}.lock"
+
+
+@asynccontextmanager
+async def _flock_exclusive(path: Path):
+    """Acquire an OS-level exclusive advisory lock at ``path`` for the
+    duration of the context. fcntl.flock is process-scoped (NOT
+    thread-scoped) so this serializes peer Python PROCESSES, which the
+    in-class ``asyncio.Lock`` cannot — verifiers' ZMQEnvServer spawns
+    ``num_workers`` separate worker processes via ``mp.spawn`` and each
+    worker has its own ``TerminalBenchLocalEnv`` and its own
+    ``_build_locks`` dict, so without an OS-level lock, concurrent peer
+    workers race ``docker build`` on the same tag and corrupt BuildKit's
+    snapshotter cache (visible as cascading "parent snapshot does not
+    exist" / "failed to extract layer / content digest not found"
+    errors that fail-cascade across unrelated tasks).
+
+    Run the lock-acquire/release on a thread because ``fcntl.flock`` is
+    blocking; the event loop must continue serving other rollouts while
+    we wait for a peer worker's build to finish (qemu-tasks can be ~15
+    min cold). Override the lock dir with ``TB_BUILD_LOCK_DIR`` if /tmp
+    is not shared across the relevant peer processes.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = await asyncio.to_thread(os.open, str(path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_UN)
+        finally:
+            await asyncio.to_thread(os.close, fd)
 
 
 class _DockerClient:
@@ -536,7 +586,10 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
 
         Fast path: tag already resolved this process lifetime.
         Build path: local Dockerfile exists, tag is missing locally,
-        we're allowed to build -> ``docker build`` under a per-tag lock.
+        we're allowed to build -> ``docker build`` under a per-tag
+        in-process asyncio.Lock AND an OS-level flock (the asyncio.Lock
+        alone does NOT serialize peer worker processes spawned by
+        verifiers' ZMQEnvServer — see ``_flock_exclusive`` docstring).
         Fallback: no local Dockerfile -> trust ``task.toml::docker_image``
         (still subject to daemon auth when ``docker run`` pulls it).
         """
@@ -554,35 +607,47 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         local_tag = self._local_image_tag(spec)
         lock = self._build_locks.setdefault(spec.name, asyncio.Lock())
         async with lock:
-            # Re-check inside the lock in case a peer built while we
-            # were waiting.
+            # Re-check inside the in-process lock in case a peer
+            # coroutine in this process already built while we were
+            # waiting.
             if spec.name in self._resolved_tags:
                 return self._resolved_tags[spec.name]
             if await self._docker.image_exists(local_tag):
                 self._resolved_tags[spec.name] = local_tag
                 return local_tag
 
-            log_path: Path | None = None
-            if self._build_log_dir is not None:
-                log_path = self._build_log_dir / f"{spec.name}.build.log"
+            # Cross-process serialization. Without this, peer worker
+            # processes (verifiers spawns ``num_workers`` ≈ 3 for the
+            # shipped TB train batch) race on ``docker build`` of the
+            # same tag and corrupt BuildKit's snapshotter cache. Hold
+            # the flock across both the existence re-check and the
+            # build itself so a peer that just finished can short-circuit.
+            async with _flock_exclusive(_build_lock_path(local_tag)):
+                if await self._docker.image_exists(local_tag):
+                    self._resolved_tags[spec.name] = local_tag
+                    return local_tag
 
-            _logger.info(
-                "terminal_bench_local: building image tag=%s context=%s "
-                "(log=%s timeout=%ds)",
-                local_tag,
-                dockerfile.parent,
-                log_path,
-                self._build_timeout_seconds,
-            )
-            await self._docker.build(
-                tag=local_tag,
-                context_dir=dockerfile.parent,
-                dockerfile=dockerfile,
-                timeout=self._build_timeout_seconds,
-                log_path=log_path,
-            )
-            self._resolved_tags[spec.name] = local_tag
-            return local_tag
+                log_path: Path | None = None
+                if self._build_log_dir is not None:
+                    log_path = self._build_log_dir / f"{spec.name}.build.log"
+
+                _logger.info(
+                    "terminal_bench_local: building image tag=%s context=%s "
+                    "(log=%s timeout=%ds)",
+                    local_tag,
+                    dockerfile.parent,
+                    log_path,
+                    self._build_timeout_seconds,
+                )
+                await self._docker.build(
+                    tag=local_tag,
+                    context_dir=dockerfile.parent,
+                    dockerfile=dockerfile,
+                    timeout=self._build_timeout_seconds,
+                    log_path=log_path,
+                )
+                self._resolved_tags[spec.name] = local_tag
+                return local_tag
 
     # ----- per-rollout setup ------------------------------------------------
 
