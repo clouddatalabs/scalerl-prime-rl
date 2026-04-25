@@ -361,6 +361,15 @@ class Buffer:
             self.logger.debug(
                 f"Loaded {restored}/{len(saved_pass_rate_stats)} no-positive-resampling pass-rate stat(s) from checkpoint."
             )
+            if restored < len(saved_pass_rate_stats):
+                self.logger.warning(
+                    f"Could not restore {len(saved_pass_rate_stats) - restored} "
+                    "no-positive-resampling pass-rate stat(s); the resume dataset's "
+                    "example hashes do not match what was saved (typical cause: chat "
+                    "template, system prompt, or hash_keys changed). Affected prompts "
+                    "restart from num_groups=0 — they may take many groups to cross the "
+                    "exclusion threshold again."
+                )
 
         if any(saved_rollouts):
             valid = [r for r in saved_rollouts if r.get("env_name") in self.env_names]

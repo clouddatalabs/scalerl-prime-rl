@@ -25,6 +25,7 @@ from prime_rl.configs.shared import (
 )
 from prime_rl.configs.trainer import (
     BenchConfig,
+    CustomLossConfig,
     FakeDataLoaderConfig,
     TokenizerConfig,
     TrainerConfig,
@@ -661,22 +662,31 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_prompt_average_loss_scale_mode(self):
-        """Reject `orchestrator.prompt_average_loss=True` paired with a trainer
-        `loss_scale_mode` that ignores `sequence_loss_weights`.
+        """Cross-validate `orchestrator.prompt_average_loss` and trainer
+        `loss_scale_mode` so neither setting silently produces a different
+        objective than the user expected.
 
-        The orchestrator tags every sample with prompt-avg metadata and the
-        packer fills `sequence_loss_weights` accordingly. But `compute_loss`
-        only consumes those weights when `loss_scale_mode in {"sequence",
-        "none"}` — under `"token"` they are silently dropped and the model
-        trains under token-mean reduction while the user thinks they are
-        getting prompt-mean. CISPO defaults to `"sequence"` so the smoke
-        config is fine, but `DefaultLossConfig` and `SFTLossConfig` default
-        to `"token"`.
+        Forward direction:
+            prompt_average_loss=True with loss_scale_mode='token' silently
+            drops the packer's per-sequence weights (compute_loss only
+            consumes them in 'sequence'/'none' mode) and trains under
+            token-mean reduction.
+
+        Reverse direction:
+            loss_scale_mode in {'sequence','none'} without
+            prompt_average_loss=True leaves the per-sequence weights at the
+            neutral 1.0 default. compute_loss then computes
+            `sum_i loss_i * fsdp_world_size`, which after FSDP averaging is
+            the raw (unnormalized) sum over the global batch — effective LR
+            scales linearly with batch_size * avg_completion_len. CISPO
+            defaults to 'sequence', so an out-of-the-box CISPO config without
+            prompt_average_loss=True silently lacks any normalization.
+
+        CISPO + prompt_average_loss=True + loss_scale_mode='sequence' (the
+        smoke config) validates and is the recipe ScaleRL §3.3 prescribes.
         """
-        if not self.orchestrator.prompt_average_loss:
-            return self
         scale_mode = self.trainer.loss.loss_scale_mode
-        if scale_mode not in ("sequence", "none"):
+        if self.orchestrator.prompt_average_loss and scale_mode not in ("sequence", "none"):
             raise ValueError(
                 "orchestrator.prompt_average_loss=true requires "
                 "trainer.loss.loss_scale_mode in {'sequence', 'none'} so the "
@@ -684,6 +694,24 @@ class RLConfig(BaseConfig):
                 f"Got loss_scale_mode={scale_mode!r}. Either set "
                 "[trainer.loss] loss_scale_mode = \"sequence\" "
                 "(the CISPO default), or disable prompt_average_loss."
+            )
+        if (
+            scale_mode in ("sequence", "none")
+            and not self.orchestrator.prompt_average_loss
+            and not isinstance(self.trainer.loss, CustomLossConfig)
+        ):
+            raise ValueError(
+                f"trainer.loss.loss_scale_mode={scale_mode!r} relies on the "
+                "packer to encode per-sequence normalization in "
+                "`sequence_loss_weights`. With `[orchestrator] "
+                "prompt_average_loss = false` the weights stay at the neutral "
+                "1.0 default and the loss reduces to a raw global sum, scaling "
+                "the effective LR linearly with batch size — almost certainly "
+                "not what you want. Either set "
+                "[orchestrator] prompt_average_loss = true (the ScaleRL "
+                "default), or set [trainer.loss] loss_scale_mode = \"token\" "
+                "(token-mean reduction). For CustomLossConfig that fills the "
+                "weights itself, this validator is intentionally relaxed."
             )
         return self
 

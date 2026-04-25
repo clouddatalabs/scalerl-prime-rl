@@ -25,11 +25,16 @@ if [ -z "${VIRTUAL_ENV:-}" ]; then
 fi
 
 # Serialize concurrent invocations against the same venv so two parallel slurm
-# submits don't fight over the wheel install.
+# submits don't fight over the wheel install. 5-minute timeout so a stale lock
+# from a crashed sibling doesn't hang the job indefinitely.
 LOCK_FD=9
 LOCK_FILE="$REPO_ROOT/.venv/.fix-flash-attn-cute.lock"
 exec {LOCK_FD}> "$LOCK_FILE"
-flock -x "$LOCK_FD"
+if ! flock -x -w 300 "$LOCK_FD"; then
+    echo "Error: timed out waiting for flock on $LOCK_FILE." >&2
+    echo "       Another submit may have crashed mid-install. Inspect & remove if safe." >&2
+    exit 1
+fi
 
 echo "Reinstalling flash-attn-cute to fix namespace conflict with flash-attn..."
 # Match the pin in pyproject.toml so this script and `uv sync --all-extras` agree.

@@ -276,6 +276,40 @@ def test_compute_loss_sequence_mode_scales_by_fsdp_world_size():
     assert torch.isclose(loss_dp4, loss_dp1 * 4.0, atol=1e-6)
 
 
+def test_compute_loss_none_mode_scales_by_fsdp_world_size():
+    """`loss_scale_mode = "none"` shares the sequence/none code branch and must
+    apply the same FSDP-world-size multiplier."""
+    trainer_logprobs = [torch.tensor([-1.0, -2.0]), torch.tensor([-3.0])]
+    inference_logprobs = [torch.zeros(2), torch.zeros(1)]
+    advantages = [torch.zeros(2), torch.zeros(1)]
+    loss_mask = [torch.tensor([True, True]), torch.tensor([True])]
+
+    loss_fn = setup_loss_fn(SFTLossConfig(loss_scale_mode="none"))
+    loss_dp1, _ = compute_loss(
+        trainer_logprobs=trainer_logprobs,
+        inference_logprobs=inference_logprobs,
+        teacher_logprobs=None,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        loss_fn=loss_fn,
+        loss_scale=999,
+        sequence_loss_weights=[0.25, 0.5],
+        fsdp_world_size=1,
+    )
+    loss_dp4, _ = compute_loss(
+        trainer_logprobs=trainer_logprobs,
+        inference_logprobs=inference_logprobs,
+        teacher_logprobs=None,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        loss_fn=loss_fn,
+        loss_scale=999,
+        sequence_loss_weights=[0.25, 0.5],
+        fsdp_world_size=4,
+    )
+    assert torch.isclose(loss_dp4, loss_dp1 * 4.0, atol=1e-6)
+
+
 def test_compute_loss_token_mode_unaffected_by_fsdp_world_size():
     """Token-mode divides by local trainable tokens; the FSDP factor cancels
     naturally under balanced packing, so compute_loss must NOT apply it."""
@@ -457,6 +491,33 @@ def test_pad_micro_batch_padding_size_one_does_not_create_phantom_sequence():
     assert len(mb.sequence_loss_weights) == num_packed, (
         "sequence_loss_weights length must match num_packed_sequences for compute_loss to accept it"
     )
+
+
+def test_pad_micro_batch_padding_size_two_appends_phantom_weight():
+    """The exact lower boundary of the `padding_size >= 2` predicate. With
+    padding_size=2 the trailing positions are [0, 1], which `get_response_lengths`
+    DOES treat as a sequence boundary (pos==0 followed by pos==1). The packer
+    must add the phantom weight so length matches num_packed_sequences."""
+    from prime_rl.trainer.batch import pad_micro_batch
+    from prime_rl.trainer.utils import get_response_lengths
+    from prime_rl.transport.types import MicroBatch
+
+    mb = MicroBatch(
+        input_ids=[1, 2, 3, 4, 5, 6],
+        loss_mask=[True] * 6,
+        advantages=[1.0] * 6,
+        inference_logprobs=[0.0] * 6,
+        position_ids=[0, 1, 2, 3, 4, 5],
+        temperatures=[1.0] * 6,
+        sequence_loss_weights=[0.5],
+        lora_num_tokens=[6],
+    )
+    pad_micro_batch(mb, pad_to_multiple_of=8)
+    assert len(mb.input_ids) == 8
+    num_packed = len(get_response_lengths(torch.tensor(mb.position_ids)))
+    assert num_packed == 2, "padding_size=2 must create a phantom sequence."
+    assert mb.sequence_loss_weights == [0.5, 0.0]
+    assert len(mb.sequence_loss_weights) == num_packed
 
 
 def test_pad_micro_batch_packed_two_samples_then_padding_size_one():

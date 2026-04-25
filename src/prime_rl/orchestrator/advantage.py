@@ -97,6 +97,17 @@ def apply_batch_advantage_normalization(
 
     Faithful to ScaleRL §3.4: the surviving gradients are scaled by their own
     cohort, not by an artifact of how many groups got filtered.
+
+    Edge cases:
+      * Fewer than 2 surviving rollouts: std is undefined. Zero out
+        the surviving advantages so this step contributes nothing to the
+        gradient — alternative is leaving raw values that would silently
+        rescale the LR step-to-step (the very drift this function exists to
+        prevent).
+      * All surviving advantages identical (std == 0 numerically): same
+        treatment — no signal in the cohort, zero them out.
+      * NaN in any surviving advantage: training is already corrupted; raise
+        loud rather than propagating the NaN through the rescale.
     """
     if advantage_config is None:
         return
@@ -105,12 +116,33 @@ def apply_batch_advantage_normalization(
     if advantage_config.normalization != "batch":
         return
 
-    surviving = [r for r in rollouts if not r.get("is_filtered", False)]
+    # Match the strictness of the read of `r["advantage"]` below: filters set
+    # `is_filtered` on every rollout they touch, so a missing key is a
+    # contract violation, not a "treat as surviving" default.
+    surviving = [r for r in rollouts if not r["is_filtered"]]
+
     if len(surviving) < 2:
-        return  # std undefined / unstable; leave advantages as-is.
+        for r in surviving:
+            r["advantage"] = 0.0
+        return
 
     advs = torch.tensor([float(r["advantage"]) for r in surviving])
+    if not torch.isfinite(advs).all():
+        nan_count = int((~torch.isfinite(advs)).sum().item())
+        raise ValueError(
+            f"apply_batch_advantage_normalization received {nan_count} non-finite "
+            "advantages among the surviving rollouts. The advantage / filter pipeline "
+            "produced NaN or Inf — investigate compute_advantages and the filter chain."
+        )
     std = advs.std(unbiased=False).item()
+    if std <= _NORM_EPS:
+        # Every surviving advantage is the same value. The intended rescale
+        # gives a degenerate `1/eps`-blown direction; zero them instead so the
+        # gradient is zero on this step rather than huge-and-meaningless.
+        for r in surviving:
+            r["advantage"] = 0.0
+        return
+
     scale = 1.0 / (std + _NORM_EPS)
     for r in surviving:
         r["advantage"] = float(r["advantage"]) * scale

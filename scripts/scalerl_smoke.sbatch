@@ -40,11 +40,19 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/outputs/smoke}"
 mkdir -p "$OUTPUT_ROOT"
 
 # Redirect job stdout+stderr ourselves so #SBATCH --output (which is evaluated
-# before any commands run) doesn't need a hardcoded path. Tee preserves
+# before any commands run) doesn't need a hardcoded path. Use `>` (overwrite)
+# instead of `>>` so a slurm `--requeue` of the same SLURM_JOB_ID starts a
+# fresh log rather than concatenating onto the prior run's tail. Tee preserves
 # console visibility for `srun --pty` / `sbatch --wait` users.
-exec > >(tee -a "$OUTPUT_ROOT/${SLURM_JOB_ID:-local}.log") 2>&1
+exec > >(tee "$OUTPUT_ROOT/${SLURM_JOB_ID:-local}.log") 2>&1
 
 cd "$REPO_ROOT"
+
+# Force HF online before sourcing .env so a parent shell's HF_HUB_OFFLINE=1
+# can't suppress the override silently — but let .env opt back in if the
+# operator explicitly wants offline (HF_HUB_OFFLINE=1 in .env wins because we
+# source after).
+export HF_HUB_OFFLINE=0
 [ -f .env ] && source .env
 
 # Make sure `uv` is on PATH. Slurm sets a minimal PATH; `command -v uv` is the
@@ -106,11 +114,8 @@ export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-180
 # part of the working baker recipe.
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 
-# Many cluster shells set HF_HUB_OFFLINE=1 in .bashrc; that breaks first-time
-# downloads. Force online unless the operator explicitly opts back into offline
-# via .env (sourced above) — `${VAR:-0}` would NOT have overridden a parent
-# value of 1, only an unset one.
-export HF_HUB_OFFLINE=0
+# HF cache. Default to a repo-local cache so the cluster doesn't need a writable
+# home dir; if the operator pre-set HF_HOME in .env or the parent shell, honor it.
 export HF_HOME="${HF_HOME:-$REPO_ROOT/hf-cache}"
 
 # Use the venv we set up in this repo. The .venv was populated with `uv sync
@@ -130,7 +135,10 @@ PYBIN="$REPO_ROOT/.venv/bin/python"
 # Preflight: GPUs visible, model weights cached, FA4 stub not shadowing FA4.
 GPU_COUNT="$(nvidia-smi -L 2>/dev/null | wc -l || echo 0)"
 if [ "$GPU_COUNT" -lt 8 ]; then
-    echo "WARNING: nvidia-smi reports $GPU_COUNT GPUs; the math smoke config wants 4 train + 4 infer = 8."
+    echo "ERROR: nvidia-smi reports $GPU_COUNT GPUs but the math smoke config wants" >&2
+    echo "       num_train_gpus=4 + num_infer_gpus=4 = 8 GPUs on one node." >&2
+    echo "       Override [deployment] in the config or run on an 8-GPU node." >&2
+    exit 1
 fi
 
 # Repair flash-attn-cute (FA4) namespace collision if `uv sync --all-extras`

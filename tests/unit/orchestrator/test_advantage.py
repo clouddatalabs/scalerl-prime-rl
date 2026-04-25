@@ -310,14 +310,46 @@ def test_apply_batch_advantage_normalization_no_op_for_non_batch_modes():
 
 
 def test_apply_batch_advantage_normalization_handles_few_surviving():
-    """Fewer than 2 surviving rollouts → std undefined; leave unchanged."""
+    """Fewer than 2 surviving rollouts → std undefined; zero out so the step's
+    contribution to the gradient is zero (raw values would silently rescale
+    the LR step-to-step, the very drift this function exists to prevent)."""
     rollouts = [
         {"advantage": 1.0, "is_filtered": False},
         {"advantage": -1.0, "is_filtered": True},
     ]
     apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
-    assert rollouts[0]["advantage"] == 1.0
-    assert rollouts[1]["advantage"] == -1.0
+    assert rollouts[0]["advantage"] == 0.0
+    assert rollouts[1]["advantage"] == -1.0  # filtered rollouts are untouched
+
+
+def test_apply_batch_advantage_normalization_zeros_constant_advantages():
+    """All surviving advantages identical (std == 0) → zero out (don't divide
+    by eps and explode to ~1e8)."""
+    rollouts = [
+        {"advantage": 0.5, "is_filtered": False},
+        {"advantage": 0.5, "is_filtered": False},
+        {"advantage": 0.5, "is_filtered": False},
+    ]
+    apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
+    for r in rollouts:
+        assert r["advantage"] == 0.0
+
+
+def test_apply_batch_advantage_normalization_raises_on_nonfinite():
+    rollouts = [
+        {"advantage": 1.0, "is_filtered": False},
+        {"advantage": float("nan"), "is_filtered": False},
+    ]
+    with pytest.raises(ValueError, match="non-finite advantages"):
+        apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
+
+
+def test_apply_batch_advantage_normalization_requires_is_filtered():
+    """`is_filtered` is set by `apply_filters` on every rollout — missing key
+    is a contract violation, not a default-to-False."""
+    rollouts = [{"advantage": 1.0}, {"advantage": -1.0}]
+    with pytest.raises(KeyError, match="is_filtered"):
+        apply_batch_advantage_normalization(rollouts, DefaultAdvantageConfig(normalization="batch"))
 
 
 def test_default_advantage_config_normalization_default_is_none():

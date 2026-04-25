@@ -159,14 +159,17 @@ def test_fa4_attention_forward_runs_on_gpu_with_packed_position_ids():
         module, query, key, value, attention_mask=None, scaling=scaling, position_ids=position_ids
     )
 
-    # SDPA reference with explicit block-diagonal causal mask.
-    boundaries: list[int] = []
-    cursor = 0
-    for L in seq_lens:
-        boundaries.append(cursor)
-        cursor += L
+    # SDPA reference with the block-diagonal causal mask DERIVED FROM
+    # `position_ids` — the same input the bridge sees. Building from
+    # `seq_lens` directly would let an axis-mis-read in the bridge pass
+    # silently because both the bridge and the test would use lock-step
+    # interpretations. A `0` in position_ids starts a new block.
+    pos = position_ids[0].tolist()
+    boundaries_from_pos = [i for i, v in enumerate(pos) if v == 0]
     block_mask = torch.zeros(total_q, total_q, dtype=torch.bool, device=device)
-    for start, L in zip(boundaries, seq_lens):
+    for b_idx, start in enumerate(boundaries_from_pos):
+        end = boundaries_from_pos[b_idx + 1] if b_idx + 1 < len(boundaries_from_pos) else total_q
+        L = end - start
         for i in range(L):
             block_mask[start + i, start : start + i + 1] = True
     out_ref = torch.nn.functional.scaled_dot_product_attention(

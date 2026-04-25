@@ -192,10 +192,14 @@ def cispo_loss_fn(inputs: LossInputs, loss_config: CISPOLossConfig) -> LossOutpu
     loss = -pg_per_token.sum()
 
     metrics = {
-        "importance_ratio": _safe_mean(importance_ratio, inputs.loss_mask),
-        # Fraction of trainable tokens whose ratio hit the eps_max ceiling. Useful as
-        # a sanity gauge — too high (e.g. > ~10%) suggests the recipe drifted off-policy
-        # beyond what the truncation bound was tuned for.
+        # Log the post-clamp ratio so a single `inference_logprobs = -inf` token
+        # (e.g. a stale checkpoint at a low-prob token) doesn't poison the column
+        # with `+inf`. The loss path is already safe via clamp + detach; the
+        # metric path uses the same clamped value for consistency.
+        "importance_ratio": _safe_mean(truncated_ratio, inputs.loss_mask),
+        # Fraction of trainable tokens whose ratio hit the eps_max ceiling. Useful
+        # as a sanity gauge — too high (e.g. > ~10%) suggests the recipe drifted
+        # off-policy beyond what the truncation bound was tuned for.
         "ratio_truncated": _safe_mean((importance_ratio > loss_config.eps_max).float(), inputs.loss_mask),
     }
     return LossOutputs(loss=loss, metrics=metrics)

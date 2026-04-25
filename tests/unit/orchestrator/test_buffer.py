@@ -404,6 +404,18 @@ def test_buffer_config_rejects_easy_threshold_shadowing_npr():
         )
 
 
+def test_buffer_config_rejects_easy_threshold_equal_to_npr_threshold():
+    """Boundary case for the shadow check: easy == npr_threshold also blocks NPR
+    (anything ≥ npr also ≥ easy → easy pool absorbs first). Pin the equality
+    boundary so a regression flipping `<=` to `<` doesn't slip through."""
+    with pytest.raises(ValueError, match="shadows NPR"):
+        BufferConfig(
+            easy_threshold=0.9,
+            no_positive_resampling=True,
+            no_positive_resampling_threshold=0.9,
+        )
+
+
 def test_buffer_no_positive_resampling_skipped_for_easy_promoted(dummy_envs, make_rollouts):
     """Sanity for the `easy <= NPR` shadowing case: with the schema ordering
     above (easy_threshold > NPR_threshold), an example whose avg_reward exceeds

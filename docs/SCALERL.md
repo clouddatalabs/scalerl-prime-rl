@@ -27,35 +27,50 @@ rollouts exceed budget more than ~5% of the time.
 ## Quickstart
 
 ```bash
-git clone <this-repo> ~/scalerl-prime-rl
+git clone https://github.com/clouddatalabs/scalerl-prime-rl.git ~/scalerl-prime-rl
 cd ~/scalerl-prime-rl
+
+# Pin a HuggingFace cache location for the rest of this shell so step 4's
+# pre-download lands where the sbatch will look (the sbatch defaults to
+# $REPO_ROOT/hf-cache).
+export HF_HOME="$PWD/hf-cache"
 
 # 1. Install. Pinned to vllm>=0.19, torch+cu128, transformers @ a HEAD commit,
 #    flash-attn-cute (FA4) at rev abd9943b. Takes ~10 minutes on a fresh cache.
-uv sync --all-extras
+#    NOTE: use --extra all (the aggregate extra), NOT --all-extras. The latter
+#    enumerates every extra by name and pulls in [flash-attn-3], whose wheel
+#    ships Hopper sm_90 kernels only and crashes on B200.
+uv sync --extra all
 
 # 2. Repair flash-attn-cute namespace if `uv sync` happened to install
 #    `flash-attn` (FA2) after `flash-attn-cute` — both ship a `flash_attn/cute/`
 #    sub-package and the FA2 stub silently shadows the real FA4. Idempotent;
-#    this also runs from the sbatch script as a defensive double-check.
+#    this also runs from the sbatch script as a defensive double-check, but
+#    running it on the login node first lets us catch network failures early
+#    (compute nodes often can't reach github.com).
 bash scripts/fix-flash-attn-cute.sh
 
 # 3. Auth (only the bits the config needs):
 #    - HF token if you use a gated model (Qwen3-8B is open, so this is optional).
 #    - WANDB_API_KEY if you uncomment [wandb] in either config.
 #      Either `wandb login` once, or put `WANDB_API_KEY=...` in `.env`.
+#      Set `WANDB_MODE=offline` if your cluster has no outbound network.
 #    The smoke configs ship with `[wandb]` commented out.
 
-# 4. Pre-download the model so the first sbatch doesn't block on a multi-GB pull:
+# 4. Pre-download the model so the first sbatch doesn't block on a multi-GB
+#    pull through whatever NAT your compute nodes have. Uses HF_HOME set above.
 huggingface-cli download Qwen/Qwen3-8B
 
-# 5. Submit. Override the partition / log dir if your cluster differs:
-sbatch -p <partition> --export=ALL,REPO_ROOT="$PWD",OUTPUT_ROOT=/your/path \
+# 5. Submit. Override the partition / log dir if your cluster differs.
+#    LOG_DIR controls where the slurm stdout/stderr goes; the run's
+#    checkpoints + rollouts go under `[output_dir]` from the TOML
+#    (default: outputs/scalerl_math).
+sbatch -p <partition> --export=ALL,REPO_ROOT="$PWD",OUTPUT_ROOT="$PWD/slurm-logs" \
        scripts/scalerl_smoke.sbatch
 
-# 6. Tail the log (smoke configs train for 500 steps; first step is ~3 min cold,
-#    steady-state ~30-60s/step on 4xB200 with FA4 + compiled vLLM):
-tail -f /your/path/<jobid>.log
+# 6. Tail the log. Smoke configs train for 500 steps; first step is ~3 min
+#    cold, steady-state ~30-60s/step on 4xB200 with FA4 + compiled vLLM.
+tail -f "$PWD/slurm-logs/<jobid>.log"
 ```
 
 **Cluster preconditions:**
