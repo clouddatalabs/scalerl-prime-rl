@@ -413,11 +413,36 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_quantize_in_weight_transfer(self):
-        if self.weight_broadcast is None or not self.weight_broadcast.quantize_in_weight_transfer:
+        # Walk both top-level shorthand AND per-component paths. The
+        # original validator early-returned when `[weight_broadcast]` was
+        # omitted, but `[trainer.weight_broadcast] quantize_in_weight_transfer
+        # = true` paired with no top-level block silently bypassed the
+        # nccl-only / inference-required / impl="custom" checks. The
+        # companion `validate_fp32_lm_head_no_fp8_transfer` already walks
+        # both; mirror that here.
+        candidates = []
+        if self.weight_broadcast is not None and getattr(
+            self.weight_broadcast, "quantize_in_weight_transfer", False
+        ):
+            candidates.append(("weight_broadcast", self.weight_broadcast))
+        if self.trainer.weight_broadcast is not None and getattr(
+            self.trainer.weight_broadcast, "quantize_in_weight_transfer", False
+        ):
+            candidates.append(("trainer.weight_broadcast", self.trainer.weight_broadcast))
+        if (
+            self.orchestrator.weight_broadcast is not None
+            and getattr(self.orchestrator.weight_broadcast, "quantize_in_weight_transfer", False)
+        ):
+            candidates.append(("orchestrator.weight_broadcast", self.orchestrator.weight_broadcast))
+
+        if not candidates:
             return self
 
-        if self.weight_broadcast.type != "nccl":
-            raise ValueError("weight_broadcast.quantize_in_weight_transfer requires weight_broadcast.type = 'nccl'.")
+        for label, wb in candidates:
+            if wb.type != "nccl":
+                raise ValueError(
+                    f"{label}.quantize_in_weight_transfer requires {label}.type = 'nccl'."
+                )
 
         if self.inference is None:
             raise ValueError("weight_broadcast.quantize_in_weight_transfer requires an inference config.")
@@ -1192,6 +1217,23 @@ class RLConfig(BaseConfig):
                             f"maximum of {VALID_VLLM_LORA_RANKS[-1]} — vLLM cannot "
                             "serve adapters of this rank. Lower trainer LoRA rank "
                             "or upgrade vLLM."
+                        )
+                else:
+                    # Operator explicitly set both `[trainer.model.lora] rank`
+                    # and `[inference] max_lora_rank`. Catch the inversion
+                    # (`trainer.rank > inference.max_lora_rank`) at config load
+                    # so vLLM doesn't reject the adapter at server startup
+                    # ("requested LoRA rank exceeds max_lora_rank"). The auto-
+                    # derive path's vLLM-rounding check is symmetric with this.
+                    trainer_rank = self.trainer.model.lora.rank
+                    if self.inference.max_lora_rank < trainer_rank:
+                        raise ValueError(
+                            f"inference.max_lora_rank ({self.inference.max_lora_rank}) "
+                            f"is smaller than trainer.model.lora.rank ({trainer_rank}). "
+                            "vLLM rejects the adapter at server startup. Either raise "
+                            "max_lora_rank to >= trainer rank, or lower trainer rank to "
+                            "fit. Both must round to a valid vLLM rank "
+                            "(8/16/32/64/128/256/320/512)."
                         )
             else:
                 get_logger().warning(

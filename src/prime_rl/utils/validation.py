@@ -156,3 +156,27 @@ def validate_shared_weight_broadcast(
         raise ValueError(
             f"Trainer weight broadcast type ({trainer.weight_broadcast.type}) and orchestrator weight broadcast type ({orchestrator.weight_broadcast.type}) are not the same. Please specify the same weight broadcast type for both."
         )
+
+    # Also enforce parity on `quantize_in_weight_transfer` across the NCCL
+    # path. Without this check, `[trainer.weight_broadcast]
+    # quantize_in_weight_transfer = true` paired with
+    # `[orchestrator.weight_broadcast] quantize_in_weight_transfer = false`
+    # passed load (since types both equal "nccl") but produced a runtime
+    # crash at first weight-update — the trainer broadcasts FP8 weights
+    # while the orchestrator's admin client expects HF-format weights.
+    # Reject loudly at config load.
+    if (
+        trainer.weight_broadcast.type == "nccl"
+        and orchestrator.weight_broadcast.type == "nccl"
+    ):
+        t_q = getattr(trainer.weight_broadcast, "quantize_in_weight_transfer", False)
+        o_q = getattr(orchestrator.weight_broadcast, "quantize_in_weight_transfer", False)
+        if t_q != o_q:
+            raise ValueError(
+                f"weight_broadcast.quantize_in_weight_transfer disagrees: "
+                f"trainer={t_q}, orchestrator={o_q}. The trainer-side broadcast "
+                "format must match the orchestrator's admin-client expectation "
+                "or weight updates crash at first step. Set both to the same "
+                "value (or set it once via the top-level [weight_broadcast] "
+                "block)."
+            )
