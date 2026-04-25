@@ -56,6 +56,32 @@ from prime_rl.trainer.models.layers.lm_head import FUSED_CE_IGNORE_INDEX
 from torchtitan.distributed.utils import clip_grad_norm_
 
 
+def _resolve_sft_scheduler_steps(config: SFTConfig, checkpoint_step: int | None) -> int | None:
+    """Resolve the number of scheduler steps for the SFT trainer.
+
+    When `skip_scheduler` is set on resume, the scheduler should only advance
+    over the *remaining* steps (`max_steps - checkpoint_step`). Use the
+    resolved `checkpoint_step` (from `resolve_latest_ckpt_step` or the
+    user-supplied step number), NOT `config.ckpt.resume_step` — the
+    documented sentinel `resume_step=-1` would otherwise yield
+    `max_steps - (-1) = max_steps + 1` steps of slower decay across the
+    entire post-resume run.
+
+    Returns `config.max_steps` unchanged when not resuming, when no
+    `max_steps` is configured, or when `skip_scheduler` is False.
+    Extracted as a pure function so unit tests can pin the contract
+    without booting the trainer.
+    """
+    if (
+        config.max_steps is not None
+        and config.ckpt
+        and config.ckpt.skip_scheduler
+        and checkpoint_step is not None
+    ):
+        return config.max_steps - checkpoint_step
+    return config.max_steps
+
+
 @clean_exit
 def train(config: SFTConfig):
     # Setup world and logger
@@ -147,20 +173,7 @@ def train(config: SFTConfig):
         config.optim, list(model.named_parameters()), parallel_dims, cpu_offload=config.model.optim_cpu_offload
     )
 
-    # Set up the learning rate scheduler. When skip_scheduler is set, we want
-    # the scheduler to advance only over the *remaining* steps after resume —
-    # use `checkpoint_step` (the resolved value) rather than
-    # `config.ckpt.resume_step` so that the documented sentinel `resume_step=-1`
-    # doesn't yield `max_steps - (-1) = max_steps + 1` steps of slower decay.
-    if (
-        config.max_steps is not None
-        and config.ckpt
-        and config.ckpt.skip_scheduler
-        and checkpoint_step is not None
-    ):
-        scheduler_steps = config.max_steps - checkpoint_step
-    else:
-        scheduler_steps = config.max_steps
+    scheduler_steps = _resolve_sft_scheduler_steps(config, checkpoint_step)
     logger.info(f"Setting up {config.scheduler.type} scheduler with {scheduler_steps} steps ({config.scheduler})")
     scheduler = setup_scheduler(optimizer, config.scheduler, scheduler_steps, config.optim.lr)
 
