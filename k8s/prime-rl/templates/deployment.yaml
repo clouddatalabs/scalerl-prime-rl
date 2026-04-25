@@ -220,13 +220,24 @@ spec:
           failureThreshold: {{ .Values.inference.probes.readiness.failureThreshold }}
           timeoutSeconds: {{ .Values.inference.probes.readiness.timeoutSeconds }}
         {{- end }}
-        {{- if .Values.storage.enabled }}
+        # Mount tmpfs at /dev/shm. Default container shm is 64 MiB; vLLM
+        # multi-process workers and torch DataLoader pin shared tensors
+        # there and hang at "Waiting for READY message from DP Coordinator"
+        # when the budget runs out. SCALERL.md documents the SLURM
+        # `--shm-size=8g` workaround; this is the k8s equivalent.
         volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        {{- if .Values.storage.enabled }}
         - name: shared-data
           mountPath: {{ .Values.storage.mountPath }}
         {{- end }}
-      {{- if .Values.storage.enabled }}
       volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: {{ .Values.inference.shm.sizeLimit | default "8Gi" }}
+      {{- if .Values.storage.enabled }}
       - name: shared-data
         persistentVolumeClaim:
           claimName: {{ .Release.Name }}-shared-data
@@ -366,13 +377,21 @@ spec:
           failureThreshold: {{ .Values.trainer.probes.readiness.failureThreshold }}
           timeoutSeconds: {{ .Values.trainer.probes.readiness.timeoutSeconds }}
         {{- end }}
-        {{- if .Values.storage.enabled }}
+        # See inference deployment for the /dev/shm rationale — the trainer
+        # also pins shared tensors there (torch DataLoader, FSDP gather).
         volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        {{- if .Values.storage.enabled }}
         - name: shared-data
           mountPath: {{ .Values.storage.mountPath }}
         {{- end }}
-      {{- if .Values.storage.enabled }}
       volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: {{ .Values.trainer.shm.sizeLimit | default "8Gi" }}
+      {{- if .Values.storage.enabled }}
       - name: shared-data
         persistentVolumeClaim:
           claimName: {{ .Release.Name }}-shared-data
