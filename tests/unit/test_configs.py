@@ -188,3 +188,59 @@ def test_nccl_async_level_default_one_still_validates():
         {"weight_broadcast": {"type": "nccl"}, "max_async_level": 1}
     )
     assert config.experimental.allow_nccl_async_level_override is False
+
+
+_RL_BASE = {
+    "trainer": {},
+    "orchestrator": {},
+    "inference": {},
+}
+
+
+def test_rl_config_propagates_nccl_async_override_from_orchestrator_to_trainer():
+    """Setting the override on the orchestrator side at the RL level propagates to the trainer.
+
+    Without this propagation, the RLConfig-level max_async_level=8 + NCCL combo would still
+    be rejected by TrainerConfig's own validator. See snowflake_poc_critique.md §1.
+    """
+    config = RLConfig.model_validate(
+        {
+            **_RL_BASE,
+            "max_async_level": 8,
+            "weight_broadcast": {"type": "nccl"},
+            "orchestrator": {"experimental": {"allow_nccl_async_level_override": True}},
+        }
+    )
+    assert config.trainer.experimental.allow_nccl_async_level_override is True
+    assert config.orchestrator.experimental.allow_nccl_async_level_override is True
+    assert config.trainer.max_async_level == 8
+    assert config.orchestrator.max_async_level == 8
+
+
+def test_rl_config_rejects_mismatched_fp32_lm_head():
+    """Trainer fp32=True + inference fp32=False raises at config load.
+
+    Mismatch defeats the train/inference logprob parity that fp32_lm_head exists for
+    (ScaleRL §3.2). See snowflake_poc_critique.md §3.
+    """
+    with pytest.raises(ValidationError, match="fp32_lm_head must match"):
+        RLConfig.model_validate(
+            {
+                **_RL_BASE,
+                "trainer": {"model": {"fp32_lm_head": True}},
+                "inference": {"model": {"fp32_lm_head": False}},
+            }
+        )
+
+
+def test_rl_config_accepts_matched_fp32_lm_head():
+    """fp32_lm_head=True on both sides validates."""
+    config = RLConfig.model_validate(
+        {
+            **_RL_BASE,
+            "trainer": {"model": {"fp32_lm_head": True}},
+            "inference": {"model": {"fp32_lm_head": True}},
+        }
+    )
+    assert config.trainer.model.fp32_lm_head is True
+    assert config.inference.model.fp32_lm_head is True

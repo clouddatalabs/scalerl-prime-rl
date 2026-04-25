@@ -619,6 +619,45 @@ class RLConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
+    def propagate_nccl_async_override(self):
+        """If either side opts into the experimental NCCL override, propagate to the other.
+
+        RLConfig owns max_async_level for both subconfigs, so the experimental opt-in must be
+        consistent across them. Setting it on either side propagates; this avoids the "fix
+        the orchestrator validator but the trainer validator still rejects" footgun the
+        critique flagged at snowflake_poc_critique.md §1.
+        """
+        flag = (
+            self.orchestrator.experimental.allow_nccl_async_level_override
+            or self.trainer.experimental.allow_nccl_async_level_override
+        )
+        self.orchestrator.experimental.allow_nccl_async_level_override = flag
+        self.trainer.experimental.allow_nccl_async_level_override = flag
+        return self
+
+    @model_validator(mode="after")
+    def validate_fp32_lm_head_consistency(self):
+        """Reject mismatched fp32_lm_head between trainer and inference.
+
+        The whole point of FP32 LM-head (ScaleRL §3.2) is to keep train/inference logprob
+        correlation > 0.99. Setting it on one side without the other defeats the purpose
+        AND injects silent bias into any IS-based loss. Fail loud at config load.
+
+        See snowflake_poc_critique.md §3.
+        """
+        trainer_fp32 = self.trainer.model.fp32_lm_head
+        inference_fp32 = self.inference.model.fp32_lm_head
+        if trainer_fp32 != inference_fp32:
+            raise ValueError(
+                f"fp32_lm_head must match between trainer and inference: "
+                f"trainer.model.fp32_lm_head={trainer_fp32}, "
+                f"inference.model.fp32_lm_head={inference_fp32}. "
+                "Mismatch defeats the train/inference logprob parity that FP32 LM-head exists "
+                "to provide (ScaleRL §3.2). Set both true or both false."
+            )
+        return self
+
+    @model_validator(mode="after")
     def auto_setup_seq_len(self):
         """Auto-setup shared seq_len for trainer and orchestrator.
 

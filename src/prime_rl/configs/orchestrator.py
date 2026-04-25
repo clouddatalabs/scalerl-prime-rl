@@ -731,9 +731,12 @@ class DefaultAdvantageConfig(BaseModel):
                 "'group': divide each advantage by its per-group std (classic GRPO). "
                 "'batch': divide each advantage by the std over the whole batch — ScaleRL §3.4 / "
                 "Reinforce++ / Magistral. Removes the per-prompt-hardness reweighting that per-group "
-                "std would impose. Std is computed pre-filter (before apply_filters drops "
-                "zero-advantage groups); a post-filter alternative would couple ZeroAdvantageFilter "
-                "into advantage computation, which we avoid for separation-of-concerns."
+                "std would impose. KNOWN DEVIATION FROM PAPER: std is computed pre-filter "
+                "(before apply_filters drops zero-advantage groups via ZeroAdvantageFilter). "
+                "Practical effect is a per-step constant-factor scaling of surviving advantages "
+                "— absorbed into the LR — but the scale drifts step-to-step as the pre-filter "
+                "pool changes. Post-filter implementation is a follow-up; flagged in "
+                "snowflake_poc_critique.md §2."
             )
         ),
     ] = "none"

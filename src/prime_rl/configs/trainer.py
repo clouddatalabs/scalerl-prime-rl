@@ -790,6 +790,18 @@ WeightBroadcastConfig: TypeAlias = Annotated[
 class TrainerExperimentalConfig(BaseConfig):
     """Experimental features for the trainer."""
 
+    allow_nccl_async_level_override: Annotated[
+        bool,
+        Field(
+            description=(
+                "Mirror of OrchestratorExperimentalConfig.allow_nccl_async_level_override. "
+                "Required because RLConfig propagates max_async_level to both trainer and "
+                "orchestrator, and both have their own NCCL validator. Validated on B200/EFA "
+                "per ScaleRL Pipeline-RL §3.1; see configs/orchestrator.py for the rationale."
+            ),
+        ),
+    ] = False
+
 
 class TrainerConfig(BaseConfig):
     """Configures the RL trainer"""
@@ -978,8 +990,18 @@ class TrainerConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_weight_broadcast_type(self):
-        if self.weight_broadcast.type == "nccl" and self.max_async_level != 1:
-            raise ValueError("NCCL weight broadcast only works with async level 1")
+        if (
+            self.weight_broadcast.type == "nccl"
+            and self.max_async_level != 1
+            and not self.experimental.allow_nccl_async_level_override
+        ):
+            raise ValueError(
+                "NCCL weight broadcast defaults to max_async_level = 1 because the broadcast "
+                "is synchronous and can deadlock under async-level > 1 on some hardware. "
+                "Set trainer.experimental.allow_nccl_async_level_override = true (and the "
+                "matching orchestrator.experimental flag) to opt in. Validated on B200/EFA "
+                "per ScaleRL Pipeline-RL §3.1; other hardware may need filesystem broadcast."
+            )
         return self
 
     @model_validator(mode="after")
