@@ -314,11 +314,31 @@ class _DockerClient:
         container's default WORKDIR apply. We use this to root the
         agent's shell at ``/app`` so relative paths in the task
         instruction resolve the way Harbor's agents expect.
+
+        On timeout we kill the in-container PROCESS GROUP, not just the
+        local docker CLI client. Docker does NOT propagate
+        client-disconnect to the exec'd process: without the follow-up
+        ``docker exec ... kill -- -<PGID>`` the in-container command
+        keeps holding cwd / lockfiles / fds and trips subsequent exec
+        calls (observed as `prep /tests failed: exit=124` chains where
+        the user's prior shell call never died). We wrap the user's
+        command in ``setsid`` so the bash becomes a new session leader
+        (PID = PGID) and write that PID to a pidfile inside the
+        container; the timeout handler reads it back and kills the
+        whole group.
         """
+        # 16 hex chars (64 bits) — collision probability is irrelevant
+        # for per-exec ephemeral pidfiles.
+        exec_uid = uuid.uuid4().hex[:16]
+        pidfile = f"/tmp/.tb_exec_{exec_uid}.pid"
+        wrapped = f"echo $$ > {pidfile}; {command}"
+
         cmd = [*self._prefix(), "exec"]
         if working_dir:
             cmd += ["-w", working_dir]
-        cmd += [container, "bash", "-lc", command]
+        # ``setsid`` ships with util-linux (every TB task base image:
+        # ubuntu-24-04, python:*-slim, ghcr.io/laude-institute/...).
+        cmd += [container, "setsid", "bash", "-lc", wrapped]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -331,10 +351,29 @@ class _DockerClient:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            # Also kill whatever's still running inside the container
-            # for this exec chain so subsequent calls aren't serialized
-            # behind a stuck process.
-            return 124, "", f"Command timed out after {timeout}s"
+            # Best-effort kill of the in-container process group.
+            # The pidfile may be missing (e.g. command died before
+            # writing it); ignore. The rm cleans up so /tmp doesn't
+            # accumulate stale pidfiles across thousands of rollouts.
+            kill_cmd = [
+                *self._prefix(), "exec", container, "sh", "-c",
+                f'PID=$(cat {pidfile} 2>/dev/null); '
+                f'[ -n "$PID" ] && kill -9 -- -"$PID" 2>/dev/null; '
+                f'rm -f {pidfile} 2>/dev/null',
+            ]
+            try:
+                kill_proc = await asyncio.create_subprocess_exec(
+                    *kill_cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(kill_proc.wait(), timeout=10)
+            except (asyncio.TimeoutError, OSError):
+                pass
+            return 124, "", (
+                f"Command timed out after {timeout}s "
+                f"(in-container PGID killed via {pidfile})"
+            )
         return (
             proc.returncode or 0,
             stdout_b.decode(errors="replace"),
@@ -502,6 +541,35 @@ class _DockerClient:
         )
         await proc.wait()
         return proc.returncode == 0
+
+    async def pull(self, image: str, *, timeout: int = 600) -> None:
+        """``docker pull <image>``. Raises on non-zero exit.
+
+        Used by `_resolve_image` in registry mode to fetch prebuilt
+        task images instead of building them locally. Pull writes
+        through the daemon's regular image layer store (NOT BuildKit's
+        content store), so the cache-poisoning failures that bit the
+        live-build path are structurally unreachable here.
+        """
+        cmd = [*self._prefix(), "pull", image]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError(f"docker pull {image!r} timed out after {timeout}s")
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"docker pull {image!r} failed (exit={proc.returncode}): "
+                f"{stderr_b.decode(errors='replace').strip()[:1000]}"
+            )
 
     async def rmi(self, image: str) -> None:
         """``docker rmi -f <image>``. Used by the BuildKit-corruption recovery
@@ -731,6 +799,7 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         build_local_images: bool = True,
         build_timeout_seconds: int | None = None,
         build_log_dir: str | os.PathLike[str] | None = None,
+        registry_host: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(max_turns=max_turns, **kwargs)
@@ -738,6 +807,10 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         self._command_timeout_seconds = command_timeout_seconds
         self._test_timeout_seconds = test_timeout_seconds
         self._docker = docker_client or _DockerClient()
+        # When set (e.g. "rlgpu0:5000"), `_resolve_image` `docker pull`s
+        # from this private registry instead of building locally — see
+        # registry-mode design notes in `_resolve_image`.
+        self._registry_host: str | None = registry_host
 
         # ---- local image build plumbing ------------------------------
         # Harbor task.toml files point at ``us-central1-docker.pkg.dev/
@@ -787,8 +860,16 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
     def _local_image_tag(self, spec: _TaskSpec) -> str:
         # Deterministic, namespace-isolated tag -- ``tb-local/...`` keeps
         # our images visually grouped in ``docker images`` and avoids
-        # colliding with anything users might have pulled manually.
-        return f"tb-local/{spec.name}:latest"
+        # colliding with anything users might have pulled manually. In
+        # registry mode the tag is registry-qualified so ``docker pull``,
+        # ``docker run``, ``docker rmi``, etc. all hit the right repo.
+        # Touching this single helper is sufficient: every downstream
+        # caller (image_exists, run_detached, _invalidate_image,
+        # _resolved_tags lookup, _build_lock_path) goes through here.
+        base = f"tb-local/{spec.name}:latest"
+        if self._registry_host is not None:
+            return f"{self._registry_host}/{base}"
+        return base
 
     def _dockerfile_path(self, spec: _TaskSpec) -> Path | None:
         candidate = spec.dir / "environment" / "Dockerfile"
@@ -867,6 +948,27 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
                 if await self._docker.image_exists(local_tag):
                     self._resolved_tags[spec.name] = local_tag
                     return local_tag
+
+            # Registry mode: pull instead of build. NO cross-process
+            # flock needed — docker dedupes concurrent pulls of the
+            # same tag at the daemon level, and pull writes through
+            # the daemon's image layer store (NOT BuildKit's content
+            # store), so the snapshotter-cache poisoning that broke
+            # the live-build path is structurally unreachable here.
+            if self._registry_host is not None:
+                try:
+                    await self._docker.pull(local_tag)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"docker pull {local_tag!r} failed ({e!r}). "
+                        f"Either the registry at {self._registry_host} is "
+                        f"unreachable, or the image was never pushed. Run "
+                        f"`bash scripts/prebuild_tb_images.sh` on a build "
+                        f"host with TB_REGISTRY_HOST={self._registry_host} "
+                        f"set. NO live build is performed in registry mode."
+                    ) from e
+                self._resolved_tags[spec.name] = local_tag
+                return local_tag
 
             # Cross-process serialization. Without this, peer worker
             # processes (verifiers spawns ``num_workers`` ≈ 3 for the
@@ -996,34 +1098,40 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
                             await self._docker.remove_force(cid)
 
                     # Pre-build every task's image SERIALLY before the
-                    # first rollout fires. Without pre-building, the
-                    # first batch of N rollouts (different tasks) all
-                    # call _resolve_image concurrently — flock serializes
-                    # cross-process, but each worker still sees a
-                    # cold cache and the daemon still juggles N parallel
-                    # builds end-to-end (image_exists is False for all,
-                    # so each worker enters the build path before any
-                    # finishes). Pre-build under the same one-shot guard
-                    # means: by the time setup_state's `_resolve_image`
-                    # below runs, the image is either already-built
+                    # first rollout fires (legacy live-build mode only).
+                    # Without pre-building, the first batch of N rollouts
+                    # (different tasks) all call _resolve_image
+                    # concurrently — flock serializes cross-process, but
+                    # each worker still sees a cold cache and the daemon
+                    # still juggles N parallel builds end-to-end
+                    # (image_exists is False for all, so each worker
+                    # enters the build path before any finishes).
+                    # Pre-build under the same one-shot guard means: by
+                    # the time setup_state's `_resolve_image` below
+                    # runs, the image is either already-built
                     # (image_exists=True, fast-path) or this rollout is
                     # the first to discover a deferred build need. Either
                     # way, no peer worker is racing on the same tag.
-                    _logger.info(
-                        "terminal_bench_local: pre-building %d task images",
-                        len(self._task_specs),
-                    )
-                    for prebuild_spec in self._task_specs.values():
-                        try:
-                            await self._resolve_image(prebuild_spec)
-                        except Exception as e:
-                            _logger.warning(
-                                "terminal_bench_local: pre-build for %s "
-                                "failed (%r); the per-rollout build path "
-                                "will retry with --no-cache on first use",
-                                prebuild_spec.name,
-                                e,
-                            )
+                    #
+                    # In registry mode pulls are concurrent-safe at the
+                    # daemon level (no snapshotter-cache races), so we
+                    # let `_resolve_image` pull lazily per-rollout.
+                    if self._registry_host is None:
+                        _logger.info(
+                            "terminal_bench_local: pre-building %d task images",
+                            len(self._task_specs),
+                        )
+                        for prebuild_spec in self._task_specs.values():
+                            try:
+                                await self._resolve_image(prebuild_spec)
+                            except Exception as e:
+                                _logger.warning(
+                                    "terminal_bench_local: pre-build for %s "
+                                    "failed (%r); the per-rollout build path "
+                                    "will retry with --no-cache on first use",
+                                    prebuild_spec.name,
+                                    e,
+                                )
 
                     self._stale_sweep_done = True
 
@@ -1063,7 +1171,8 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
             # forever (image_exists keeps short-circuiting back to the
             # broken tag).
             if (
-                self._build_local_images
+                self._registry_host is None
+                and self._build_local_images
                 and self._dockerfile_path(spec) is not None
                 and _DockerClient._is_buildkit_corruption(str(e))
             ):
@@ -1427,6 +1536,7 @@ def load_environment(
     build_local_images: bool = True,
     build_timeout_seconds: int | None = None,
     build_log_dir: str | os.PathLike[str] | None = None,
+    registry_host: str | None = None,
 ) -> vf.Environment:
     """Build a ``TerminalBenchLocalEnv`` for one or more Harbor tasks.
 
@@ -1463,6 +1573,16 @@ def load_environment(
             ``<dir>/<task>.build.log`` instead of being captured in
             memory. Recommended for production; pass the orchestrator
             run's envs log dir so builds are greppable from the run.
+        registry_host: When set (e.g. ``"rlgpu0:5000"``),
+            ``_resolve_image`` `docker pull`s prebuilt task images from
+            this private registry instead of building locally. The
+            shipped TB config defaults to this. Pull bypasses BuildKit's
+            content store entirely (writes through the daemon's regular
+            image layer storage), which makes the cache-poisoning
+            failures we observed on the live-build path structurally
+            unreachable. Set None for local dev / unit tests to keep
+            the legacy live-build fallback. Maintainers populate the
+            registry by running ``scripts/prebuild_tb_images.sh``.
     """
     root = Path(task_root)
     if not root.is_absolute():
@@ -1529,5 +1649,6 @@ def load_environment(
         build_local_images=build_local_images,
         build_timeout_seconds=build_timeout_seconds,
         build_log_dir=build_log_dir,
+        registry_host=registry_host,
     )
     return env
