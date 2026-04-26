@@ -103,7 +103,7 @@ SHUTDOWN_TIMEOUT_S = 300
 # Maximum number of times to attempt generating a training batch when all
 # rollouts are filtered out. After this many attempts, the orchestrator crashes
 # rather than silently skipping training steps.
-MAX_EMPTY_BATCH_ATTEMPTS = 3
+MAX_EMPTY_BATCH_ATTEMPTS = 20
 
 
 def _resolve_max_empty_batch_attempts(paper_faithful_empty_batch: bool) -> int:
@@ -455,14 +455,34 @@ async def orchestrate(config: OrchestratorConfig):
         # Update prev_ckpt_step for next iteration
         prev_ckpt_step = ckpt_step
 
-        # Schedule generating the training batch. By default, retry on
-        # empty-after-filter batches so the trainer never receives an empty
-        # batch. When `experimental.paper_faithful_empty_batch=True`, run a
-        # single attempt — ScaleRL §3.4 specifies zero-variance filtering as
-        # *drop, don't refill* (vs DAPO dynamic resampling). The all-empty
-        # case is then surfaced as a real failure rather than masked by retry.
+        # Schedule generating the training batch.
+        #
+        # Default mode (`paper_faithful_empty_batch=False`): keep sampling
+        # ADDITIONAL groups and accumulating until the surviving (post-filter,
+        # post-batch-normalization) cohort is at least `batch_size`. This is
+        # DAPO-style dynamic resampling — the user's stance is "always train
+        # on full batches; if some groups are dropped from low variance, we
+        # should sample more groups until we have signal." `compute_advantages`
+        # is idempotent (recomputes from `reward`), `apply_filters` resets
+        # `is_filtered`/`filters` first, and `apply_batch_advantage_normalization`'s
+        # scaling is keyed off compute_advantages's fresh output — so re-
+        # running them on the cumulative list each iteration is correct.
+        #
+        # Paper-faithful mode (`paper_faithful_empty_batch=True`): one attempt,
+        # no refill — ScaleRL §3.4 specifies zero-variance filtering as
+        # "drop, don't refill" (vs DAPO). All-empty surfaces as a real failure.
+        #
+        # Soft-fail on max_attempts exhausted: train on whatever survived
+        # (n_trainable > 0). Only the truly-empty case (n_trainable == 0)
+        # is fatal. The user explicitly preferred forward progress over
+        # crashing on slow-start dynamics.
         max_attempts = _resolve_max_empty_batch_attempts(
             config.experimental.paper_faithful_empty_batch
+        )
+        target_n_trainable = (
+            1
+            if config.experimental.paper_faithful_empty_batch
+            else config.batch_size
         )
         generate_completions_time = 0.0
         train_rollouts: list[vf.RolloutOutput] = []
@@ -470,17 +490,21 @@ async def orchestrate(config: OrchestratorConfig):
         num_unique_examples = 0
         n_trainable = 0
         for attempt in range(max_attempts):
-            train_rollouts = await scheduler.generate_batch(step=progress.step)
+            fresh = await scheduler.generate_batch(step=progress.step)
             generate_completions_time += scheduler.last_batch_generation_time
+            train_rollouts.extend(fresh)
 
-            # Compute advantages (in-place). For DefaultAdvantageConfig with
-            # normalization="batch" this only does baseline subtraction;
-            # batch-std happens post-filter below.
+            # Recompute advantages over the cumulative set. compute_advantages
+            # overwrites `r["advantage"]` from `r["reward"]` in-place, so it's
+            # idempotent and cross-batch-coherent (the per-group baseline
+            # subtraction is unaffected by the order in which groups arrived).
             num_rollouts = len(train_rollouts)
             num_unique_examples = len({r["example_id"] for r in train_rollouts})
             compute_advantages(train_rollouts, config.rollouts_per_example, config.advantage)
 
-            # Apply rollout filters — sets rollout["filters"] and rollout["is_filtered"]
+            # Apply rollout filters — sets rollout["filters"] and
+            # rollout["is_filtered"]. Resets both at function entry so
+            # cumulative re-runs are clean.
             apply_filters(rollout_filters, train_rollouts)
 
             # Faithful ScaleRL §3.4: batch-std normalization runs over the
@@ -489,13 +513,27 @@ async def orchestrate(config: OrchestratorConfig):
             apply_batch_advantage_normalization(train_rollouts, config.advantage)
 
             n_trainable = sum(1 for r in train_rollouts if not r["is_filtered"])
-            if n_trainable > 0:
+            if n_trainable >= target_n_trainable:
+                if attempt > 0:
+                    logger.info(
+                        f"Filled trainable batch via {attempt + 1} attempts at step "
+                        f"{progress.step}: n_trainable={n_trainable}/"
+                        f"{target_n_trainable} from total {num_rollouts} rollouts."
+                    )
                 break
 
             if attempt == max_attempts - 1:
+                if n_trainable > 0:
+                    logger.warning(
+                        f"Step {progress.step}: exhausted {max_attempts} sampling "
+                        f"attempts with only {n_trainable} surviving rollouts "
+                        f"(target {target_n_trainable}). Proceeding with under-full "
+                        f"batch rather than crashing — slow-start dynamics."
+                    )
+                    break
                 logger.error(
                     f"Attempt {attempt + 1}/{max_attempts} at step {progress.step} "
-                    f"filtered out all {num_rollouts} rollouts - crashing orchestrator"
+                    f"filtered out ALL {num_rollouts} rollouts - crashing orchestrator"
                 )
                 if config.experimental.paper_faithful_empty_batch:
                     reason = (
