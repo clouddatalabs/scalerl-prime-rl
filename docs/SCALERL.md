@@ -87,6 +87,32 @@ bash scripts/fix-flash-attn-cute.sh
 .venv/bin/hf download --repo-type dataset PrimeIntellect/Hendrycks-Math
 .venv/bin/hf download --repo-type dataset HuggingFaceH4/MATH-500 || true  # eval-set
 
+# 4b. (Terminal-Bench only) Push task images to the cluster registry.
+#
+#    The TB config does NOT build Docker images on the training compute
+#    node. Instead, the maintainer builds them once on a host with docker
+#    and pushes to a private cluster registry; rollouts on each compute
+#    node lazily `docker pull` from there. This sidesteps the BuildKit
+#    content-store poisoning we observed when racing concurrent builds
+#    on the same daemon (image_exists True but every `docker run`
+#    fails to extract a layer).
+#
+#    Run this once after install, and again whenever any task's
+#    environments/terminal_bench/tasks/<task>/environment/ contents
+#    change. Re-running uses docker's layer cache so unchanged tasks
+#    push only metadata.
+TB_REGISTRY_HOST=rlgpu0:5000 bash scripts/prebuild_tb_images.sh
+#
+# Cluster prerequisites (one-time admin setup; not in this repo's code):
+# - registry:2 service running on rlgpu0:5000 with NVMe-backed storage
+# - "insecure-registries": ["rlgpu0:5000"] in each compute node's
+#   /etc/docker/daemon.json (followed by `systemctl restart docker`).
+#   HTTP-only is acceptable for an internal cluster.
+# Compute nodes need NO public docker registry egress in registry mode —
+# only internal HTTP to rlgpu0:5000. The build host still needs ghcr.io
+# and docker.io for the FROM lines in prebuild_tb_images.sh.
+# Math/non-TB configs do not need this step.
+
 # 5. Submit. Override the partition / log dir / config-to-launch if your
 #    cluster differs. OUTPUT_ROOT controls where the slurm stdout/stderr go;
 #    the run's checkpoints + rollouts go under `[output_dir]` from the TOML
