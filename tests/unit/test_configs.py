@@ -417,16 +417,43 @@ def test_sft_config_no_op_when_fp32_lm_head_off():
     assert config.matmul_precision == "high"
 
 
-def test_rl_config_skips_fp32_lm_head_check_when_inference_omitted():
+def test_rl_config_rejects_fp32_lm_head_when_inference_omitted_without_ack():
     """RLConfig.inference may legitimately be None (externally managed inference pools or
-    num_infer_nodes=0 fake-data runs). The fp32 consistency check must skip rather than
-    AttributeError, but it MUST also warn loudly when fp32_lm_head=True since
-    setup_vllm_env does not run on an externally launched vLLM.
+    num_infer_nodes=0 fake-data runs). The fp32 consistency check must reject
+    fp32_lm_head=True in that case unless the operator explicitly acknowledges
+    they've exported PRIME_RL_VLLM_FP32_LM_HEAD=1 on the external vLLM server.
+    A silent warning is invisible under PYTHONWARNINGS=ignore / log-suppressed
+    SLURM contexts, and a missed export silently breaks ScaleRL §3.2 IS parity.
     """
-    import warnings
+    import os
 
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always")
+    saved = os.environ.pop("PRIME_RL_FP32_LM_HEAD_EXTERNAL_OK", None)
+    try:
+        with pytest.raises(ValidationError, match="PRIME_RL_FP32_LM_HEAD_EXTERNAL_OK"):
+            RLConfig.model_validate(
+                {
+                    "model": {"name": "Qwen/Qwen3-0.6B"},
+                    "trainer": {"model": {"fp32_lm_head": True}, "matmul_precision": "highest"},
+                    "orchestrator": {},
+                    "inference": None,
+                }
+            )
+    finally:
+        if saved is not None:
+            os.environ["PRIME_RL_FP32_LM_HEAD_EXTERNAL_OK"] = saved
+
+
+def test_rl_config_accepts_fp32_lm_head_when_inference_omitted_with_ack():
+    """Operators driving vLLM externally can opt in by exporting
+    PRIME_RL_FP32_LM_HEAD_EXTERNAL_OK=1 on the trainer side AND
+    PRIME_RL_VLLM_FP32_LM_HEAD=1 on the vLLM side. Validate the trainer-side
+    opt-in works; the vLLM-side check is the inference server's responsibility.
+    """
+    import os
+
+    saved = os.environ.get("PRIME_RL_FP32_LM_HEAD_EXTERNAL_OK")
+    os.environ["PRIME_RL_FP32_LM_HEAD_EXTERNAL_OK"] = "1"
+    try:
         config = RLConfig.model_validate(
             {
                 "model": {"name": "Qwen/Qwen3-0.6B"},
@@ -437,29 +464,27 @@ def test_rl_config_skips_fp32_lm_head_check_when_inference_omitted():
         )
         assert config.inference is None
         assert config.trainer.model.fp32_lm_head is True
-        # Warn loudly: external vLLM won't pick up fp32_lm_head from the trainer config.
-        msgs = [str(w.message) for w in captured]
-        assert any("PRIME_RL_VLLM_FP32_LM_HEAD" in m for m in msgs), msgs
+    finally:
+        if saved is None:
+            os.environ.pop("PRIME_RL_FP32_LM_HEAD_EXTERNAL_OK", None)
+        else:
+            os.environ["PRIME_RL_FP32_LM_HEAD_EXTERNAL_OK"] = saved
 
 
-def test_rl_config_no_warning_when_inference_omitted_and_fp32_off():
-    """The mismatch warning must not fire when trainer.fp32_lm_head=False — there
-    is no parity hazard if neither side wants the fp32 path.
+def test_rl_config_accepts_inference_omitted_when_fp32_off():
+    """When trainer.fp32_lm_head=False there's no parity hazard — the
+    inference-omitted path must validate cleanly without any opt-in env var.
     """
-    import warnings
-
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always")
-        RLConfig.model_validate(
-            {
-                "model": {"name": "Qwen/Qwen3-0.6B"},
-                "trainer": {"model": {"fp32_lm_head": False}},
-                "orchestrator": {},
-                "inference": None,
-            }
-        )
-        msgs = [str(w.message) for w in captured]
-        assert not any("PRIME_RL_VLLM_FP32_LM_HEAD" in m for m in msgs), msgs
+    config = RLConfig.model_validate(
+        {
+            "model": {"name": "Qwen/Qwen3-0.6B"},
+            "trainer": {"model": {"fp32_lm_head": False}},
+            "orchestrator": {},
+            "inference": None,
+        }
+    )
+    assert config.inference is None
+    assert config.trainer.model.fp32_lm_head is False
 
 
 def test_rl_config_rejects_prompt_average_loss_with_token_scale_mode():

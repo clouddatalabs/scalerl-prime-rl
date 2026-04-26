@@ -923,16 +923,28 @@ class RLConfig(BaseConfig):
         """
         if self.inference is None:
             if self.trainer.model.fp32_lm_head:
-                import warnings
-
-                warnings.warn(
-                    "trainer.model.fp32_lm_head=True with [inference] omitted: "
-                    "the FP32 LM-head env-var bridge in prime_rl.inference.server "
-                    "does NOT run on externally launched vLLM. Export "
-                    "PRIME_RL_VLLM_FP32_LM_HEAD=1 in the vLLM environment yourself, "
-                    "or train/inference logprob parity will break (ScaleRL §3.2).",
-                    stacklevel=2,
-                )
+                # warnings.warn is invisible under PYTHONWARNINGS=ignore and
+                # in any log-suppressed SLURM context — the operator may
+                # never see the message. ScaleRL §3.2 IS-parity violation
+                # has to fail loud. Allow an explicit opt-out env var for
+                # users who legitimately drive vLLM externally and have
+                # exported PRIME_RL_VLLM_FP32_LM_HEAD=1 themselves.
+                import os
+                if os.environ.get("PRIME_RL_FP32_LM_HEAD_EXTERNAL_OK", "0") != "1":
+                    raise ValueError(
+                        "trainer.model.fp32_lm_head=True with [inference] "
+                        "omitted: the FP32 LM-head env-var bridge in "
+                        "prime_rl.inference.server does NOT run on externally "
+                        "launched vLLM, and a missed export silently breaks "
+                        "train/inference logprob parity (ScaleRL §3.2). Choose "
+                        "one of:\n"
+                        "  (a) drop fp32_lm_head=True from [trainer.model],\n"
+                        "  (b) add an [inference] block so prime-rl manages vLLM,\n"
+                        "  (c) export PRIME_RL_VLLM_FP32_LM_HEAD=1 on the external "
+                        "vLLM server AND set "
+                        "PRIME_RL_FP32_LM_HEAD_EXTERNAL_OK=1 here to ack "
+                        "you've handled it."
+                    )
             return self
         trainer_fp32 = self.trainer.model.fp32_lm_head
         inference_fp32 = self.inference.model.fp32_lm_head
