@@ -202,17 +202,17 @@ temperature = 0.6
 top_p = 0.95
 max_completion_tokens = 6144
 
-# 10 held-out test tasks. rollouts_per_example=16 per ScaleRL §2.1.
+# 7 held-out test tasks. rollouts_per_example=16 per ScaleRL §2.1.
+# Excluded (broken Dockerfile build context): log-summary, overfull-hbox,
+# pandas-sql-query — see configs/scalerl_terminal_bench/rl.toml for the
+# fix-up criteria before re-including.
 [[orchestrator.eval.env]]
 id = "environments.terminal_bench"
 name = "terminal-bench-test"
 rollouts_per_example = 16
 args = { tasks = [
-  "log-summary",
   "npm-conflict-resolution",
-  "overfull-hbox",
   "pandas-etl",
-  "pandas-sql-query",
   "recover-accuracy-log",
   "recover-obfuscated-files",
   "schedule-vacation",

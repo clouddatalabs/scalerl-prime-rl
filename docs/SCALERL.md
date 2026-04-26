@@ -340,13 +340,12 @@ uv run rl @ configs/scalerl_terminal_bench/rl_multinode.toml
 ```
 See `docs/slurm.md` for the full `[slurm]` knob list (`partition`,
 `account`, `time`, `nodelist`, `exclude`, `pre_run_command`, etc.).
-Multi-node NCCL weight broadcast still
-requires the experimental override (already on in the shipped configs);
-on hardware without EFA, both halves are required: set
-`SCALERL_NO_EFA=1` in your `.env` to suppress EFA env-var exports AND
-switch the per-component weight-broadcast paths to filesystem. Setting
-just one half hangs at the first weight broadcast — the env var only
-suppresses the libfabric provider hint; the TOML still asks for NCCL.
+Multi-node NCCL weight broadcast still requires the experimental
+override (already on in the shipped configs). On hardware without EFA,
+set `SCALERL_NO_EFA=1` in your `.env` to suppress the libfabric /
+EFA-provider env-var exports; NCCL falls back to plain TCP/IB. Do NOT
+switch to `[weight_broadcast] type = "filesystem"` — that path is
+deprecated in this fork; all shipped configs hard-set NCCL.
 
 > ⚠️ **Multi-node TB rollouts need `PYTHONPATH=$REPO_ROOT`.** The
 > single-node `scripts/scalerl_smoke.sbatch` exports `PYTHONPATH` so

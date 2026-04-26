@@ -127,20 +127,24 @@ temperature = 0.6
 top_p = 0.95
 max_completion_tokens = 6144
 
-# 10 held-out test tasks for eval — must be committed Harbor task dirs.
+# 7 held-out test tasks for eval — must be committed Harbor task dirs.
 # rollouts_per_example=16 matches ScaleRL §2.1 ("16 generations per prompt on
 # the held-out set"). The default of 1 would silently undercount task
 # variance.
+#
+# Excluded: log-summary, overfull-hbox, pandas-sql-query — their upstream
+# Dockerfiles `COPY` paths (logs/, tests/main.tex etc., tests/generate_data.py)
+# that don't exist under `environment/` (the docker build context). Building
+# would fail at every rollout. Re-include them once the upstream imports are
+# repaired (file the Dockerfile to use ../tests as context, or copy missing
+# files into environment/).
 [[orchestrator.eval.env]]
 id = "environments.terminal_bench"
 name = "terminal-bench-test"
 rollouts_per_example = 16
 args = { tasks = [
-  "log-summary",
   "npm-conflict-resolution",
-  "overfull-hbox",
   "pandas-etl",
-  "pandas-sql-query",
   "recover-accuracy-log",
   "recover-obfuscated-files",
   "schedule-vacation",
