@@ -112,3 +112,273 @@ def test_run_id_uses_canonical_slurm_when_both_present(monkeypatch):
     monkeypatch.setenv("SLURM_JOB_ID", "99999")
     assert _compute_run_id() == "slurm-99999"
     assert not _compute_run_id().startswith("adhoc-")
+
+
+# ---- registry-pull mode -------------------------------------------------
+
+
+def test_local_image_tag_registry_qualified_when_set():
+    """`_local_image_tag` returns `<registry>/tb-local/<task>:latest` when
+    registry_host is set, and the bare short form otherwise. This is the
+    single helper every downstream caller (image_exists, run_detached,
+    _resolved_tags lookup, _build_lock_path) goes through; touching it is
+    sufficient to thread the registry namespace everywhere.
+    """
+    from environments.terminal_bench.env import (
+        TerminalBenchLocalEnv,
+        _TaskSpec,
+    )
+
+    spec = _TaskSpec(
+        name="aimo-airline-departures",
+        dir=Path("/tmp/fake/aimo"),
+        instruction="x",
+        docker_image="ghcr.io/.../aimo:latest",
+    )
+
+    # Registry mode
+    env_reg = TerminalBenchLocalEnv.__new__(TerminalBenchLocalEnv)
+    env_reg._registry_host = "rlgpu0:5000"
+    assert env_reg._local_image_tag(spec) == "rlgpu0:5000/tb-local/aimo-airline-departures:latest"
+
+    # Live-build mode (None)
+    env_live = TerminalBenchLocalEnv.__new__(TerminalBenchLocalEnv)
+    env_live._registry_host = None
+    assert env_live._local_image_tag(spec) == "tb-local/aimo-airline-departures:latest"
+
+
+def test_dockerclient_pull_raises_on_nonzero_exit(monkeypatch):
+    """`_DockerClient.pull` raises RuntimeError on non-zero exit, surfacing
+    stderr in the message so a registry-mode caller can act on the error.
+    """
+    from environments.terminal_bench.env import _DockerClient
+
+    async def fake_subprocess_exec(*args, **kwargs):
+        class _FakeProc:
+            returncode = 1
+
+            async def communicate(self):
+                return (b"", b"unauthorized: registry auth required")
+
+            def kill(self):
+                pass
+
+            async def wait(self):
+                pass
+
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess_exec)
+
+    client = _DockerClient(sudo=False)
+    with pytest.raises(RuntimeError, match="docker pull .* failed.*unauthorized"):
+        asyncio.run(client.pull("rlgpu0:5000/tb-local/missing:latest"))
+
+
+def test_dockerclient_pull_raises_on_timeout(monkeypatch):
+    """A pull that exceeds the timeout is killed and surfaces a timeout error."""
+    from environments.terminal_bench.env import _DockerClient
+
+    async def fake_subprocess_exec(*args, **kwargs):
+        class _FakeProc:
+            returncode = None
+
+            async def communicate(self):
+                # Never returns — simulate a hung pull.
+                await asyncio.sleep(60)
+                return (b"", b"")
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                pass
+
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess_exec)
+
+    client = _DockerClient(sudo=False)
+    with pytest.raises(RuntimeError, match="timed out after 1s"):
+        asyncio.run(client.pull("rlgpu0:5000/tb-local/slow:latest", timeout=1))
+
+
+def test_resolve_image_registry_mode_raises_on_pull_failure(monkeypatch):
+    """In registry mode, a missing/unreachable image surfaces as a hard
+    RuntimeError pointing the operator at the prebuild script — NOT a
+    silent fallback to live build.
+    """
+    from environments.terminal_bench.env import (
+        TerminalBenchLocalEnv,
+        _DockerClient,
+        _TaskSpec,
+    )
+
+    spec = _TaskSpec(
+        name="aimo-airline-departures",
+        dir=Path("/tmp/fake/aimo"),
+        instruction="x",
+        docker_image="ghcr.io/.../aimo:latest",
+    )
+
+    env = TerminalBenchLocalEnv.__new__(TerminalBenchLocalEnv)
+    env._registry_host = "rlgpu0:5000"
+    env._build_local_images = True
+    env._docker = _DockerClient(sudo=False)
+    env._build_locks = {}
+    env._resolved_tags = {}
+
+    async def fake_image_exists(self, image):
+        return False
+
+    async def fake_pull(self, image, *, timeout=600):
+        raise RuntimeError("connection refused: rlgpu0:5000")
+
+    def fake_dockerfile_path(self, _spec):
+        return Path("/tmp/fake/aimo/environment/Dockerfile")
+
+    monkeypatch.setattr(_DockerClient, "image_exists", fake_image_exists)
+    monkeypatch.setattr(_DockerClient, "pull", fake_pull)
+    monkeypatch.setattr(TerminalBenchLocalEnv, "_dockerfile_path", fake_dockerfile_path)
+
+    with pytest.raises(RuntimeError, match="docker pull .* failed.*"
+                       "Run.*scripts/prebuild_tb_images.sh"):
+        asyncio.run(env._resolve_image(spec))
+
+
+def test_resolve_image_registry_mode_caches_after_pull(monkeypatch):
+    """A successful pull caches the registry-qualified tag and avoids
+    re-pulling on subsequent calls — `image_exists` short-circuits.
+    """
+    from environments.terminal_bench.env import (
+        TerminalBenchLocalEnv,
+        _DockerClient,
+        _TaskSpec,
+    )
+
+    spec = _TaskSpec(
+        name="aimo-airline-departures",
+        dir=Path("/tmp/fake/aimo"),
+        instruction="x",
+        docker_image="ghcr.io/.../aimo:latest",
+    )
+
+    env = TerminalBenchLocalEnv.__new__(TerminalBenchLocalEnv)
+    env._registry_host = "rlgpu0:5000"
+    env._build_local_images = True
+    env._docker = _DockerClient(sudo=False)
+    env._build_locks = {}
+    env._resolved_tags = {}
+
+    pull_count = 0
+
+    async def fake_image_exists(self, image):
+        # First call: not yet pulled. Subsequent calls (after pull): exists.
+        return pull_count > 0
+
+    async def fake_pull(self, image, *, timeout=600):
+        nonlocal pull_count
+        pull_count += 1
+
+    def fake_dockerfile_path(self, _spec):
+        return Path("/tmp/fake/aimo/environment/Dockerfile")
+
+    monkeypatch.setattr(_DockerClient, "image_exists", fake_image_exists)
+    monkeypatch.setattr(_DockerClient, "pull", fake_pull)
+    monkeypatch.setattr(TerminalBenchLocalEnv, "_dockerfile_path", fake_dockerfile_path)
+
+    expected_tag = "rlgpu0:5000/tb-local/aimo-airline-departures:latest"
+    tag1 = asyncio.run(env._resolve_image(spec))
+    assert tag1 == expected_tag
+    assert pull_count == 1
+
+    tag2 = asyncio.run(env._resolve_image(spec))
+    assert tag2 == expected_tag
+    assert pull_count == 1, "second resolve must hit fast-cache, not pull again"
+
+
+def test_exec_wraps_command_in_setsid_with_pidfile(monkeypatch):
+    """The new `_DockerClient.exec` wraps the user's command in `setsid bash
+    -lc 'echo $$ > <pidfile>; <cmd>'` so on timeout we can `kill -- -<PGID>`
+    the in-container process tree, not just the local docker CLI client.
+    """
+    from environments.terminal_bench.env import _DockerClient
+
+    captured: dict = {}
+
+    async def fake_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+
+        class _FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"hi", b"")
+
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess_exec)
+
+    client = _DockerClient(sudo=False)
+    asyncio.run(client.exec("tb-test", "echo hello", timeout=10))
+
+    args = captured["args"]
+    # docker exec ... <container> setsid bash -lc '<wrapped>'
+    assert "exec" in args
+    assert "setsid" in args
+    assert "bash" in args
+    assert any("-lc" == a for a in args)
+    wrapped_cmd = args[-1]
+    # echo $$ writes to a /tmp/.tb_exec_*.pid file before the user's cmd
+    assert "echo $$ >" in wrapped_cmd
+    assert "/tmp/.tb_exec_" in wrapped_cmd
+    assert ".pid" in wrapped_cmd
+    assert "echo hello" in wrapped_cmd
+
+
+def test_exec_kills_in_container_pgid_on_timeout(monkeypatch):
+    """On asyncio.TimeoutError, exec issues a follow-up `docker exec ... sh
+    -c 'kill -- -$(cat <pidfile>)'` to nuke the in-container process group.
+    """
+    from environments.terminal_bench.env import _DockerClient
+
+    invocations: list[tuple] = []
+
+    async def fake_subprocess_exec(*args, **kwargs):
+        invocations.append(args)
+        is_kill_call = "sh" in args and any("kill -9 -- -" in str(a) for a in args)
+
+        class _FakeProc:
+            returncode = 0 if is_kill_call else None
+
+            async def communicate(self):
+                if is_kill_call:
+                    return (b"", b"")
+                # Hang the user's command to force timeout.
+                await asyncio.sleep(60)
+                return (b"", b"")
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                pass
+
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess_exec)
+
+    client = _DockerClient(sudo=False)
+    rc, stdout, stderr = asyncio.run(
+        client.exec("tb-test", "sleep 60", timeout=1)
+    )
+
+    assert rc == 124, "timeout returns 124 to match timeout(1) semantics"
+    assert "in-container PGID killed" in stderr
+
+    # First invocation: the wrapped user command. Second: the kill follow-up.
+    assert len(invocations) >= 2, invocations
+    kill_args = invocations[1]
+    kill_cmd = " ".join(str(a) for a in kill_args)
+    assert "exec" in kill_cmd
+    assert "kill -9 -- -" in kill_cmd
