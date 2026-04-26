@@ -112,6 +112,17 @@ TB_REGISTRY_HOST=rlgpu0:5000 bash scripts/prebuild_tb_images.sh
 # only internal HTTP to rlgpu0:5000. The build host still needs ghcr.io
 # and docker.io for the FROM lines in prebuild_tb_images.sh.
 # Math/non-TB configs do not need this step.
+#
+# Refresh footgun (`:latest` is sticky): after a rerun of
+# prebuild_tb_images.sh that overwrites an existing `:latest` tag, a
+# long-lived training job's compute nodes will NOT re-pull. The env's
+# `_resolve_image` short-circuits on `image_exists(local_tag)` — once
+# the image has been pulled, subsequent rollouts use the cached tag.
+# To pick up a rebuilt image on already-running jobs:
+#   (a) restart the env workers (cancel + resubmit the slurm job), OR
+#   (b) `docker rmi rlgpu0:5000/tb-local/<task>:latest` on each compute
+#       node before the next rollout of that task fires.
+# A fresh sbatch is unaffected — the first rollout always pulls.
 
 # 5. Submit. Override the partition / log dir / config-to-launch if your
 #    cluster differs. OUTPUT_ROOT controls where the slurm stdout/stderr go;

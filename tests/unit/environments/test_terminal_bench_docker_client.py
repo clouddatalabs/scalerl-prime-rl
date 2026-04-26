@@ -382,3 +382,11 @@ def test_exec_kills_in_container_pgid_on_timeout(monkeypatch):
     kill_cmd = " ".join(str(a) for a in kill_args)
     assert "exec" in kill_cmd
     assert "kill -9 -- -" in kill_cmd
+    # The kill follow-up MUST pass `-w /` — otherwise on tasks whose
+    # Dockerfile WORKDIR points at a not-yet-existing path (observed:
+    # WORKDIR /app/personal-site without a prior mkdir), the kill exec
+    # OCI-fails on chdir before the inner shell command runs, silently
+    # neutralizing the entire PGID-kill mechanism.
+    assert "-w" in kill_args and "/" in kill_args, (
+        f"kill follow-up must pin working_dir='/' for OCI-chdir safety; got: {kill_args}"
+    )

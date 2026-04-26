@@ -331,7 +331,13 @@ class _DockerClient:
         # for per-exec ephemeral pidfiles.
         exec_uid = uuid.uuid4().hex[:16]
         pidfile = f"/tmp/.tb_exec_{exec_uid}.pid"
-        wrapped = f"echo $$ > {pidfile}; {command}"
+        # `2>/dev/null` on the redirect: a hardened image with read-only
+        # /tmp would otherwise leak bash's "Read-only file system" error
+        # into the model's tool response. The `;` lets the user command
+        # run regardless; in the read-only-/tmp case the pidfile is empty
+        # and the timeout-handler's `[ -n "$PID" ]` guard makes the
+        # kill follow-up a clean no-op.
+        wrapped = f"echo $$ > {pidfile} 2>/dev/null; {command}"
 
         cmd = [*self._prefix(), "exec"]
         if working_dir:
@@ -355,8 +361,16 @@ class _DockerClient:
             # The pidfile may be missing (e.g. command died before
             # writing it); ignore. The rm cleans up so /tmp doesn't
             # accumulate stale pidfiles across thousands of rollouts.
+            # working_dir="/" — same rationale as the prep / mkdir /
+            # cp_into / test.sh / reward-read exec sites: tasks whose
+            # Dockerfile WORKDIR points at a not-yet-existing path
+            # (observed: `WORKDIR /app/personal-site` without a prior
+            # mkdir) would otherwise OCI-fail the chdir before the
+            # inner `kill` runs, silently neutralizing the entire
+            # PGID-kill mechanism. The pidfile and command use absolute
+            # paths so cwd is irrelevant.
             kill_cmd = [
-                *self._prefix(), "exec", container, "sh", "-c",
+                *self._prefix(), "exec", "-w", "/", container, "sh", "-c",
                 f'PID=$(cat {pidfile} 2>/dev/null); '
                 f'[ -n "$PID" ] && kill -9 -- -"$PID" 2>/dev/null; '
                 f'rm -f {pidfile} 2>/dev/null',
@@ -1137,8 +1151,21 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
 
         # Resolve the image *before* we mint a container name -- a build
         # failure shouldn't leak a "tb-*" name into logs that suggests
-        # the rollout got further than it did.
-        image = await self._resolve_image(spec)
+        # the rollout got further than it did. Wrap the resolve in the
+        # same `tb_setup_error` state-mutation path used by run_detached
+        # failures so `_harbor_reward` (which raises on tb_setup_error
+        # to mark the rollout errored rather than 0-rewarded) sees the
+        # registry-pull-failure case the same way it sees image-build
+        # failures. Otherwise registry-mode pull errors propagate up
+        # unmarked and the docstring at `_harbor_reward` line 1483 is
+        # misleading about what tb_setup_error covers.
+        try:
+            image = await self._resolve_image(spec)
+        except Exception as e:
+            state["tb_container_id"] = None
+            state["tb_task_dir"] = str(spec.dir)
+            state["tb_setup_error"] = str(e)
+            raise
 
         # Use a uuid suffix so parallel rollouts of the same task don't
         # collide on container names. 16 hex chars = 64 bits — birthday-bound
