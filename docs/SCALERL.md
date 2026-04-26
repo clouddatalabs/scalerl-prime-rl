@@ -131,8 +131,9 @@ sbatch -p <partition> --export=ALL scripts/scalerl_smoke.sbatch
 # (For the math smoke, unset SCALERL_CONFIG — sbatch defaults to scalerl_math.)
 
 # 6. Tail the log. Smoke configs train for 500 steps; first step is ~3 min
-#    cold, steady-state ~30-60s/step on 4xB200 with FA4 + compiled vLLM
-#    for the math config. NOTE: the Terminal-Bench config spins one Docker
+#    cold, steady-state ~30-60s/step on a single 8-GPU B200 node
+#    (4 train + 4 infer GPUs split per the [deployment] block) with FA4 +
+#    compiled vLLM for the math config. NOTE: the Terminal-Bench config spins one Docker
 #    container per rollout (Harbor format), so steady-state per-step time is
 #    dominated by container startup and test execution, not GPU — expect
 #    several minutes/step until the per-task base images are warm in the

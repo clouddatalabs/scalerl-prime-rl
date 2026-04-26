@@ -62,6 +62,15 @@ type = "nccl"
 batch_size = 256
 rollouts_per_example = 16
 strict_async_level = false
+# `use_token_client = true` (the OrchestratorConfig default) is correct for
+# single-turn `math-env`: the chat template is applied once and the linear
+# token history is byte-stable across sampler/trainer. Do NOT copy this
+# math config to bootstrap a multi-turn env (e.g. wiki-search, Wordle, any
+# tool-calling agent) without flipping `use_token_client = false`. See
+# `configs/scalerl_terminal_bench/rl.toml` for the full rationale: chat
+# templates can insert / strip tokens between turns, which corrupts the
+# train/inference logprob alignment silently when the token client
+# assumes a linear, append-only history.
 # Paper Pipeline-RL semantics: in-flight rollouts continue under fresh weights
 # rather than being cancelled past k updates. Upstream default is 8 (cancels);
 # 1e9 = "never cancel."

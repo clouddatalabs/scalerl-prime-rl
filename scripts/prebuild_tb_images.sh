@@ -23,7 +23,10 @@
 #   content store entirely. Our task Dockerfiles are simple
 #   FROM/RUN/COPY/WORKDIR — no BuildKit-only features needed.
 
-set -euo pipefail
+# NOT `set -e` — we want per-task failures to be reported in the summary
+# rather than aborting the rest of the build. The exit code at the end
+# reflects whether any task failed so CI / wrappers can still detect it.
+set -uo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 REGISTRY="${TB_REGISTRY_HOST:-rlgpu0:5000}"
@@ -38,7 +41,8 @@ if [ ! -d "$TASKS_DIR" ]; then
     exit 1
 fi
 
-count=0
+succeeded=()
+failed=()
 for task_dir in "$TASKS_DIR"/*/; do
     # Bash `*/` glob filters dangling symlinks (dir-test fails) and
     # plain files (no trailing /). The Dockerfile check below catches
@@ -50,11 +54,27 @@ for task_dir in "$TASKS_DIR"/*/; do
     fi
     tag="$REGISTRY/tb-local/$task:latest"
     echo "[build+push] $tag"
-    DOCKER_BUILDKIT=0 docker build \
-        -t "$tag" \
-        -f "$dockerfile" \
-        "$task_dir/environment"
-    docker push "$tag"
-    count=$((count + 1))
+    if DOCKER_BUILDKIT=0 docker build \
+            -t "$tag" \
+            -f "$dockerfile" \
+            "$task_dir/environment" \
+        && docker push "$tag"; then
+        succeeded+=("$task")
+    else
+        echo "[FAIL] $task — see lines above for the error" >&2
+        failed+=("$task")
+    fi
 done
-echo "[done] built+pushed $count images to $REGISTRY"
+
+echo
+echo "================ summary ================"
+echo "Succeeded (${#succeeded[@]}): ${succeeded[*]}"
+if [ "${#failed[@]}" -gt 0 ]; then
+    echo "FAILED (${#failed[@]}): ${failed[*]}"
+    echo
+    echo "Some tasks failed to build+push. The orchestrator will load fine"
+    echo "for any task whose image IS in the registry; rollouts of failed"
+    echo "tasks will hit the loud RuntimeError from _resolve_image."
+    exit 1
+fi
+echo "All ${#succeeded[@]} TB images pushed to $REGISTRY."
