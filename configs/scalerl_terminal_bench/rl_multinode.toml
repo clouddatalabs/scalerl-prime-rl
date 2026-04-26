@@ -191,7 +191,7 @@ args = { tasks = [
   "heterogeneous-dates",
   "jq-data-processing",
   "jsonl-aggregator",
-], task_root = "environments/terminal_bench/tasks" }
+], task_root = "environments/terminal_bench/tasks", registry_host = "rlgpu0:5000" }
 
 [orchestrator.eval]
 interval = 50
@@ -218,7 +218,7 @@ args = { tasks = [
   "schedule-vacation",
   "sha-puzzle",
   "sql-injection-attack",
-], task_root = "environments/terminal_bench/tasks" }
+], task_root = "environments/terminal_bench/tasks", registry_host = "rlgpu0:5000" }
 
 [weight_broadcast]
 # On hardware without EFA, override BOTH halves: set `SCALERL_NO_EFA=1`
