@@ -58,6 +58,11 @@ prompt_average_loss = true
 [orchestrator.experimental]
 allow_nccl_async_level_override = true
 
+[orchestrator.client]
+# Match the inference.server.port override above (8050 chosen to avoid
+# the upstream-default 8000 colliding with co-tenants on shared nodes).
+base_url = ["http://localhost:8050/v1"]
+
 [orchestrator.train.sampling]
 # ScaleRL §A.3 pins the math run at 14k generation budget (12k thinking + 2k
 # solution) with seq_len=16384. Terminal-Bench tasks are typically much
@@ -195,6 +200,13 @@ adv_tau = 1.0
 loss_scale_mode = "sequence"
 
 [inference]
+
+[inference.server]
+# 8000 is the upstream vLLM default — it collides easily with anyone
+# else's local API server on the shared compute node. 8050 is well
+# clear of common defaults (8000, 8080, 8888) and unlikely to clash.
+# orchestrator.client.base_url below points at the same port.
+port = 8050
 
 [inference.parallel]
 dp = 4
