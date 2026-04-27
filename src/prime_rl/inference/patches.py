@@ -183,6 +183,10 @@ def transformers_v5_compat():
             "monkey_patch_offloading_connector_cpu_block_count",
             monkey_patch_offloading_connector_cpu_block_count,
         ),
+        (
+            "monkey_patch_hermes_tool_parser_tolerant_json",
+            monkey_patch_hermes_tool_parser_tolerant_json,
+        ),
     ]:
         try:
             patch_fn()
@@ -1049,3 +1053,160 @@ def monkey_patch_no_moe_lora():
         self.is_lora_enabled = False
 
     FusedMoEConfig.__post_init__ = _patched__post_init__
+
+
+# Valid JSON escape sequence follow-chars (see RFC 8259 sec 7). A ``\`` inside
+# a string literal is only legal if the next char is one of these.
+_VALID_JSON_ESCAPE_CHARS = frozenset('"\\/bfnrtu')
+
+
+def _fix_invalid_json_escapes(text: str) -> str:
+    """Return ``text`` with every invalid ``\\X`` escape inside a JSON string
+    literal rewritten to ``\\\\X`` (i.e. a literal backslash followed by X).
+
+    Motivation: Qwen3 (and other Hermes-format tool-callers) frequently emit
+    shell commands containing regex metacharacters (``\\.``, ``\\+``, ``\\-``,
+    ``\\(``) inside the JSON ``arguments.command`` string without escaping the
+    backslash for the enclosing JSON. RFC 8259 accepts only ``\\" \\\\ \\/ \\b
+    \\f \\n \\r \\t \\uXXXX`` as escape sequences; everything else makes
+    ``json.loads`` raise ``Invalid \\escape`` and vLLM's Hermes parser then
+    silently drops the tool call. Walking the text char-by-char we detect
+    ``\\X`` occurrences where X is not a valid escape char, and turn the
+    backslash into ``\\\\`` so the decoded string gets the literal backslash
+    the model intended.
+
+    Only backslashes *inside* JSON string literals are rewritten; backslashes
+    are structurally invalid outside strings in JSON so touching those would
+    only mask an unrelated bug.
+
+    This is intentionally a best-effort textual fixup, not a full JSON5 parser.
+    If the text is so mangled that string-literal boundaries can't be tracked
+    correctly, the caller should fall back to the original parse error.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            i += 1
+            continue
+        if in_string and ch == "\\":
+            nxt = text[i + 1] if i + 1 < n else ""
+            if nxt in _VALID_JSON_ESCAPE_CHARS:
+                # Valid escape; copy both chars verbatim so e.g. ``\"`` keeps
+                # its escape semantics and doesn't flip ``in_string``.
+                out.append(ch)
+                out.append(nxt)
+                i += 2
+                continue
+            # Invalid escape (``\.``, ``\+``, trailing ``\``, …): double the
+            # backslash, leave the follower to be emitted on the next iter.
+            out.append("\\\\")
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def monkey_patch_hermes_tool_parser_tolerant_json():
+    """Patch Hermes2ProToolParser.extract_tool_calls to tolerate shell-escape
+    contamination in the JSON body of ``<tool_call>...</tool_call>`` blocks.
+
+    Observed failure mode (Qwen3 / terminal_bench-style tasks): the model
+    emits a well-formed ``<tool_call>`` wrapper whose body is
+
+        {"name": "shell", "arguments": {"command": "find -name '*\\.b64' ..."}}
+
+    - structurally a legal Hermes tool call, and semantically the command is
+    correct shell - but ``\\.`` inside the JSON string is not a valid JSON
+    escape. ``json.loads`` raises ``JSONDecodeError: Invalid \\escape`` inside
+    the upstream ``extract_tool_calls``; the ``except Exception`` catch-all
+    then returns ``tools_called=False`` and the tool call is silently dropped.
+    Measured impact on Phase B terminal_bench tasks: ~44% of multi-turn
+    trajectories end prematurely with ``stop_condition=no_tools_called``
+    despite the model having emitted a valid-intent tool call.
+
+    Fix: on the first ``json.loads`` attempt failing with ``JSONDecodeError``,
+    re-try with ``_fix_invalid_json_escapes`` applied to the body. Behavior
+    for well-formed JSON is unchanged - the fast path is first and returns
+    immediately when the body is already valid.
+
+    This patch is strictly additive and orthogonal to
+    ``monkey_patch_hermes_tool_parser_thread_safety`` (which patches
+    ``__init__``). Both can be installed.
+    """
+    import json
+
+    from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+
+    if getattr(
+        Hermes2ProToolParser.extract_tool_calls,
+        "_prime_rl_tolerant_json_patch",
+        False,
+    ):
+        return
+
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.engine.protocol import (
+        ExtractedToolCallInformation,
+        FunctionCall,
+        ToolCall,
+    )
+
+    _original_extract = Hermes2ProToolParser.extract_tool_calls
+
+    def _patched_extract_tool_calls(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+    ) -> ExtractedToolCallInformation:
+        # Fast path: no wrapper present -> delegate to original (which also
+        # short-circuits). Keeps behavior identical for non-tool responses.
+        if self.tool_call_start_token not in model_output:
+            return _original_extract(self, model_output, request)
+
+        try:
+            function_call_tuples = self.tool_call_regex.findall(model_output)
+            raw_function_calls = []
+            for match in function_call_tuples:
+                body = match[0] if match[0] else match[1]
+                try:
+                    parsed = json.loads(body)
+                except json.JSONDecodeError as exc:
+                    if "Invalid \\escape" not in str(exc):
+                        # Not the shell-escape pathology we're trying to
+                        # rescue; fall through to original behavior which
+                        # logs + returns tools_called=False.
+                        raise
+                    fixed = _fix_invalid_json_escapes(body)
+                    parsed = json.loads(fixed)  # may raise again; caught below
+                raw_function_calls.append(parsed)
+
+            tool_calls = [
+                ToolCall(
+                    type="function",
+                    function=FunctionCall(
+                        name=fc["name"],
+                        arguments=json.dumps(fc["arguments"], ensure_ascii=False),
+                    ),
+                )
+                for fc in raw_function_calls
+            ]
+            content = model_output[: model_output.find(self.tool_call_start_token)]
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=tool_calls,
+                content=content if content else None,
+            )
+        except Exception:
+            # Preserve upstream behavior (logged exception + tools_called=False)
+            # for anything the tolerant re-parse still can't handle.
+            return _original_extract(self, model_output, request)
+
+    _patched_extract_tool_calls._prime_rl_tolerant_json_patch = True  # type: ignore[attr-defined]
+    Hermes2ProToolParser.extract_tool_calls = _patched_extract_tool_calls

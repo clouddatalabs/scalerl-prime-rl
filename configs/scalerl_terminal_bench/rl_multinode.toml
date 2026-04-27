@@ -100,7 +100,7 @@ eps = 1e-15
 # (490-499) ramp from 5e-7 to ~5e-15. Bounded but a real recipe drift
 # the single-node config explicitly avoids.
 type = "linear"
-warmup_steps = 100
+warmup_steps = 10
 decay_steps = 0
 
 [trainer.loss]
@@ -146,7 +146,7 @@ rollouts_per_example = 16
 # verifiers would re-stamp `extra_env_kwargs["max_seq_len"]` at the
 # stale 8192 — silent rollout truncation.
 prompt_average_loss = true
-max_off_policy_steps = 1_000_000_000
+max_off_policy_steps = 4
 # REQUIRED for TB: the multi-turn chat template inserts/removes tokens
 # between turns; with use_token_client=true (the default), the orchestrator
 # would silently corrupt train/inference logprob alignment, biasing the

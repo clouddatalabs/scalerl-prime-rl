@@ -52,7 +52,7 @@ rollouts_per_example = 16
 # string-client path. (See OrchestratorConfig.use_token_client docstring.)
 use_token_client = false
 strict_async_level = false
-max_off_policy_steps = 1000000000
+max_off_policy_steps = 4
 prompt_average_loss = true
 
 [orchestrator.experimental]
@@ -178,10 +178,14 @@ eps = 1e-15
 weight_decay = 0.01
 
 [trainer.scheduler]
-# ScaleRL §3.1: 100-step linear warmup into the constant lr=5e-7 phase. See
-# scalerl_math/rl.toml for why decay_steps=0 produces warmup→constant.
+# ScaleRL §3.1 prescribes a 100-step linear warmup absolute, but that target
+# was set for multi-thousand-step runs. On this 500-step smoke 100/500=20% of
+# training is sub-target lr — too long to see learning land before the run
+# ends. Drop to 10 (2%) which is enough to avoid the optimizer-state spike at
+# step 0 without burning a fifth of the budget. `decay_steps=0` keeps the
+# warmup→constant profile (see scalerl_math/rl.toml for why).
 type = "linear"
-warmup_steps = 100
+warmup_steps = 10
 decay_steps = 0
 
 [trainer.loss]
