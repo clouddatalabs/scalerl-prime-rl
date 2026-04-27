@@ -276,10 +276,20 @@ class _DockerClient:
     ) -> None:
         """``docker run -d --name <name> <image> <start_command>``.
 
-        Uses ``--rm`` so the container auto-cleans if we crash before
-        ``remove_force``. ``--init`` ensures zombie reaping for
-        ``tail -f``-style start commands. ``labels`` forwards to
-        ``--label`` so sweep_stale_containers can find siblings.
+        ``--init`` ensures zombie reaping for ``tail -f``-style start
+        commands. ``labels`` forwards to ``--label`` so
+        sweep_stale_containers can find siblings.
+
+        Deliberately does NOT use ``--rm``: with ``--rm`` a container that
+        dies (exit=137 SIGKILL or otherwise) auto-disappears, so a
+        subsequent ``docker exec`` returns "No such container" with no way
+        to inspect what the container actually did before dying. We saw
+        ~50% of rollouts in job 751 fail this way and could not attribute
+        the deaths to any code path. Dropping ``--rm`` leaves dead
+        containers in ``Exited`` state until ``remove_force`` (in
+        ``finalize_rollout`` or the leak sweep) reaps them, so
+        ``docker inspect`` / ``docker logs`` can still answer "who killed
+        this container".
 
         Deliberately does NOT accept caller-controlled `extra_args`: a
         future config that plumbed `["--privileged", "-v", "/:/host"]`
@@ -293,7 +303,7 @@ class _DockerClient:
             label_flags += ["--label", f"{k}={v}"]
         cmd = [
             *self._prefix(),
-            "run", "-d", "--rm", "--init",
+            "run", "-d", "--init",
             "--name", name,
             *label_flags,
             image,
@@ -430,7 +440,26 @@ class _DockerClient:
             )
 
     async def remove_force(self, container: str) -> None:
-        """Best-effort ``docker rm -f <container>``. Never raises."""
+        """Best-effort ``docker rm -f <container>``. Never raises.
+
+        Logs the call at INFO with a 4-frame caller trace so we can attribute
+        every container destruction to one of the three legitimate sources
+        (finalize_rollout cleanup, same-run startup sweep, foreign-run leak
+        sweep). Used to diagnose `exit=137` mass-kill events on live
+        rollout containers.
+        """
+        # 4-frame stack so we can see the orchestrator/eval call site, not
+        # just `remove_force` itself. Skip frame 0 (this function).
+        try:
+            import traceback as _tb
+            frames = _tb.extract_stack(limit=8)
+            tail = ":".join(
+                f"{f.name}@{f.filename.rsplit('/', 1)[-1]}:{f.lineno}"
+                for f in frames[-5:-1]
+            )
+            _logger.info("remove_force(%s) caller=%s", container, tail)
+        except Exception:
+            pass
         cmd = [*self._prefix(), "rm", "-f", container]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
