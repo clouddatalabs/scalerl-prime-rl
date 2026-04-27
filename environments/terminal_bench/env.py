@@ -202,6 +202,33 @@ class _DockerClient:
          operators already know how to read.
     """
 
+    # Cap on concurrent `docker run -d` calls into the daemon. With ~256
+    # in-flight rollouts (TB shipped config: 768 batch / 3 workers ≈ 256
+    # per worker process), a thundering herd of `docker run` spawns
+    # overwhelms systemd's dbus socket: cgroup creation times out,
+    # `runc create` returns "Timeout waiting for systemd to create
+    # docker-XXX.scope", and the rollout fails with reward=0 / errored.
+    # Observed empirically on job 728: 15360 rollouts, ALL filtered as
+    # zero_advantage because the systemd-induced failures gave every
+    # group uniform reward. Capping concurrent run_detached calls below
+    # systemd's create rate ceiling (32 is comfortably under what we
+    # observed working on the same daemon) lets the queue drain steadily
+    # rather than collapsing under burst load. The semaphore is class-
+    # level so all _DockerClient instances in the same process share the
+    # cap (verifiers spawns multiple workers; each worker gets its own
+    # client but they hit the same daemon).
+    _RUN_DETACHED_CONCURRENCY = int(os.environ.get("TB_RUN_DETACHED_CONCURRENCY", "32"))
+    _run_detached_semaphore: asyncio.Semaphore | None = None
+
+    @classmethod
+    def _get_run_detached_semaphore(cls) -> asyncio.Semaphore:
+        # Lazy-initialize so we bind to the current event loop. Safe
+        # because all _DockerClient.run_detached calls in this process
+        # run on the same loop (the verifiers env worker's loop).
+        if cls._run_detached_semaphore is None:
+            cls._run_detached_semaphore = asyncio.Semaphore(cls._RUN_DETACHED_CONCURRENCY)
+        return cls._run_detached_semaphore
+
     def __init__(self, *, sudo: bool | None = None) -> None:
         self._binary = shutil.which("docker") or "/usr/bin/docker"
         # Prefer direct socket access when the current process can
@@ -272,12 +299,19 @@ class _DockerClient:
             image,
             *(start_command or ["tail", "-f", "/dev/null"]),
         ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
+        # Throttle concurrent docker run -d to keep systemd's cgroup
+        # creation rate manageable — see the class-level docstring on
+        # _RUN_DETACHED_CONCURRENCY for why and how. Holding the
+        # semaphore across the subprocess.communicate() means the cap
+        # bounds the number of in-flight `runc create` operations, not
+        # just queued docker CLI launches.
+        async with self._get_run_detached_semaphore():
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             # Carry the FULL decoded stderr in the exception. The
             # downstream `_is_buildkit_corruption` marker check runs
