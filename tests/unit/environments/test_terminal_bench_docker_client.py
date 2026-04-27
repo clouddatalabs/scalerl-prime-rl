@@ -297,10 +297,13 @@ def test_resolve_image_registry_mode_caches_after_pull(monkeypatch):
     assert pull_count == 1, "second resolve must hit fast-cache, not pull again"
 
 
-def test_exec_wraps_command_in_setsid_with_pidfile(monkeypatch):
-    """The new `_DockerClient.exec` wraps the user's command in `setsid bash
-    -lc 'echo $$ > <pidfile>; <cmd>'` so on timeout we can `kill -- -<PGID>`
-    the in-container process tree, not just the local docker CLI client.
+def test_exec_runs_plain_bash_lc(monkeypatch):
+    """`_DockerClient.exec` runs `docker exec ... bash -lc <command>` —
+    no setsid wrapper, no pidfile. The earlier setsid wrapping (commits
+    cddd0d58e + 6c9b11bf2) was reverted because empirically (job 738)
+    it correlated with test.sh failing to write reward.txt across all
+    rollouts; the simpler bash -lc form was the one that worked in
+    jobs 715/717.
     """
     from environments.terminal_bench.env import _DockerClient
 
@@ -323,38 +326,28 @@ def test_exec_wraps_command_in_setsid_with_pidfile(monkeypatch):
     asyncio.run(client.exec("tb-test", "echo hello", timeout=10))
 
     args = captured["args"]
-    # docker exec ... <container> setsid bash -lc '<wrapped>'
+    # docker exec ... <container> bash -lc <command>
     assert "exec" in args
-    assert "setsid" in args
     assert "bash" in args
-    assert any("-lc" == a for a in args)
-    wrapped_cmd = args[-1]
-    # echo $$ writes to a /tmp/.tb_exec_*.pid file before the user's cmd
-    assert "echo $$ >" in wrapped_cmd
-    assert "/tmp/.tb_exec_" in wrapped_cmd
-    assert ".pid" in wrapped_cmd
-    assert "echo hello" in wrapped_cmd
+    assert "-lc" in args
+    assert args[-1] == "echo hello", f"command should be passed verbatim; got: {args[-1]!r}"
+    assert "setsid" not in args, f"setsid should NOT wrap exec — was reverted: {args}"
 
 
-def test_exec_kills_in_container_pgid_on_timeout(monkeypatch):
-    """On asyncio.TimeoutError, exec issues a follow-up `docker exec ... sh
-    -c 'kill -- -$(cat <pidfile>)'` to nuke the in-container process group.
+def test_exec_returns_124_on_timeout(monkeypatch):
+    """On asyncio.TimeoutError, exec returns exit_code=124 to match
+    timeout(1) semantics. The local docker CLI process is killed; the
+    in-container shell may keep running until the container is reaped
+    at rollout end (`@vf.cleanup` -> `remove_force`).
     """
     from environments.terminal_bench.env import _DockerClient
 
-    invocations: list[tuple] = []
-
     async def fake_subprocess_exec(*args, **kwargs):
-        invocations.append(args)
-        is_kill_call = "sh" in args and any("kill -9 -- -" in str(a) for a in args)
-
         class _FakeProc:
-            returncode = 0 if is_kill_call else None
+            returncode = None
 
             async def communicate(self):
-                if is_kill_call:
-                    return (b"", b"")
-                # Hang the user's command to force timeout.
+                # Hang to force timeout.
                 await asyncio.sleep(60)
                 return (b"", b"")
 
@@ -374,19 +367,4 @@ def test_exec_kills_in_container_pgid_on_timeout(monkeypatch):
     )
 
     assert rc == 124, "timeout returns 124 to match timeout(1) semantics"
-    assert "in-container PGID killed" in stderr
-
-    # First invocation: the wrapped user command. Second: the kill follow-up.
-    assert len(invocations) >= 2, invocations
-    kill_args = invocations[1]
-    kill_cmd = " ".join(str(a) for a in kill_args)
-    assert "exec" in kill_cmd
-    assert "kill -9 -- -" in kill_cmd
-    # The kill follow-up MUST pass `-w /` — otherwise on tasks whose
-    # Dockerfile WORKDIR points at a not-yet-existing path (observed:
-    # WORKDIR /app/personal-site without a prior mkdir), the kill exec
-    # OCI-fails on chdir before the inner shell command runs, silently
-    # neutralizing the entire PGID-kill mechanism.
-    assert "-w" in kill_args and "/" in kill_args, (
-        f"kill follow-up must pin working_dir='/' for OCI-chdir safety; got: {kill_args}"
-    )
+    assert "timed out after 1s" in stderr

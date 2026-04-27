@@ -349,36 +349,23 @@ class _DockerClient:
         agent's shell at ``/app`` so relative paths in the task
         instruction resolve the way Harbor's agents expect.
 
-        On timeout we kill the in-container PROCESS GROUP, not just the
-        local docker CLI client. Docker does NOT propagate
-        client-disconnect to the exec'd process: without the follow-up
-        ``docker exec ... kill -- -<PGID>`` the in-container command
-        keeps holding cwd / lockfiles / fds and trips subsequent exec
-        calls (observed as `prep /tests failed: exit=124` chains where
-        the user's prior shell call never died). We wrap the user's
-        command in ``setsid`` so the bash becomes a new session leader
-        (PID = PGID) and write that PID to a pidfile inside the
-        container; the timeout handler reads it back and kills the
-        whole group.
+        On timeout we kill the local ``docker exec`` CLI process. The
+        in-container shell may keep running until the container is
+        reaped at rollout end (`@vf.cleanup` -> `remove_force`). The
+        previous setsid + pidfile + `kill -- -<PGID>` follow-up was
+        reverted: empirically (job 738) it correlated with test.sh
+        consistently failing to write reward.txt, suggesting setsid
+        either (a) detached stdout in a way the in-container test
+        harness depends on, or (b) interacted poorly with bash login
+        shells in some task images. The original CLI-kill-only
+        behavior worked in jobs 715/717. Containers are reaped at
+        rollout end so the lock-file / cwd / fd risk that motivated
+        the PGID kill is bounded by per-rollout container lifetime.
         """
-        # 16 hex chars (64 bits) — collision probability is irrelevant
-        # for per-exec ephemeral pidfiles.
-        exec_uid = uuid.uuid4().hex[:16]
-        pidfile = f"/tmp/.tb_exec_{exec_uid}.pid"
-        # `2>/dev/null` on the redirect: a hardened image with read-only
-        # /tmp would otherwise leak bash's "Read-only file system" error
-        # into the model's tool response. The `;` lets the user command
-        # run regardless; in the read-only-/tmp case the pidfile is empty
-        # and the timeout-handler's `[ -n "$PID" ]` guard makes the
-        # kill follow-up a clean no-op.
-        wrapped = f"echo $$ > {pidfile} 2>/dev/null; {command}"
-
         cmd = [*self._prefix(), "exec"]
         if working_dir:
             cmd += ["-w", working_dir]
-        # ``setsid`` ships with util-linux (every TB task base image:
-        # ubuntu-24-04, python:*-slim, ghcr.io/laude-institute/...).
-        cmd += [container, "setsid", "bash", "-lc", wrapped]
+        cmd += [container, "bash", "-lc", command]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -391,37 +378,7 @@ class _DockerClient:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            # Best-effort kill of the in-container process group.
-            # The pidfile may be missing (e.g. command died before
-            # writing it); ignore. The rm cleans up so /tmp doesn't
-            # accumulate stale pidfiles across thousands of rollouts.
-            # working_dir="/" — same rationale as the prep / mkdir /
-            # cp_into / test.sh / reward-read exec sites: tasks whose
-            # Dockerfile WORKDIR points at a not-yet-existing path
-            # (observed: `WORKDIR /app/personal-site` without a prior
-            # mkdir) would otherwise OCI-fail the chdir before the
-            # inner `kill` runs, silently neutralizing the entire
-            # PGID-kill mechanism. The pidfile and command use absolute
-            # paths so cwd is irrelevant.
-            kill_cmd = [
-                *self._prefix(), "exec", "-w", "/", container, "sh", "-c",
-                f'PID=$(cat {pidfile} 2>/dev/null); '
-                f'[ -n "$PID" ] && kill -9 -- -"$PID" 2>/dev/null; '
-                f'rm -f {pidfile} 2>/dev/null',
-            ]
-            try:
-                kill_proc = await asyncio.create_subprocess_exec(
-                    *kill_cmd,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await asyncio.wait_for(kill_proc.wait(), timeout=10)
-            except (asyncio.TimeoutError, OSError):
-                pass
-            return 124, "", (
-                f"Command timed out after {timeout}s "
-                f"(in-container PGID killed via {pidfile})"
-            )
+            return 124, "", f"Command timed out after {timeout}s"
         return (
             proc.returncode or 0,
             stdout_b.decode(errors="replace"),
