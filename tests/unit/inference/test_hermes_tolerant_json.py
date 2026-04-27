@@ -176,7 +176,26 @@ def test_patched_parser_passthrough_on_valid_body():
     result = parser.extract_tool_calls(output, request=None)
     assert result.tools_called is True
     assert result.tool_calls[0].function.name == "shell"
-    assert json.loads(result.tool_calls[0].function.arguments) == {"command": "ls -la /app"}
+    args = json.loads(result.tool_calls[0].function.arguments)
+    # Clean JSON path: NO repair sentinel — env-side discount won't fire.
+    assert args == {"command": "ls -la /app"}
+    assert "__prime_rl_repaired_json__" not in args
+
+
+def test_patched_parser_injects_repair_sentinel_on_rescue():
+    """The env's `_harbor_reward` partial-credit discount keys off this
+    sentinel. If the patch rescues a tool call, the parsed `arguments`
+    MUST carry `__prime_rl_repaired_json__: True` so the env can flag
+    the rollout as "answer correct only because the JSON fixer rescued
+    the tool call" and apply the 50% reward discount."""
+    parser = _build_parser()
+    output = f"<tool_call>\n{BASE64_RECOVERY_BODY}\n</tool_call>"
+    result = parser.extract_tool_calls(output, request=None)
+    assert result.tools_called is True
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args.get("__prime_rl_repaired_json__") is True
+    assert "command" in args
+    assert "find /app/sensitive_data/" in args["command"]
 
 
 def test_patched_parser_no_tool_call_token_fast_path():

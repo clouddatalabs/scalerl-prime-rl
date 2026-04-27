@@ -1172,9 +1172,19 @@ def monkey_patch_hermes_tool_parser_tolerant_json():
 
         try:
             function_call_tuples = self.tool_call_regex.findall(model_output)
-            raw_function_calls = []
+            # Per-call repair flags so the env-side rubric can apply a
+            # partial-credit discount to tool calls that ONLY succeeded
+            # because the JSON escape fixer rescued them. The flag is
+            # tucked into the serialized `arguments` JSON under the
+            # sentinel key `__prime_rl_repaired_json__` so it survives
+            # the vLLM → verifiers → env round trip without any
+            # cross-process plumbing. The env's `update_tool_args` hook
+            # detects + strips the sentinel before the args reach the
+            # actual tool handler, so the model's command never sees it.
+            raw_function_calls: list[tuple[dict, bool]] = []
             for match in function_call_tuples:
                 body = match[0] if match[0] else match[1]
+                repaired = False
                 try:
                     parsed = json.loads(body)
                 except json.JSONDecodeError as exc:
@@ -1185,18 +1195,28 @@ def monkey_patch_hermes_tool_parser_tolerant_json():
                         raise
                     fixed = _fix_invalid_json_escapes(body)
                     parsed = json.loads(fixed)  # may raise again; caught below
-                raw_function_calls.append(parsed)
+                    repaired = True
+                raw_function_calls.append((parsed, repaired))
 
-            tool_calls = [
-                ToolCall(
-                    type="function",
-                    function=FunctionCall(
-                        name=fc["name"],
-                        arguments=json.dumps(fc["arguments"], ensure_ascii=False),
-                    ),
+            tool_calls = []
+            for fc, repaired in raw_function_calls:
+                args_obj = fc["arguments"]
+                # Inject sentinel ONLY when we actually rescued. We mutate
+                # a shallow copy so other code holding `parsed` doesn't see
+                # the marker leak. The sentinel is namespaced under a
+                # double-underscore prefix so it can't collide with a
+                # real shell command argument the model might emit.
+                if repaired and isinstance(args_obj, dict):
+                    args_obj = {**args_obj, "__prime_rl_repaired_json__": True}
+                tool_calls.append(
+                    ToolCall(
+                        type="function",
+                        function=FunctionCall(
+                            name=fc["name"],
+                            arguments=json.dumps(args_obj, ensure_ascii=False),
+                        ),
+                    )
                 )
-                for fc in raw_function_calls
-            ]
             content = model_output[: model_output.find(self.tool_call_start_token)]
             return ExtractedToolCallInformation(
                 tools_called=True,

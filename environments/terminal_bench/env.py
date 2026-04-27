@@ -1312,8 +1312,24 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         state: vf.State,
         **kwargs,
     ) -> dict[str, Any]:
-        """Inject the rollout's container id into every ``shell`` call."""
+        """Inject the rollout's container id into every ``shell`` call.
+
+        Also detects + strips the ``__prime_rl_repaired_json__`` sentinel
+        injected by the inference-side tolerant-JSON Hermes patch (see
+        ``prime_rl.inference.patches.monkey_patch_hermes_tool_parser_tolerant_json``).
+        When the sentinel is present, the rollout's tool call ONLY parsed
+        because the patch fixed an invalid ``\\X`` escape inside the
+        JSON body — the model emitted dirty JSON. We mark the rollout
+        so ``_harbor_reward`` can apply a partial-credit discount when
+        the dirty rollout still happens to score reward > 0. Stripping
+        the sentinel before the args reach ``shell()`` keeps the model's
+        actual command unchanged.
+        """
         updated = dict(tool_args)
+        if updated.pop("__prime_rl_repaired_json__", False):
+            state["tb_repaired_tool_call_count"] = (
+                state.get("tb_repaired_tool_call_count", 0) + 1
+            )
         if tool_name == "shell":
             updated["_container_id"] = state.get("tb_container_id")
         return updated
@@ -1552,7 +1568,22 @@ async def _harbor_reward(state: vf.State, **kwargs) -> float:
                 f"terminal_bench_local: {key} (rollout error, NOT a real zero "
                 f"reward): {setup_error}"
             )
-    return float(state.get("tb_reward") or 0.0)
+    reward = float(state.get("tb_reward") or 0.0)
+    # Partial-credit discount: if the rollout would have scored reward > 0
+    # only because the inference-side tolerant-JSON patch rescued at least
+    # one tool call (model emitted a `\.` `\+` etc. inside a JSON string,
+    # which RFC 8259 rejects), halve the reward. Wrong answer → 0 either
+    # way; correct answer with dirty JSON → 50%; correct answer with clean
+    # JSON → 100%. This pushes the policy gradient toward the model
+    # learning to emit valid JSON escapes natively rather than relying on
+    # the rescue path. The signal is plumbed via a per-call sentinel that
+    # the inference patch injects into the parsed `arguments` and the env's
+    # `update_tool_args` strips + counts (see those two sites). We discount
+    # on _any_ rescue, not _all_ tool calls being rescued — even one dirty
+    # call indicates the model didn't get JSON escaping right.
+    if reward > 0 and state.get("tb_repaired_tool_call_count", 0) > 0:
+        reward *= 0.5
+    return reward
 
 
 # ---------------------------------------------------------------------------
