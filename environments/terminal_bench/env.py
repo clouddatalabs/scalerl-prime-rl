@@ -462,10 +462,13 @@ class _DockerClient:
             "ps", "-aq",  # also pick up exited containers for the sweep
             "--filter", f"label={key}={value}",
         ]
+        # 16 MB buffer — see ps_leaked_by_label below for the
+        # 64 KB-truncation bug this defends against.
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            limit=16 * 1024 * 1024,
         )
         stdout_b, _ = await proc.communicate()
         if proc.returncode != 0:
@@ -502,10 +505,18 @@ class _DockerClient:
             "--filter", f"label={key}={value}",
             "--format", '{{.ID}}|{{.Label "prime_rl_tb_run_id"}}|{{.CreatedAt}}',
         ]
+        # 16 MB limit on the StreamReader buffer. Default is 64 KB, which
+        # silently TRUNCATES `docker ps` output when there are >800
+        # leaked containers (each line ~80 chars). Observed empirically:
+        # with 1105 leaks on the node, our sweep parsed only the first
+        # ~100 entries before the buffer cut off, leaking ~1000 stale
+        # containers per restart. The 16 MB ceiling here covers
+        # practically any leak count without inflating memory.
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            limit=16 * 1024 * 1024,
         )
         stdout_b, _ = await proc.communicate()
         if proc.returncode != 0:
