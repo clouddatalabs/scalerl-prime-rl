@@ -18,7 +18,12 @@
 # `load_environment` rejects unknown kwargs).
 
 max_steps = 1000000  # effectively unbounded — train until manually stopped or cluster preemption
-seq_len = 8192
+# ScaleRL §A.3: 16,384 = 12,288 thinking + 2,048 solution + 2,048 prompt budget.
+# Was 8192 (TB-shaped short-prompt compromise). Restoring paper value so the
+# recipe's clipping semantics (CISPO ratio truncation behaves badly near
+# overflow on truncated traces) match. Memory-fit on 8×B200 with
+# activation_ckpt freq=6, fp32 LM-head, optim_dtype=bf16.
+seq_len = 16384
 max_async_level = 8
 output_dir = "outputs/scalerl_terminal_bench_multinode"
 
@@ -107,7 +112,11 @@ eps = 1e-15
 # (490-499) ramp from 5e-7 to ~5e-15. Bounded but a real recipe drift
 # the single-node config explicitly avoids.
 type = "linear"
-warmup_steps = 10
+# ScaleRL §A.3: 100-step linear warmup into the constant 5e-7 phase.
+# Was 10 (smoke-run compromise). Restoring paper value for indefinite-run
+# correctness. decay_steps=0 keeps warmup→constant profile (LinearLR caps
+# at end_factor once total_iters is reached).
+warmup_steps = 100
 decay_steps = 0
 
 [trainer.loss]
@@ -157,7 +166,13 @@ rollouts_per_example = 16
 # verifiers would re-stamp `extra_env_kwargs["max_seq_len"]` at the
 # stale 8192 — silent rollout truncation.
 prompt_average_loss = true
-max_off_policy_steps = 4
+# ScaleRL §3.1 PipelineRL: k=8 off-policyness. The paper exposes ONE knob
+# (k = trainer's lookahead bound = max_async_level). prime-rl splits this
+# into max_async_level (orch's pipeline depth) AND max_off_policy_steps
+# (per-rollout staleness cap). Setting both to 8 matches the paper's
+# single-knob semantics. Was 4 — capped staleness below pipeline depth,
+# which the paper does not do.
+max_off_policy_steps = 8
 # Keep at most 200 most-recent step JSONLs on disk. At ~5-50 MB/step for
 # multi-turn TB rollouts (full shell I/O × turns × 768 rollouts), an
 # indefinite run accumulates terabytes and millions of inodes within
@@ -172,8 +187,23 @@ rollout_keep_last = 200
 # the single-node config's `rl.toml` line 53.
 use_token_client = false
 
+[orchestrator.experimental]
+# ScaleRL §3.4 / §3.6: when the entire batch zero-variance-filters out,
+# the paper's recipe drops the prompts (no DAPO-style dynamic-resampling
+# refill). prime-rl's default behavior is to retry up to 20 attempts —
+# faster wall-time but a quiet recipe drift. true = one attempt, then
+# crash if all-empty (operator surfaces it via `control/evicted.txt`
+# and adjusts the prompt pool / model size). Aligns with the paper's
+# §3.2 Px5 "merely drop the prompts" stance.
+paper_faithful_empty_batch = true
+
 [orchestrator.train.sampling]
-max_completion_tokens = 6144
+# ScaleRL §A.3 RL generation budget: 14,000 tokens (12,288 thinking +
+# 2,048 solution). Was 6144 — TB-domain compromise that triggered the
+# "Unterminated string" malformed-JSON failure mode at ~55% of all
+# inference errors when the model ran out of completion budget mid-tool-call.
+# 14000 fits under seq_len=16384 with the ~2k prompt header.
+max_completion_tokens = 14000
 
 [orchestrator.advantage]
 type = "default"
@@ -182,7 +212,12 @@ normalization = "batch"
 [orchestrator.buffer]
 no_positive_resampling = true
 no_positive_resampling_threshold = 0.9
-no_positive_resampling_min_groups = 4
+# ScaleRL §3.6 / §4 Eq.: paper specifies "permanently removing any prompt
+# with pass rate ≥ 0.9". Silent on min-confirming-rollouts (i.e. how many
+# group visits before evicting). prime-rl default is 1 — evict on first
+# observation. Was 4 (extension defending against false-positive eviction
+# on a small 18-prompt pool). Restoring paper-faithful default.
+no_positive_resampling_min_groups = 1
 
 # 18 train task fixtures committed under environments/terminal_bench/tasks/.
 # train/eval separation is by explicit `tasks=[...]` lists — the env has
@@ -212,7 +247,9 @@ args = { tasks = [
 ], task_root = "environments/terminal_bench/tasks", registry_host = "rlgpu0:5000" }
 
 [orchestrator.eval]
-interval = 50
+# ScaleRL §A.5: evaluation step performed at 100-step intervals.
+# Was 50 (more telemetry, more compute spent on eval).
+interval = 100
 eval_base_model = false
 
 [orchestrator.eval.sampling]
