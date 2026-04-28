@@ -26,17 +26,20 @@ output_dir = "outputs/scalerl_terminal_bench_multinode"
 type = "multi_node"
 # Train + infer node split. Total nodes = train + infer. The trainer holds
 # `num_train_nodes * gpus_per_node` GPUs; vLLM holds the inference half.
-num_train_nodes = 4
-num_infer_nodes = 4
+# 1+1 split (one train node, one inference node) — the smallest
+# multi-node topology. Suitable when the cluster is shared and only
+# 2 nodes are reserved for this run. Bump both as compute allows.
+num_train_nodes = 1
+num_infer_nodes = 1
 gpus_per_node = 8
 
 [slurm]
 job_name = "scalerl-tb-multinode"
-partition = "your-gpu-partition"   # required — your cluster's GPU partition
-# account = "your-slurm-account"  # uncomment + set if your cluster requires it
-time = "24:00:00"                  # adjust to your QoS cap
-# nodelist = "node-001,node-002"  # uncomment to pin specific nodes
-# exclude  = "node-099"           # uncomment to exclude flaky nodes
+partition = "gpu"
+time = "72:00:00"
+# Pinned to two specific hosts on a shared cluster. Drop or widen
+# this line if you have the cluster to yourself.
+nodelist = "ip-10-40-190-65,ip-10-40-159-134"
 # `pre_run_command` runs on the head node after env setup. The TB env
 # loader (`vf.load_environment("environments.terminal_bench")`) imports
 # from the repo tree at runtime, so PYTHONPATH must include $PROJECT_DIR.
