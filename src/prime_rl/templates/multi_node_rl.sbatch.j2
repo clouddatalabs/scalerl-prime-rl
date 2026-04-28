@@ -336,7 +336,8 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
         # crashloop chain on the same orphan).
         (
             ROUTER_PID=""
-            trap 'echo "[router-watchdog $(date -Iseconds)] received term signal; killing router pid=$ROUTER_PID" >> $ROUTER_LOG; [ -n "$ROUTER_PID" ] && kill -TERM "$ROUTER_PID" 2>/dev/null; sleep 2; [ -n "$ROUTER_PID" ] && kill -KILL "$ROUTER_PID" 2>/dev/null; exit 0' TERM INT
+            _on_term() { [ -n "$ROUTER_PID" ] && kill -TERM "$ROUTER_PID" 2>/dev/null; sleep 2; [ -n "$ROUTER_PID" ] && kill -KILL "$ROUTER_PID" 2>/dev/null; exit 0; }
+            trap _on_term TERM INT
             while true; do
                 echo "[router-watchdog $(date -Iseconds)] launching vllm-router (PD)" >> $ROUTER_LOG
                 vllm-router \
@@ -381,7 +382,8 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
         # rationale (orphan vllm-router holding :8000 across scancel).
         (
             ROUTER_PID=""
-            trap 'echo "[router-watchdog $(date -Iseconds)] received term signal; killing router pid=$ROUTER_PID" >> $ROUTER_LOG; [ -n "$ROUTER_PID" ] && kill -TERM "$ROUTER_PID" 2>/dev/null; sleep 2; [ -n "$ROUTER_PID" ] && kill -KILL "$ROUTER_PID" 2>/dev/null; exit 0' TERM INT
+            _on_term() { [ -n "$ROUTER_PID" ] && kill -TERM "$ROUTER_PID" 2>/dev/null; sleep 2; [ -n "$ROUTER_PID" ] && kill -KILL "$ROUTER_PID" 2>/dev/null; exit 0; }
+            trap _on_term TERM INT
             while true; do
                 echo "[router-watchdog $(date -Iseconds)] launching vllm-router" >> $ROUTER_LOG
                 vllm-router \
