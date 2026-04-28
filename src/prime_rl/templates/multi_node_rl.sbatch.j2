@@ -339,6 +339,7 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
                 --port $ROUTER_PORT \
                 --intra-node-data-parallel-size {{ dp_per_node }} \
                 --worker-startup-timeout-secs 4200 \
+                --prometheus-port 29050 \
                 >> $ROUTER_LOG 2>&1
             echo "[router-watchdog $(date -Iseconds)] vllm-router exited (rc=$?); respawn in 5s" >> $ROUTER_LOG
             sleep 5
@@ -373,6 +374,7 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
                 --port $ROUTER_PORT \
                 --intra-node-data-parallel-size {{ dp_per_node }} \
                 --worker-startup-timeout-secs 4200 \
+                --prometheus-port 29050 \
                 >> $ROUTER_LOG 2>&1
             echo "[router-watchdog $(date -Iseconds)] vllm-router exited (rc=$?); respawn in 5s" >> $ROUTER_LOG
             sleep 5
