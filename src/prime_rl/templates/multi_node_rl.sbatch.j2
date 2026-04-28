@@ -329,21 +329,33 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
 
         REPLICA_ROUTER_ARGS=$(echo "$ALL_ROUTER_ARGS" | cut -d"|" -f$((REPLICA_IDX + 1)))
 
-        (while true; do
-            echo "[router-watchdog $(date -Iseconds)] launching vllm-router (PD)" >> $ROUTER_LOG
-            vllm-router \
-                --policy consistent_hash \
-                --vllm-pd-disaggregation \
-                $REPLICA_ROUTER_ARGS \
-                --host 0.0.0.0 \
-                --port $ROUTER_PORT \
-                --intra-node-data-parallel-size {{ dp_per_node }} \
-                --worker-startup-timeout-secs 4200 \
-                --prometheus-port 29050 \
-                >> $ROUTER_LOG 2>&1
-            echo "[router-watchdog $(date -Iseconds)] vllm-router exited (rc=$?); respawn in 5s" >> $ROUTER_LOG
-            sleep 5
-        done) &
+        # SIGTERM-propagating watchdog: forward SIGTERM/SIGINT (sent by
+        # SLURM on `scancel`) to the in-flight router child so the whole
+        # tree exits cleanly. Without the trap, the watchdog stayed alive
+        # past `scancel` and held :8000 forever (job 823→826→828
+        # crashloop chain on the same orphan).
+        (
+            ROUTER_PID=""
+            trap 'echo "[router-watchdog $(date -Iseconds)] received term signal; killing router pid=$ROUTER_PID" >> $ROUTER_LOG; [ -n "$ROUTER_PID" ] && kill -TERM "$ROUTER_PID" 2>/dev/null; sleep 2; [ -n "$ROUTER_PID" ] && kill -KILL "$ROUTER_PID" 2>/dev/null; exit 0' TERM INT
+            while true; do
+                echo "[router-watchdog $(date -Iseconds)] launching vllm-router (PD)" >> $ROUTER_LOG
+                vllm-router \
+                    --policy consistent_hash \
+                    --vllm-pd-disaggregation \
+                    $REPLICA_ROUTER_ARGS \
+                    --host 0.0.0.0 \
+                    --port $ROUTER_PORT \
+                    --intra-node-data-parallel-size {{ dp_per_node }} \
+                    --worker-startup-timeout-secs 4200 \
+                    --prometheus-port 29050 \
+                    >> $ROUTER_LOG 2>&1 &
+                ROUTER_PID=$!
+                wait $ROUTER_PID
+                echo "[router-watchdog $(date -Iseconds)] vllm-router exited (rc=$?); respawn in 5s" >> $ROUTER_LOG
+                ROUTER_PID=""
+                sleep 5
+            done
+        ) &
     fi
 
     uv run inference \
@@ -365,20 +377,29 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
 
         REPLICA_ROUTER_ARGS=$(echo "$ALL_ROUTER_ARGS" | cut -d"|" -f$((REPLICA_IDX + 1)))
 
-        (while true; do
-            echo "[router-watchdog $(date -Iseconds)] launching vllm-router" >> $ROUTER_LOG
-            vllm-router \
-                --policy consistent_hash \
-                --worker-urls $REPLICA_ROUTER_ARGS \
-                --host 0.0.0.0 \
-                --port $ROUTER_PORT \
-                --intra-node-data-parallel-size {{ dp_per_node }} \
-                --worker-startup-timeout-secs 4200 \
-                --prometheus-port 29050 \
-                >> $ROUTER_LOG 2>&1
-            echo "[router-watchdog $(date -Iseconds)] vllm-router exited (rc=$?); respawn in 5s" >> $ROUTER_LOG
-            sleep 5
-        done) &
+        # SIGTERM-propagating watchdog — see PD-mode block above for
+        # rationale (orphan vllm-router holding :8000 across scancel).
+        (
+            ROUTER_PID=""
+            trap 'echo "[router-watchdog $(date -Iseconds)] received term signal; killing router pid=$ROUTER_PID" >> $ROUTER_LOG; [ -n "$ROUTER_PID" ] && kill -TERM "$ROUTER_PID" 2>/dev/null; sleep 2; [ -n "$ROUTER_PID" ] && kill -KILL "$ROUTER_PID" 2>/dev/null; exit 0' TERM INT
+            while true; do
+                echo "[router-watchdog $(date -Iseconds)] launching vllm-router" >> $ROUTER_LOG
+                vllm-router \
+                    --policy consistent_hash \
+                    --worker-urls $REPLICA_ROUTER_ARGS \
+                    --host 0.0.0.0 \
+                    --port $ROUTER_PORT \
+                    --intra-node-data-parallel-size {{ dp_per_node }} \
+                    --worker-startup-timeout-secs 4200 \
+                    --prometheus-port 29050 \
+                    >> $ROUTER_LOG 2>&1 &
+                ROUTER_PID=$!
+                wait $ROUTER_PID
+                echo "[router-watchdog $(date -Iseconds)] vllm-router exited (rc=$?); respawn in 5s" >> $ROUTER_LOG
+                ROUTER_PID=""
+                sleep 5
+            done
+        ) &
     fi
 
     if [ "$USE_DISTRIBUTED_EP" -eq 1 ]; then
