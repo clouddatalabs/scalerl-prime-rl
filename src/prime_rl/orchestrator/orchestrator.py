@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import os
+import shutil
 import time
 
 import tomli_w
@@ -568,6 +569,35 @@ async def orchestrate(config: OrchestratorConfig):
         await asyncio.to_thread(
             save_rollouts, train_rollouts, step_path / "train_rollouts.jsonl", exclude_keys={"trajectory"}
         )
+
+        # Rotation: prune old `rollouts/step_N/` dirs if `rollout_keep_last`
+        # is set. Without this, indefinite runs (max_steps >> 1k, e.g. our
+        # 1M-step TB POC) fill the NFS share with millions of multi-turn
+        # trajectory JSONLs and break `ls`/`find` on the parent dir.
+        # Mirror checkpoint rotation semantics: keep the N most-recent step
+        # dirs, drop everything older. Skip if not configured (preserves
+        # upstream no-rotation behavior).
+        keep = getattr(config, "rollout_keep_last", None)
+        if keep is not None and progress.step >= keep:
+            rollout_root = get_rollout_dir(config.output_dir)
+            cutoff = progress.step - keep
+            try:
+                for entry in rollout_root.iterdir():
+                    name = entry.name
+                    if not name.startswith("step_") or not entry.is_dir():
+                        continue
+                    try:
+                        entry_step = int(name[len("step_") :])
+                    except ValueError:
+                        continue
+                    if entry_step < cutoff:
+                        # Background thread to avoid blocking the orchestrator
+                        # loop on potentially-slow NFS unlinks.
+                        await asyncio.to_thread(shutil.rmtree, entry, True)
+            except (OSError, FileNotFoundError):
+                # rollout_root removed under us — orchestrator will recreate
+                # it on next step.
+                pass
 
         # VLM: offload base64 images to disk immediately to free memory
         if is_vlm:

@@ -1090,6 +1090,26 @@ class OrchestratorConfig(BaseConfig):
     # Whether to collect inference server metrics (requires wandb)
     collect_inference_metrics: bool = True
 
+    rollout_keep_last: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Keep at most this many recent step rollout JSONL directories on "
+                "disk (`rollouts/step_N/`). `None` (default) preserves the upstream "
+                "no-rotation behavior — fine for short runs but lethal for "
+                "indefinite (`max_steps` >> 1k) RL where each step writes "
+                "tens of MB of trajectories AND inflates an unbounded number "
+                "of small-file inodes under one parent dir. With agentic "
+                "envs (multi-turn shell I/O), 1M-step runs accumulate "
+                "millions of files; `find rollouts/` becomes O(disk). "
+                "Set to a value ~10x checkpoint `keep_interval` if you "
+                "want to keep enough trajectory history for post-mortem "
+                "without pinning the disk."
+            ),
+        ),
+    ] = None
+
     # The checkpoint configuration
     ckpt: CheckpointConfig | None = None
 

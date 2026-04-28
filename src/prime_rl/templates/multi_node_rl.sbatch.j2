@@ -66,6 +66,33 @@ ln -sfn inference/node_0.log $OUTPUT_DIR/logs/inference.log
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1
+# B200 NCCL/comm-overlap fast-path is flaky for prime-rl's weight-broadcast
+# pattern when this is unset (>1). Single-node smoke pins it; the multinode
+# path needs the same pin or random hangs surface mid-run on the first
+# cross-node weight broadcast. See scripts/scalerl_smoke.sbatch:136.
+export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
+
+# EFA + NCCL setup. Without these, NCCL drops to TCP-over-eth0 and the
+# trainer↔inference weight broadcast (16 GB checkpoint over `inference_world_size`
+# ranks every step) goes from <5 s to minutes — fast enough to look like a
+# hang and trigger TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC. Mirrors the single-node
+# smoke (scripts/scalerl_smoke.sbatch:119-132). Honor operator-set values
+# from `.env` or the parent shell. Set SCALERL_NO_EFA=1 to opt out on
+# clusters without EFA.
+HAS_EFA=0
+if [ "${SCALERL_NO_EFA:-0}" != "1" ] && {
+    [ -d /sys/class/infiniband ] && ls /sys/class/infiniband/ 2>/dev/null | grep -q efa
+} ; then
+    HAS_EFA=1
+fi
+if [ "$HAS_EFA" = "1" ]; then
+    export FI_PROVIDER="${FI_PROVIDER:-efa}"
+    export FI_EFA_USE_DEVICE_RDMA="${FI_EFA_USE_DEVICE_RDMA:-1}"
+    export FI_EFA_USE_HUGE_PAGE="${FI_EFA_USE_HUGE_PAGE:-0}"
+fi
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-^lo,docker}"
+export NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-PHB}"
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-1800}"
 
 {% if wandb_shared -%}
 export WANDB_SHARED_MODE=1
@@ -289,22 +316,33 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
         fi
     fi
 
-    # Start vllm-router on the first node of each replica (PD mode)
+    # Start vllm-router on the first node of each replica (PD mode).
+    # Wrap in a respawn loop: if the router crashes (panics, OOMs, port
+    # collision after a vLLM worker restart), the orchestrator hits 502s on
+    # `:8000` and silently degrades to `tools_called=False` for every rollout
+    # until the run dies on `Inference server was not reached`. Auto-restart
+    # within 5 s so the failure window is bounded; a real "router can't bind"
+    # condition will keep failing and the operator sees the loop in router log.
     if [ "$RANK_IN_REPLICA" -eq 0 ]; then
         ROUTER_LOG="$OUTPUT_DIR/logs/inference/router_${REPLICA_IDX}.log"
         echo "Starting vllm-router (PD) on $LOCAL_IP:$ROUTER_PORT for replica $REPLICA_IDX" | tee $ROUTER_LOG
 
         REPLICA_ROUTER_ARGS=$(echo "$ALL_ROUTER_ARGS" | cut -d"|" -f$((REPLICA_IDX + 1)))
 
-        vllm-router \
-            --policy consistent_hash \
-            --vllm-pd-disaggregation \
-            $REPLICA_ROUTER_ARGS \
-            --host 0.0.0.0 \
-            --port $ROUTER_PORT \
-            --intra-node-data-parallel-size {{ dp_per_node }} \
-            --worker-startup-timeout-secs 4200 \
-            >> $ROUTER_LOG 2>&1 &
+        (while true; do
+            echo "[router-watchdog $(date -Iseconds)] launching vllm-router (PD)" >> $ROUTER_LOG
+            vllm-router \
+                --policy consistent_hash \
+                --vllm-pd-disaggregation \
+                $REPLICA_ROUTER_ARGS \
+                --host 0.0.0.0 \
+                --port $ROUTER_PORT \
+                --intra-node-data-parallel-size {{ dp_per_node }} \
+                --worker-startup-timeout-secs 4200 \
+                >> $ROUTER_LOG 2>&1
+            echo "[router-watchdog $(date -Iseconds)] vllm-router exited (rc=$?); respawn in 5s" >> $ROUTER_LOG
+            sleep 5
+        done) &
     fi
 
     uv run inference \
@@ -316,21 +354,29 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
         --vllm-extra "$VLLM_EXTRA" \
         2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log
 {%- else -%}
-    # Start vllm-router on the first node of each replica
+    # Start vllm-router on the first node of each replica. Wrapped in a
+    # respawn loop — see the PD-mode block above for rationale. Without the
+    # watchdog, a router crash silently 502s every chat completion call and
+    # the orchestrator drops every rollout to tools_called=False.
     if [ "$RANK_IN_REPLICA" -eq 0 ]; then
         ROUTER_LOG="$OUTPUT_DIR/logs/inference/router_${REPLICA_IDX}.log"
         echo "Starting vllm-router on $LOCAL_IP:$ROUTER_PORT for replica $REPLICA_IDX" | tee $ROUTER_LOG
 
         REPLICA_ROUTER_ARGS=$(echo "$ALL_ROUTER_ARGS" | cut -d"|" -f$((REPLICA_IDX + 1)))
 
-        vllm-router \
-            --policy consistent_hash \
-            --worker-urls $REPLICA_ROUTER_ARGS \
-            --host 0.0.0.0 \
-            --port $ROUTER_PORT \
-            --intra-node-data-parallel-size {{ dp_per_node }} \
-            --worker-startup-timeout-secs 4200 \
-            >> $ROUTER_LOG 2>&1 &
+        (while true; do
+            echo "[router-watchdog $(date -Iseconds)] launching vllm-router" >> $ROUTER_LOG
+            vllm-router \
+                --policy consistent_hash \
+                --worker-urls $REPLICA_ROUTER_ARGS \
+                --host 0.0.0.0 \
+                --port $ROUTER_PORT \
+                --intra-node-data-parallel-size {{ dp_per_node }} \
+                --worker-startup-timeout-secs 4200 \
+                >> $ROUTER_LOG 2>&1
+            echo "[router-watchdog $(date -Iseconds)] vllm-router exited (rc=$?); respawn in 5s" >> $ROUTER_LOG
+            sleep 5
+        done) &
     fi
 
     if [ "$USE_DISTRIBUTED_EP" -eq 1 ]; then

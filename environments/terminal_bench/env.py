@@ -476,6 +476,33 @@ class _DockerClient:
                 stderr_b.decode(errors="replace").strip()[:200],
             )
 
+    async def ps_exited_by_label(self, key: str, value: str) -> list[str]:
+        """Return Exited (not Running) container IDs with ``--label <key>=<value>``.
+
+        Used by the in-run periodic sweep: containers whose `@vf.cleanup`
+        was bypassed (rollout SIGKILL, env-worker restart) end up in
+        `Exited` state and never get `remove_force`'d. At 768 rollouts/step
+        even a 1% leak rate fills docker0's veth/MAC table within a few
+        hundred steps. We deliberately filter by `status=exited` so we
+        cannot accidentally kill a still-running rollout from this run.
+        """
+        cmd = [
+            *self._prefix(),
+            "ps", "-aq",
+            "--filter", f"label={key}={value}",
+            "--filter", "status=exited",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            limit=16 * 1024 * 1024,
+        )
+        stdout_b, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return []
+        return [cid for cid in stdout_b.decode().split() if cid]
+
     async def ps_by_label(self, key: str, value: str) -> list[str]:
         """Return container IDs with ``--label <key>=<value>``.
 
@@ -895,6 +922,19 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
         self._stale_sweep_done = False
         self._run_id = _compute_run_id()
 
+        # Periodic in-run sweep state. The one-shot startup sweep above only
+        # cleans pre-existing containers; mid-run, if a rollout's
+        # `@vf.cleanup` is bypassed (rollout SIGKILL, env-worker restart,
+        # docker exec mid-flight when the orchestrator gets cancelled),
+        # containers from *this* run pile up Exited and never get
+        # `remove_force`'d. At 768 rollouts/step on one node, even a 1%
+        # leak rate fills docker0's veth/MAC table within a few hundred
+        # steps and the next `docker run` fails with "exchange full"
+        # (same root cause that took down job 705/709 from cross-job
+        # leaks). Sweep periodically to bound the leak window.
+        self._in_run_sweep_lock = asyncio.Lock()
+        self._in_run_sweep_counter = 0
+
         # ``_container_id`` is injected by ``update_tool_args`` on every
         # call; advertising it in the model-visible signature would just
         # tempt the policy into copying hallucinated ids between turns.
@@ -1179,6 +1219,39 @@ class TerminalBenchLocalEnv(vf.StatefulToolEnv):
                                 )
 
                     self._stale_sweep_done = True
+
+        # Periodic in-run sweep: every N rollouts, reap Exited containers
+        # from THIS run that escaped `@vf.cleanup`. Keyed off a per-instance
+        # counter (cheap), gated by an asyncio.Lock so concurrent rollouts
+        # don't all do the same `docker ps` at once. The filter is strict
+        # `status=exited` — no chance of killing a live rollout from this
+        # run. At 768 rollouts/step on one node, the previous one-shot
+        # sweep is insufficient because mid-run leaks (rollout SIGKILL,
+        # docker exec mid-flight cancellation) accumulate within a single
+        # `_stale_sweep_done` worker lifetime and saturate docker0's
+        # veth/MAC table after a few hundred steps.
+        self._in_run_sweep_counter += 1
+        if self._in_run_sweep_counter % 200 == 0:
+            if self._in_run_sweep_lock.locked():
+                # Another rollout is already running the sweep — skip to
+                # avoid piling up serialized `docker ps` calls behind it.
+                pass
+            else:
+                async with self._in_run_sweep_lock:
+                    exited = await self._docker.ps_exited_by_label(
+                        "prime_rl_tb_run_id", self._run_id
+                    )
+                    if exited:
+                        _logger.info(
+                            "terminal_bench_local: in-run sweep reaping %d "
+                            "Exited containers from this run "
+                            "(rollout #%d): %s",
+                            len(exited),
+                            self._in_run_sweep_counter,
+                            exited[:5],
+                        )
+                        for cid in exited:
+                            await self._docker.remove_force(cid)
 
         # Resolve the image *before* we mint a container name -- a build
         # failure shouldn't leak a "tb-*" name into logs that suggests

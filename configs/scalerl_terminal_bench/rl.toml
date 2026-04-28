@@ -54,6 +54,11 @@ use_token_client = false
 strict_async_level = false
 max_off_policy_steps = 4
 prompt_average_loss = true
+# Keep at most 200 most-recent step JSONLs on disk. Multi-turn TB rollouts
+# are 5-50 MB/step; an indefinite run accumulates TB-scale trajectories
+# and millions of inodes within weeks. Drop to None for short runs that
+# need full history. See OrchestratorConfig.rollout_keep_last for details.
+rollout_keep_last = 200
 
 [orchestrator.experimental]
 allow_nccl_async_level_override = true

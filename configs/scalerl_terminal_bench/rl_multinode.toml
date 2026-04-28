@@ -65,7 +65,11 @@ name = "Qwen/Qwen3-8B"
 # `rl.toml` ships these knobs; the multi-node copy must too.
 interval = 100
 keep_last = 3
-keep_interval = 500
+# Bumped 500 -> 2000 for indefinite runs. Each permanent ckpt is ~60 GB
+# (Qwen3-8B bf16 weights + AdamW m+v + HF dir); at 500 with max_steps=1e6
+# that's 100 ckpts × 60 GB ≈ 6 TB on NFS over the lifetime of a run. 2000
+# keeps history for post-mortem without filling the share.
+keep_interval = 2000
 
 [trainer]
 matmul_precision = "highest"
@@ -154,6 +158,13 @@ rollouts_per_example = 16
 # stale 8192 — silent rollout truncation.
 prompt_average_loss = true
 max_off_policy_steps = 4
+# Keep at most 200 most-recent step JSONLs on disk. At ~5-50 MB/step for
+# multi-turn TB rollouts (full shell I/O × turns × 768 rollouts), an
+# indefinite run accumulates terabytes and millions of inodes within
+# weeks. Older trajectories that survive past this window are still
+# recoverable indirectly from the trainer's permanent checkpoints (one
+# per `[ckpt] keep_interval` steps).
+rollout_keep_last = 200
 # REQUIRED for TB: the multi-turn chat template inserts/removes tokens
 # between turns; with use_token_client=true (the default), the orchestrator
 # would silently corrupt train/inference logprob alignment, biasing the
