@@ -166,13 +166,14 @@ rollouts_per_example = 16
 # verifiers would re-stamp `extra_env_kwargs["max_seq_len"]` at the
 # stale 8192 — silent rollout truncation.
 prompt_average_loss = true
-# ScaleRL §3.1 PipelineRL: k=8 off-policyness. The paper exposes ONE knob
-# (k = trainer's lookahead bound = max_async_level). prime-rl splits this
-# into max_async_level (orch's pipeline depth) AND max_off_policy_steps
-# (per-rollout staleness cap). Setting both to 8 matches the paper's
-# single-knob semantics. Was 4 — capped staleness below pipeline depth,
-# which the paper does not do.
-max_off_policy_steps = 8
+# ScaleRL §3.1 PipelineRL never CANCELS in-flight stale rollouts; it just
+# bounds the trainer's lookahead via k = max_async_level = 8 above. The
+# prime-rl `max_off_policy_steps` knob is a separate engineering safety
+# valve (cancel any rollout staler than N steps). Setting it to ~1e9
+# (effectively never-cancel) matches the paper's drop-don't-cancel
+# semantics. Lower values silently truncate slow rollouts and bias the
+# distribution toward fast / failing trajectories.
+max_off_policy_steps = 1_000_000_000
 # Keep at most 200 most-recent step JSONLs on disk. At ~5-50 MB/step for
 # multi-turn TB rollouts (full shell I/O × turns × 768 rollouts), an
 # indefinite run accumulates terabytes and millions of inodes within
@@ -186,16 +187,6 @@ rollout_keep_last = 200
 # CISPO IS-ratio. Always set false on TB-shaped multi-turn envs. Mirrors
 # the single-node config's `rl.toml` line 53.
 use_token_client = false
-
-[orchestrator.experimental]
-# ScaleRL §3.4 / §3.6: when the entire batch zero-variance-filters out,
-# the paper's recipe drops the prompts (no DAPO-style dynamic-resampling
-# refill). prime-rl's default behavior is to retry up to 20 attempts —
-# faster wall-time but a quiet recipe drift. true = one attempt, then
-# crash if all-empty (operator surfaces it via `control/evicted.txt`
-# and adjusts the prompt pool / model size). Aligns with the paper's
-# §3.2 Px5 "merely drop the prompts" stance.
-paper_faithful_empty_batch = true
 
 [orchestrator.train.sampling]
 # ScaleRL §A.3 RL generation budget: 14,000 tokens (12,288 thinking +

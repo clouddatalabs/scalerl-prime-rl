@@ -101,22 +101,14 @@ from prime_rl.utils.utils import (
 # and artifacts are persisted *before* this point, so a forced exit is safe.
 SHUTDOWN_TIMEOUT_S = 300
 
-# Maximum number of times to attempt generating a training batch when all
-# rollouts are filtered out. After this many attempts, the orchestrator crashes
-# rather than silently skipping training steps.
+# Maximum number of times to attempt generating a training batch when the
+# post-filter trainable cohort is below `batch_size`. Each attempt keeps the
+# rollouts already produced and adds another full sampling round on top, so
+# the cohort grows monotonically until it reaches batch_size or this cap
+# triggers a soft-fail (train on whatever survived) / hard-fail (truly
+# empty). Always train on full batches: if some groups are dropped from
+# low variance, sample more groups until we have signal.
 MAX_EMPTY_BATCH_ATTEMPTS = 20
-
-
-def _resolve_max_empty_batch_attempts(paper_faithful_empty_batch: bool) -> int:
-    """Resolve the empty-batch retry budget from the experimental flag.
-
-    ScaleRL §3.4 zero-variance filtering is *drop-don't-refill*; that's the
-    paper-faithful path (single attempt). The default keeps an engineering
-    retry budget (MAX_EMPTY_BATCH_ATTEMPTS) so a transiently-bad batch
-    doesn't crash the run. Extracted so unit tests can pin the table without
-    booting the orchestrator.
-    """
-    return 1 if paper_faithful_empty_batch else MAX_EMPTY_BATCH_ATTEMPTS
 
 
 @clean_exit
@@ -458,33 +450,21 @@ async def orchestrate(config: OrchestratorConfig):
 
         # Schedule generating the training batch.
         #
-        # Default mode (`paper_faithful_empty_batch=False`): keep sampling
-        # ADDITIONAL groups and accumulating until the surviving (post-filter,
-        # post-batch-normalization) cohort is at least `batch_size`. This is
-        # DAPO-style dynamic resampling — the user's stance is "always train
-        # on full batches; if some groups are dropped from low variance, we
-        # should sample more groups until we have signal." `compute_advantages`
-        # is idempotent (recomputes from `reward`), `apply_filters` resets
-        # `is_filtered`/`filters` first, and `apply_batch_advantage_normalization`'s
-        # scaling is keyed off compute_advantages's fresh output — so re-
-        # running them on the cumulative list each iteration is correct.
-        #
-        # Paper-faithful mode (`paper_faithful_empty_batch=True`): one attempt,
-        # no refill — ScaleRL §3.4 specifies zero-variance filtering as
-        # "drop, don't refill" (vs DAPO). All-empty surfaces as a real failure.
+        # Always train on full batches: keep sampling ADDITIONAL groups and
+        # accumulating until the surviving (post-filter, post-batch-
+        # normalization) cohort is at least `batch_size`. If some groups
+        # are dropped from low variance, sample more groups until we have
+        # signal. `compute_advantages` is idempotent (recomputes from
+        # `reward`), `apply_filters` resets `is_filtered`/`filters` first,
+        # and `apply_batch_advantage_normalization`'s scaling is keyed off
+        # compute_advantages's fresh output — so re-running them on the
+        # cumulative list each iteration is correct.
         #
         # Soft-fail on max_attempts exhausted: train on whatever survived
         # (n_trainable > 0). Only the truly-empty case (n_trainable == 0)
-        # is fatal. The user explicitly preferred forward progress over
-        # crashing on slow-start dynamics.
-        max_attempts = _resolve_max_empty_batch_attempts(
-            config.experimental.paper_faithful_empty_batch
-        )
-        target_n_trainable = (
-            1
-            if config.experimental.paper_faithful_empty_batch
-            else config.batch_size
-        )
+        # is fatal — forward progress over crashing on slow-start dynamics.
+        max_attempts = MAX_EMPTY_BATCH_ATTEMPTS
+        target_n_trainable = config.batch_size
         generate_completions_time = 0.0
         train_rollouts: list[vf.RolloutOutput] = []
         num_rollouts = 0
@@ -536,16 +516,10 @@ async def orchestrate(config: OrchestratorConfig):
                     f"Attempt {attempt + 1}/{max_attempts} at step {progress.step} "
                     f"filtered out ALL {num_rollouts} rollouts - crashing orchestrator"
                 )
-                if config.experimental.paper_faithful_empty_batch:
-                    reason = (
-                        f"All {num_rollouts} rollouts were filtered out at step "
-                        f"{progress.step} (paper_faithful_empty_batch=True; no retry)"
-                    )
-                else:
-                    reason = (
-                        f"All {num_rollouts} rollouts were filtered out on "
-                        f"{max_attempts} consecutive attempts at step {progress.step}"
-                    )
+                reason = (
+                    f"All {num_rollouts} rollouts were filtered out on "
+                    f"{max_attempts} consecutive attempts at step {progress.step}"
+                )
                 evicted_path = config.output_dir / "control" / "evicted.txt"
                 evicted_path.parent.mkdir(parents=True, exist_ok=True)
                 evicted_path.write_text(reason)

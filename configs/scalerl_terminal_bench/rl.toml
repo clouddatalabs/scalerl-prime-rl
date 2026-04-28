@@ -10,7 +10,8 @@
 #   - Each task's base image is pullable (first rollout of a task triggers the pull).
 
 max_steps = 1000000  # effectively unbounded — train until manually stopped or cluster preemption
-seq_len = 8192
+# ScaleRL §A.3: 16,384 = 12,288 thinking + 2,048 solution + 2,048 prompt budget.
+seq_len = 16384
 max_async_level = 8
 # Per-run output directory. Override via `--output-dir <path>` so multiple
 # concurrent submissions don't collide on `outputs/`.
@@ -52,7 +53,10 @@ rollouts_per_example = 16
 # string-client path. (See OrchestratorConfig.use_token_client docstring.)
 use_token_client = false
 strict_async_level = false
-max_off_policy_steps = 4
+# ScaleRL §3.1 PipelineRL: never cancel stale rollouts — k=max_async_level=8
+# bounds trainer lookahead, not in-flight rollout cancellation. 1e9 ≈ never-
+# cancel matches the paper's drop-don't-cancel semantics.
+max_off_policy_steps = 1_000_000_000
 prompt_average_loss = true
 # Keep at most 200 most-recent step JSONLs on disk. Multi-turn TB rollouts
 # are 5-50 MB/step; an indefinite run accumulates TB-scale trajectories
@@ -69,14 +73,10 @@ allow_nccl_async_level_override = true
 base_url = ["http://localhost:8050/v1"]
 
 [orchestrator.train.sampling]
-# ScaleRL §A.3 pins the math run at 14k generation budget (12k thinking + 2k
-# solution) with seq_len=16384. Terminal-Bench tasks are typically much
-# shorter than chain-of-thought math (single shell session, instruction +
-# tool output), so 6144 is a deliberate choice that fits the env not a
-# smoke compromise. seq_len=8192 (top of file) covers prompt + completion
-# headroom. Bump both knobs if you switch this config to a math/CoT env.
+# ScaleRL §A.3: 14,000-token RL generation budget (12,288 thinking +
+# 2,048 solution). Fits under seq_len=16,384 with the ~2k prompt header.
 temperature = 1.0
-max_completion_tokens = 6144
+max_completion_tokens = 14000
 
 # 18 training tasks (the rest are held out for eval). The list is illustrative;
 # tune to taste once you have a learnable-subset signal for the model. All
@@ -119,12 +119,13 @@ no_positive_resampling = true
 no_positive_resampling_threshold = 0.9
 # 18 train prompts; require 4 confirming rollout groups before permanent
 # eviction so a single lucky 14/16-correct group on first visit can't take
-# 5.6% of the pool out at once. Default of 1 would preserve prior behavior
-# but is too aggressive for this small a pool.
-no_positive_resampling_min_groups = 4
+# Paper-faithful default = 1 (evict on first observation). The earlier
+# value (4) was a small-pool defense that contradicts §3.6.
+no_positive_resampling_min_groups = 1
 
 [orchestrator.eval]
-interval = 50
+# ScaleRL §A.5: 100-step evaluation interval.
+interval = 100
 # Terminal-Bench eval is 10 docker tasks × rollouts_per_example=16 = 160
 # container runs per pass — tens of minutes wall clock. eval_base_model=true
 # (the upstream default) would force one of those passes at step 0 before
@@ -135,7 +136,7 @@ eval_base_model = false
 [orchestrator.eval.sampling]
 temperature = 0.6
 top_p = 0.95
-max_completion_tokens = 6144
+max_completion_tokens = 14000
 
 # 7 held-out test tasks for eval — must be committed Harbor task dirs.
 # rollouts_per_example=16 matches ScaleRL §2.1 ("16 generations per prompt on
@@ -188,14 +189,11 @@ eps = 1e-15
 weight_decay = 0.01
 
 [trainer.scheduler]
-# ScaleRL §3.1 prescribes a 100-step linear warmup absolute, but that target
-# was set for multi-thousand-step runs. On this 500-step smoke 100/500=20% of
-# training is sub-target lr — too long to see learning land before the run
-# ends. Drop to 10 (2%) which is enough to avoid the optimizer-state spike at
-# step 0 without burning a fifth of the budget. `decay_steps=0` keeps the
-# warmup→constant profile (see scalerl_math/rl.toml for why).
+# ScaleRL §A.3: 100-step linear warmup into the constant 5e-7 phase.
+# `decay_steps=0` keeps warmup→constant (LinearLR caps at end_factor
+# once total_iters is reached).
 type = "linear"
-warmup_steps = 10
+warmup_steps = 100
 decay_steps = 0
 
 [trainer.loss]

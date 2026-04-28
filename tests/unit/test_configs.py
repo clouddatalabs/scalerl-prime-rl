@@ -67,11 +67,12 @@ def _expected_class_for(config_file: Path):
 # test harness must NOT treat that rejection as a regression; instead,
 # it asserts the expected ValidationError fires AND that filling in the
 # placeholders produces a loadable config.
-_TEMPLATE_CONFIGS: dict[Path, dict] = {
-    _REPO_ROOT / "configs/scalerl_terminal_bench/rl_multinode.toml": {
-        "slurm": {"partition": "compute", "account": "myaccount"}
-    },
-}
+#
+# `scalerl_terminal_bench/rl_multinode.toml` was previously a template but
+# is now ground-truth-configured for the resolve-managed cluster (real
+# partition + nodelist). Restore the template entry only when we ship a
+# placeholdered version for external operators.
+_TEMPLATE_CONFIGS: dict[Path, dict] = {}
 
 
 @pytest.mark.parametrize("config_file", get_config_files(), ids=lambda x: x.as_posix())
@@ -261,19 +262,6 @@ def test_nccl_async_level_default_one_still_validates():
         {"weight_broadcast": {"type": "nccl"}, "max_async_level": 1}
     )
     assert config.experimental.allow_nccl_async_level_override is False
-
-
-def test_paper_faithful_empty_batch_defaults_off():
-    """Default keeps the engineering retry/crash guardrail."""
-    config = OrchestratorConfig.model_validate({})
-    assert config.experimental.paper_faithful_empty_batch is False
-
-
-def test_paper_faithful_empty_batch_opt_in():
-    config = OrchestratorConfig.model_validate(
-        {"experimental": {"paper_faithful_empty_batch": True}}
-    )
-    assert config.experimental.paper_faithful_empty_batch is True
 
 
 _RL_BASE = {
