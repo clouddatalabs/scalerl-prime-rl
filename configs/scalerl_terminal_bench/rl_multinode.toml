@@ -119,8 +119,12 @@ allow_nccl_async_level_override = true
 # REQUIRED on the multi-node non-EP non-disagg path: each inference
 # node runs its OWN vLLM instance (the template `multi_node_rl.sbatch.j2`
 # launches one `uv run inference` per node, no cross-node DP coordination).
-# `dp` is the per-instance/per-node value. With tp=1 and 8 GPUs per
-# inference node, dp=8 fills the node. Across 4 inference nodes that's
+# `dp` is the per-instance/per-node value. dp=4 with tp=2 matches the
+# single-node `rl.toml` topology and avoids the 8-process DPCoordinator
+# startup race we hit at dp=8 (vLLM's coordinator times out at 30s if
+# any of the 8 worker procs is slow to import). 4 dp groups across 8
+# inference GPUs is plenty of generation throughput. Across 4 inference
+# nodes that's
 # 32 DP replicas global, each serving prompts independently.
 #
 # Without this block, the schema default `dp=1` leaves 7/8 GPUs idle on
@@ -132,8 +136,8 @@ allow_nccl_async_level_override = true
 # path; this config must set it explicitly. Operators with model variants
 # that need TP>1 (Hopper FA3, MoE expert parallel) should adjust tp/dp
 # accordingly so `tp * dp == gpus_per_node`.
-tp = 1
-dp = 8
+tp = 2
+dp = 4
 
 [inference.model]
 fp32_lm_head = true
